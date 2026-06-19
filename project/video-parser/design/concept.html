@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Video Parser Concept</title>
+    <style>
+      :root {
+        --canvas: #010102;
+        --surface-1: #0f1011;
+        --surface-2: #141516;
+        --surface-3: #18191a;
+        --hairline: #23252a;
+        --primary: #5e6ad2;
+        --ink: #f7f8f8;
+        --muted: #8a8f98;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--canvas);
+        color: var(--ink);
+        font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .board {
+        width: 1440px;
+        height: 1000px;
+        padding: 28px 130px 70px;
+        background: linear-gradient(180deg, rgba(94,106,210,.07), transparent 300px), var(--canvas);
+      }
+      nav {
+        height: 56px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid var(--hairline);
+        color: #d0d6e0;
+        font-size: 14px;
+      }
+      .brand { display: flex; gap: 10px; align-items: center; font-weight: 650; color: white; }
+      .mark { width: 28px; height: 28px; border-radius: 8px; background: var(--primary); }
+      .links { display: flex; gap: 22px; color: var(--muted); }
+      .hero {
+        display: grid;
+        grid-template-columns: 1fr 470px;
+        gap: 28px;
+        padding-top: 76px;
+      }
+      h1 {
+        margin: 0;
+        width: 700px;
+        font-size: 76px;
+        line-height: 1.04;
+        letter-spacing: -4px;
+        font-weight: 620;
+      }
+      .lead {
+        width: 620px;
+        margin-top: 22px;
+        color: #d0d6e0;
+        font-size: 18px;
+        line-height: 1.55;
+      }
+      .form {
+        margin-top: 38px;
+      }
+      .label {
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: .04em;
+        margin-bottom: 10px;
+      }
+      .input {
+        height: 64px;
+        border: 1px solid #34343a;
+        border-radius: 12px;
+        background: var(--surface-1);
+        display: grid;
+        grid-template-columns: 1fr 120px;
+        align-items: center;
+        padding: 8px;
+        color: var(--muted);
+      }
+      .input span { padding-left: 18px; }
+      button {
+        height: 44px;
+        border: 0;
+        border-radius: 8px;
+        background: var(--primary);
+        color: white;
+        font-weight: 600;
+      }
+      .chips { display: flex; gap: 10px; margin-top: 26px; color: var(--muted); font-size: 13px; }
+      .chips span { border: 1px solid var(--hairline); border-radius: 999px; padding: 7px 11px; background: rgba(15,16,17,.72); }
+      .panel {
+        border: 1px solid var(--hairline);
+        border-radius: 16px;
+        background: linear-gradient(180deg, rgba(255,255,255,.025), transparent 90px), var(--surface-1);
+        padding: 22px;
+      }
+      .panel-head { display: flex; justify-content: space-between; align-items: start; }
+      .caption { color: var(--muted); text-transform: uppercase; font-size: 12px; letter-spacing: .04em; }
+      h2 { margin: 8px 0 0; font-size: 22px; letter-spacing: -.5px; }
+      .badge { border: 1px solid var(--hairline); border-radius: 999px; color: #d0d6e0; padding: 6px 10px; font-size: 12px; }
+      .steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 24px; color: var(--muted); font-size: 12px; }
+      .steps div:before { content: ""; display: block; height: 3px; border-radius: 999px; background: var(--primary); margin-bottom: 8px; }
+      .steps div:nth-child(n+4):before { background: var(--surface-3); }
+      .bar { height: 8px; border-radius: 999px; background: var(--surface-3); overflow: hidden; margin-top: 22px; }
+      .bar div { width: 68%; height: 100%; background: var(--primary); }
+      .result { margin-top: 22px; display: grid; grid-template-columns: 96px 1fr; gap: 16px; background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 12px; padding: 14px; }
+      .thumb { width: 96px; height: 60px; border-radius: 9px; background: var(--surface-3); }
+      .title { font-weight: 650; }
+      .meta { margin-top: 14px; display: grid; grid-template-columns: repeat(3,1fr); color: #d0d6e0; font-size: 13px; }
+      .actions { display: flex; justify-content: space-between; gap: 12px; margin-top: 18px; }
+      .secondary { background: var(--surface-2); border: 1px solid var(--hairline); }
+      .lower { display: grid; grid-template-columns: .9fr 1.1fr; gap: 24px; margin-top: 20px; }
+      .row { display: flex; justify-content: space-between; padding: 15px 0; border-bottom: 1px solid var(--hairline); color: #d0d6e0; }
+      .info { color: var(--muted); line-height: 1.65; }
+    </style>
+  </head>
+  <body>
+    <div class="board">
+      <nav>
+        <div class="brand"><span class="mark"></span>Video Parser</div>
+        <div class="links"><span>支持平台</span><span>安全限制</span><span>免责声明</span></div>
+      </nav>
+      <section class="hero">
+        <div>
+          <h1>视频素材中枢</h1>
+          <div class="lead">输入链接，自动完成平台识别、视频下载与音视频合并。</div>
+          <div class="form">
+            <div class="label">Video URL</div>
+            <div class="input"><span>粘贴 YouTube / TikTok / Instagram / Bilibili 链接</span><button>开始解析</button></div>
+          </div>
+          <div class="chips"><span>仅用于有权处理的内容</span><span>临时文件自动过期</span><span>公开站点限流保护</span></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><div><div class="caption">Current job</div><h2>下载中</h2></div><div class="badge">下载中</div></div>
+          <div class="steps"><div>排队中</div><div>解析中</div><div>下载中</div><div>合并中</div><div>完成</div></div>
+          <div class="bar"><div></div></div>
+          <div class="result"><div class="thumb"></div><div><div class="title">Sample creator video</div><div class="meta"><span>TikTok</span><span>00:42</span><span>38.4 MB</span></div></div></div>
+          <div class="actions"><button>下载文件</button><button class="secondary">复制链接</button></div>
+        </div>
+      </section>
+      <section class="lower">
+        <div class="panel"><h2>最近任务</h2><div class="row"><span>Sample creator video</span><span class="badge">完成</span></div><div class="row"><span>YouTube product clip</span><span class="badge">合并中</span></div></div>
+        <div class="panel"><h2>跟随 yt-dlp 原生平台</h2><p class="info">YouTube、TikTok 普通视频、Instagram、Bilibili 等平台会由 yt-dlp 尝试解析。Shopee 与 TikTok Shop 商品页第一版暂不保证。</p></div>
+      </section>
+    </div>
+  </body>
+</html>

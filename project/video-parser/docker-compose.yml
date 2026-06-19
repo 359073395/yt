@@ -1,0 +1,23 @@
+services:
+  video-parser:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    image: video-parser:local
+    container_name: video-parser
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${PUBLIC_PORT:-8080}:8080"
+    volumes:
+      - video-parser-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  video-parser-data:
