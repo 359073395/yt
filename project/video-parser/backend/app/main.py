@@ -176,6 +176,7 @@ async def binary_version(binary: str, *arguments: str) -> str:
 @app.get("/api/health")
 async def health() -> dict[str, object]:
     """Return a fast liveness response without spawning subprocesses."""
+    chromium = settings.chromium_path.strip() or shutil.which("chromium") or shutil.which("chromium-browser")
     return {
         "status": "ok",
         "version": settings.app_version,
@@ -184,7 +185,7 @@ async def health() -> dict[str, object]:
             "yt_dlp": downloader.engine_version(),
             "deno": "available" if shutil.which("deno") else "missing",
             "ffmpeg": "available" if shutil.which("ffmpeg") else "missing",
-            "chromium": "available" if shutil.which("chromium") or shutil.which("chromium-browser") else "missing",
+            "chromium": "available" if chromium and Path(chromium).is_file() else "missing",
         },
     }
 
@@ -192,10 +193,11 @@ async def health() -> dict[str, object]:
 @app.get("/api/diagnostics")
 async def diagnostics() -> dict[str, object]:
     """Return detailed component versions for interactive troubleshooting."""
+    chromium_binary = settings.chromium_path.strip() or shutil.which("chromium") or "chromium-browser"
     deno, ffmpeg, chromium = await asyncio.gather(
         binary_version("deno", "--version"),
         binary_version("ffmpeg", "-version"),
-        binary_version(shutil.which("chromium") or "chromium-browser", "--version"),
+        binary_version(chromium_binary, "--version"),
     )
     return {
         "status": "ok",

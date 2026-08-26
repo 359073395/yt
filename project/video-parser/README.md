@@ -5,7 +5,7 @@
 ## 2.1 功能
 
 - 主页批量下载：粘贴一个创作者主页、频道或播放列表链接，扫描后把其中的视频全部加入队列
-- 抖音主页扫描：可粘贴带中文的整段分享文案或 `v.douyin.com` 短链，自动展开并读取作者公开视频
+- 抖音主页扫描：可粘贴带中文的整段分享文案或 `v.douyin.com` 短链，自动展开并读取作者公开视频；图文作品不会误计为视频
 - 安全批量队列：单次可扫描最近 10、20 或 50 个视频，统一选择视频或音频，逐项计入额度
 - 先解析再下载：展示封面、标题、作者、时长、真实分辨率、格式和预计大小
 - 视频格式选择：自动最佳画质或指定 yt-dlp 实际返回的格式；只有一个格式时不伪造清晰度选项
@@ -13,7 +13,8 @@
 - 音频提取：MP3、M4A、OPUS、FLAC、WAV
 - 字幕：明确显示是否可用；人工字幕和自动字幕既可单独下载，也可随视频嵌入
 - 实时任务：SSE 推送进度、速度、ETA，支持取消和重试
-- TikTok 分享链接：优先读取官方 Embed v2 直链，oEmbed、移动端 API、多浏览器指纹与解析缓存自动降级
+- 抖音直连下载：主页扫描取得的多清晰度签名地址直接流式保存，避免逐个重复打开作品页
+- TikTok 分享链接：优先读取官方 Embed v2 并直接流式保存；oEmbed、移动端 API、多浏览器指纹与解析缓存自动降级
 - 持久化历史：SQLite 保存任务，服务更新或重启后仍可查看
 - 临时文件：到期自动清理，下载地址使用 15 分钟签名
 - 多用户：访客、普通用户、会员、管理员及每日额度
@@ -34,7 +35,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/359073395/yt/main/project/vi
 bash <(curl -fsSL https://raw.githubusercontent.com/359073395/yt/main/project/video-parser/deploy/install.sh)
 ```
 
-脚本优先拉取 `ghcr.io/359073395/video-parser:latest`。镜像暂不可用时自动回退到源码构建；新容器健康检查失败时自动恢复上一镜像。
+脚本优先拉取当前固定版本镜像。镜像暂不可用时自动回退到源码构建；新容器健康检查失败时自动恢复上一镜像。
 
 首次安装会随机生成 `AUTH_SECRET` 和管理员密码，并在安装结束时显示一次。配置保存在：
 
@@ -58,7 +59,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 
 1. 保留 `.env` 和数据卷。
 2. 将旧默认管理员密码替换为随机密码。
-3. 拉取 2.1.3 镜像，自动迁移 1.x 数据卷权限并启动健康检查。
+3. 拉取 2.1.4 镜像，自动迁移 1.x 数据卷权限并启动健康检查。
 4. 失败时回滚上一容器镜像。
 
 不要使用 `docker compose down --volumes` 更新，否则会删除数据库和历史文件。
@@ -85,6 +86,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 | `MAX_DURATION_SECONDS` | `1800` | 视频时长上限 |
 | `JOB_TTL_SECONDS` | `3600` | 完成文件保留时间 |
 | `METADATA_TIMEOUT_SECONDS` | `45` | 链接解析超时 |
+| `CHROMIUM_PATH` | 自动探测 | 抖音主页与作品页解析使用的 Chromium 路径 |
 | `TRUSTED_PROXY_HEADERS` | `false` | 仅在可信反代后开启 |
 
 ## API

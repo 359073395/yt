@@ -16,6 +16,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     STATIC_DIR=/app/static \
     XDG_CACHE_HOME=/data/cache \
     DENO_DIR=/data/cache/deno \
+    CHROMIUM_PATH=/usr/bin/chromium \
     HOME=/tmp/yinglian
 
 RUN apt-get update \

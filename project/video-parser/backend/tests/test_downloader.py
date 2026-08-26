@@ -52,6 +52,49 @@ COLLECTION_INFO = {
 }
 
 DOUYIN_SEC_UID = "MS4wLjABAAAA5sbHNLYP00fNurvgupe9AnOBQwXfAGyZL3XihK-7CbQ"
+DOUYIN_VIDEO_ID = "6710574475324280067"
+
+
+def douyin_aweme(images=None):
+    return {
+        "aweme_id": DOUYIN_VIDEO_ID,
+        "aweme_type": 68 if images else 0,
+        "images": images or [],
+        "desc": "Douyin fixture",
+        "author": {"nickname": "Fixture creator"},
+        "video": {
+            "width": 1080,
+            "height": 1920,
+            "duration": 12_000,
+            "cover": {"url_list": ["https://p3-sign.douyinpic.com/cover.jpeg"]},
+            "play_addr": {
+                "url_list": ["https://v3-web.douyinvod.com/video/original"],
+                "width": 1080,
+                "height": 1920,
+                "data_size": 3_000_000,
+            },
+            "bit_rate": [
+                {
+                    "gear_name": "720p",
+                    "bit_rate": 800_000,
+                    "play_addr": {
+                        "url_list": ["https://v3-web.douyinvod.com/video/720p"],
+                        "width": 720,
+                        "height": 1280,
+                    },
+                },
+                {
+                    "gear_name": "1080p",
+                    "bit_rate": 1_600_000,
+                    "play_addr": {
+                        "url_list": ["https://v3-web.douyinvod.com/video/1080p"],
+                        "width": 1080,
+                        "height": 1920,
+                    },
+                },
+            ],
+        },
+    }
 
 
 def tiktok_embed_html():
@@ -228,6 +271,81 @@ def test_douyin_cookie_file_is_converted_for_browser(tmp_path):
     }]
 
 
+def test_douyin_aweme_info_excludes_photo_posts_and_lists_qualities(tmp_path):
+    downloader, _ = make_downloader(tmp_path)
+
+    assert downloader._douyin_aweme_info(douyin_aweme(images=[{"url_list": ["https://example.com/a.jpeg"]}])) is None
+
+    info = downloader._douyin_aweme_info(douyin_aweme())
+
+    assert info is not None
+    assert info["id"] == DOUYIN_VIDEO_ID
+    assert info["title"] == "Douyin fixture"
+    assert [item["format_id"] for item in info["formats"]] == [
+        "douyin-1080p",
+        "douyin-720p",
+        "douyin-original",
+    ]
+    assert info["formats"][0]["url"].endswith("/1080p")
+
+
+def test_douyin_profile_scan_retries_one_empty_browser_session(tmp_path, monkeypatch):
+    downloader, _ = make_downloader(tmp_path)
+    attempts = []
+
+    async def fake_scan(source_url, *_args):
+        attempts.append(source_url)
+        if len(attempts) == 1:
+            raise DownloadRejected("抖音主页没有返回公开视频；请稍后重试。")
+        return CollectionInspectResponse(
+            source_url=source_url,
+            title="Fixture Douyin Creator",
+            extractor="DouyinProfile",
+            items=[CollectionItem(url=f"https://www.douyin.com/video/{DOUYIN_VIDEO_ID}", title="Fixture")],
+        )
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(downloader, "_scan_douyin_profile_browser", fake_scan)
+    monkeypatch.setattr("app.downloader.asyncio.sleep", no_sleep)
+    source = f"https://www.douyin.com/user/{DOUYIN_SEC_UID}"
+
+    result = asyncio.run(downloader._inspect_douyin_collection(source, 20, None))
+
+    assert len(attempts) == 2
+    assert len(result.items) == 1
+
+
+def test_douyin_batch_download_reuses_profile_metadata(tmp_path, monkeypatch):
+    downloader, store = make_downloader(tmp_path)
+    url = f"https://www.douyin.com/video/{DOUYIN_VIDEO_ID}"
+    info = downloader._douyin_aweme_info(douyin_aweme())
+    assert info is not None
+    downloader._remember_metadata(url, None, info)
+    payload = JobCreateRequest(url=url, format_id="douyin-720p")
+    job = store.create(url, "127.0.0.1", payload)
+    streamed = {}
+
+    async def unexpected_browser(*_args):
+        raise AssertionError("cached profile metadata should avoid a second Douyin browser")
+
+    async def fake_stream(current_job, media_url, output_path, headers):
+        streamed.update({"url": media_url, "headers": headers})
+        output_path.write_bytes(b"\x00\x00\x00\x18ftypisom" + b"x" * 1000)
+        current_job.downloaded_bytes = output_path.stat().st_size
+
+    monkeypatch.setattr(downloader, "_capture_douyin_browser_info", unexpected_browser)
+    monkeypatch.setattr(downloader, "_stream_douyin_media", fake_stream)
+
+    asyncio.run(downloader._download_douyin_browser(job))
+
+    assert streamed["url"].endswith("/720p")
+    assert streamed["headers"]["Referer"] == "https://www.douyin.com/"
+    assert job.status == JobStatus.completed
+    assert job.filename.endswith(".mp4")
+
+
 def test_tiktok_oembed_restores_canonical_author_url(tmp_path, monkeypatch):
     downloader, _ = make_downloader(tmp_path)
     monkeypatch.setattr(
@@ -290,6 +408,40 @@ def test_tiktok_inspect_prefers_official_embed_source(tmp_path, monkeypatch):
     assert [item.format_id for item in result.formats] == ["embed-0"]
     assert result.formats[0].label == "576×1024 · MP4 · 原始画质 · 含音频"
     assert result.subtitle_note == "该视频未提供可下载字幕"
+
+
+def test_tiktok_download_streams_fresh_embed_media_without_ytdlp(tmp_path, monkeypatch):
+    downloader, store = make_downloader(tmp_path)
+    info = downloader._tiktok_info_from_embed_html(tiktok_embed_html(), TIKTOK_URL, TIKTOK_ID)
+    payload = JobCreateRequest(url=TIKTOK_URL, format_id="embed-0", format_has_audio=True)
+    job = store.create(TIKTOK_URL, "127.0.0.1", payload)
+    streamed = {}
+
+    async def canonical(url):
+        return url
+
+    def fresh_embed(_url):
+        return info
+
+    async def fake_stream(current_job, media_url, output_path, headers):
+        streamed.update({"url": media_url, "headers": headers})
+        output_path.write_bytes(b"\x00\x00\x00\x18ftypisom" + b"x" * 1000)
+        current_job.downloaded_bytes = output_path.stat().st_size
+
+    async def unexpected_capture(*_args, **_kwargs):
+        raise AssertionError("yt-dlp should not run when fresh TikTok Embed data is available")
+
+    monkeypatch.setattr(downloader, "_canonicalize_tiktok_url", canonical)
+    monkeypatch.setattr(downloader, "_fetch_tiktok_embed_info", fresh_embed)
+    monkeypatch.setattr(downloader, "_stream_tiktok_media", fake_stream)
+    monkeypatch.setattr(downloader, "_capture_metadata", unexpected_capture)
+
+    asyncio.run(downloader._download(job))
+
+    assert streamed["url"] == "https://v16.tiktokcdn.com/video/test.mp4"
+    assert streamed["headers"]["Referer"] == f"https://www.tiktok.com/embed/v2/{TIKTOK_ID}"
+    assert job.status == JobStatus.completed
+    assert job.filename.endswith(".mp4")
 
 
 def test_inspect_uses_canonical_tiktok_url(tmp_path, monkeypatch):
