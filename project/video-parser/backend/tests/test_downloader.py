@@ -20,6 +20,34 @@ INFO = {
     "automatic_captions": {"en": [{"ext": "vtt"}]},
 }
 
+TIKTOK_ID = "7678218577157115156"
+TIKTOK_URL = f"https://www.tiktok.com/@cisun_/video/{TIKTOK_ID}"
+
+
+def tiktok_embed_html():
+    state = {
+        "source": {
+            "data": {
+                f"/embed/v2/{TIKTOK_ID}": {
+                    "videoData": {
+                        "itemInfos": {
+                            "id": TIKTOK_ID,
+                            "text": "TikTok fixture",
+                            "createTime": "1787724578",
+                            "coversOrigin": ["https://p16-common-sign.tiktokcdn.com/cover.jpeg"],
+                            "video": {
+                                "urls": ["https://v16.tiktokcdn.com/video/test.mp4"],
+                                "videoMeta": {"width": 576, "height": 1024, "duration": 10},
+                            },
+                        },
+                        "authorInfos": {"uniqueId": "cisun_", "userId": "7328567436838487045"},
+                    },
+                },
+            },
+        },
+    }
+    return f'<script id="__FRONTITY_CONNECT_STATE__" type="application/json">{json.dumps(state)}</script>'
+
 
 def make_downloader(tmp_path):
     settings = Settings(download_dir=tmp_path / "downloads", database_path=tmp_path / "data.sqlite3", max_concurrent_downloads=1)
@@ -63,6 +91,46 @@ def test_tiktok_oembed_restores_canonical_author_url(tmp_path, monkeypatch):
     assert resolved == "https://www.tiktok.com/@cisun_/video/7678218577157115156"
 
 
+def test_tiktok_embed_state_provides_direct_download_info(tmp_path):
+    downloader, _ = make_downloader(tmp_path)
+
+    info = downloader._tiktok_info_from_embed_html(tiktok_embed_html(), TIKTOK_URL, TIKTOK_ID)
+
+    assert info["id"] == TIKTOK_ID
+    assert info["title"] == "TikTok fixture"
+    assert info["uploader"] == "cisun_"
+    assert info["formats"][0]["url"] == "https://v16.tiktokcdn.com/video/test.mp4"
+    assert info["formats"][0]["acodec"] == "aac"
+
+
+def test_tiktok_embed_rejects_untrusted_media_host(tmp_path):
+    downloader, _ = make_downloader(tmp_path)
+    html = tiktok_embed_html().replace("https://v16.tiktokcdn.com/video/test.mp4", "https://example.com/test.mp4")
+
+    try:
+        downloader._tiktok_info_from_embed_html(html, TIKTOK_URL, TIKTOK_ID)
+    except ValueError as exc:
+        assert "media URL" in str(exc)
+    else:
+        raise AssertionError("Untrusted TikTok media URL was accepted")
+
+
+def test_tiktok_inspect_prefers_official_embed_source(tmp_path, monkeypatch):
+    downloader, _ = make_downloader(tmp_path)
+    info = downloader._tiktok_info_from_embed_html(tiktok_embed_html(), TIKTOK_URL, TIKTOK_ID)
+    monkeypatch.setattr(downloader, "_fetch_tiktok_oembed", lambda _url: {})
+    monkeypatch.setattr(downloader, "_fetch_tiktok_embed_info", lambda _url: info)
+
+    async def unexpected_capture(*_args, **_kwargs):
+        raise AssertionError("yt-dlp should not run when TikTok Embed succeeds")
+
+    monkeypatch.setattr(downloader, "_run_capture", unexpected_capture)
+    result = asyncio.run(downloader.inspect(TIKTOK_URL))
+
+    assert result.platform == "TikTokEmbed"
+    assert [item.format_id for item in result.formats] == ["best", "embed-0"]
+
+
 def test_inspect_uses_canonical_tiktok_url(tmp_path, monkeypatch):
     downloader, _ = make_downloader(tmp_path)
     commands = []
@@ -74,6 +142,7 @@ def test_inspect_uses_canonical_tiktok_url(tmp_path, monkeypatch):
             "embed_product_id": "7678218577157115156",
         },
     )
+    monkeypatch.setattr(downloader, "_fetch_tiktok_embed_info", lambda _url: (_ for _ in ()).throw(ValueError()))
 
     async def fake_capture(command, *_args, **_kwargs):
         commands.append(command)
@@ -104,6 +173,7 @@ def test_tiktok_retries_another_browser_fingerprint(tmp_path, monkeypatch):
             "embed_product_id": "7678218577157115156",
         },
     )
+    monkeypatch.setattr(downloader, "_fetch_tiktok_embed_info", lambda _url: (_ for _ in ()).throw(ValueError()))
 
     async def fake_capture(command, *_args, **_kwargs):
         target = command[command.index("--impersonate") + 1] if "--impersonate" in command else None

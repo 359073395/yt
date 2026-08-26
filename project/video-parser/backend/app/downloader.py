@@ -28,6 +28,7 @@ class DownloadRejected(Exception):
 class Downloader:
     PROGRESS_PREFIX = "YL_PROGRESS|"
     TIKTOK_OEMBED_MAX_BYTES = 256 * 1024
+    TIKTOK_EMBED_MAX_BYTES = 2 * 1024 * 1024
     METADATA_CACHE_TTL_SECONDS = 10 * 60
     TIKTOK_IMPERSONATE_TARGETS: tuple[str | None, ...] = (
         None,
@@ -215,7 +216,16 @@ class Downloader:
         cookie_file: Path | None,
         job_id: str | None = None,
     ) -> tuple[str, str | None]:
-        targets = self.TIKTOK_IMPERSONATE_TARGETS if self._is_tiktok_url(url) else (None,)
+        is_tiktok = self._is_tiktok_url(url)
+        if is_tiktok:
+            try:
+                info = await asyncio.to_thread(self._fetch_tiktok_embed_info, url)
+            except (OSError, TimeoutError, ValueError, json.JSONDecodeError):
+                pass
+            else:
+                return json.dumps(info, ensure_ascii=False), None
+
+        targets = self.TIKTOK_IMPERSONATE_TARGETS if is_tiktok else (None,)
         for index, target in enumerate(targets):
             command = [
                 *self._base_command(cookie_file, url, target),
@@ -262,6 +272,110 @@ class Downloader:
         if not isinstance(metadata, dict):
             raise ValueError("TikTok oEmbed response is invalid")
         return metadata
+
+    def _fetch_tiktok_embed_info(self, url: str) -> dict[str, Any]:
+        video_id = self._tiktok_video_id(url)
+        if not video_id:
+            raise ValueError("TikTok URL does not contain a video ID")
+        embed_url = f"https://www.tiktok.com/embed/v2/{video_id}"
+        request = Request(
+            embed_url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36"
+                ),
+            },
+        )
+        with urlopen(request, timeout=min(self.settings.request_timeout_seconds, 20)) as response:  # noqa: S310
+            payload = response.read(self.TIKTOK_EMBED_MAX_BYTES + 1)
+        if len(payload) > self.TIKTOK_EMBED_MAX_BYTES:
+            raise ValueError("TikTok embed response is too large")
+        return self._tiktok_info_from_embed_html(payload.decode("utf-8"), url, video_id)
+
+    @classmethod
+    def _tiktok_info_from_embed_html(cls, html: str, webpage_url: str, video_id: str) -> dict[str, Any]:
+        match = re.search(
+            r'<script[^>]+\bid=["\']__FRONTITY_CONNECT_STATE__["\'][^>]*>(.*?)</script>',
+            html,
+            flags=re.DOTALL,
+        )
+        if not match:
+            raise ValueError("TikTok embed state is missing")
+        state = json.loads(match.group(1))
+        if not isinstance(state, dict) or not isinstance(state.get("source"), dict):
+            raise ValueError("TikTok embed state is invalid")
+        entries = state["source"].get("data")
+        if not isinstance(entries, dict):
+            raise ValueError("TikTok embed source data is invalid")
+        entry = entries.get(f"/embed/v2/{video_id}")
+        if not isinstance(entry, dict):
+            entry = next(
+                (
+                    value for value in entries.values()
+                    if isinstance(value, dict) and isinstance(value.get("videoData"), dict)
+                ),
+                None,
+            )
+        video_data = entry.get("videoData") if isinstance(entry, dict) else None
+        item = video_data.get("itemInfos") if isinstance(video_data, dict) else None
+        if not isinstance(item, dict) or str(item.get("id") or "") != video_id:
+            raise ValueError("TikTok embed video data is invalid")
+
+        video = item.get("video")
+        video_meta = video.get("videoMeta") if isinstance(video, dict) else None
+        urls = video.get("urls") if isinstance(video, dict) else None
+        if not isinstance(video_meta, dict) or not isinstance(urls, list):
+            raise ValueError("TikTok embed video source is missing")
+
+        embed_url = f"https://www.tiktok.com/embed/v2/{video_id}"
+        headers = {
+            "Referer": embed_url,
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36"
+            ),
+        }
+        formats = []
+        for index, media_url in enumerate(urls[:5]):
+            if not isinstance(media_url, str) or not cls._is_tiktok_media_url(media_url):
+                continue
+            formats.append({
+                "format_id": f"embed-{index}",
+                "format_note": "TikTok 官方嵌入源",
+                "url": media_url,
+                "ext": "mp4",
+                "protocol": "https",
+                "width": cls._as_int(video_meta.get("width")),
+                "height": cls._as_int(video_meta.get("height")),
+                "vcodec": "h264",
+                "acodec": "aac",
+                "http_headers": headers,
+            })
+        if not formats:
+            raise ValueError("TikTok embed media URL is invalid")
+
+        author = video_data.get("authorInfos") if isinstance(video_data, dict) else {}
+        covers = item.get("coversOrigin") or item.get("covers") or []
+        thumbnail = covers[0] if isinstance(covers, list) and covers else None
+        return {
+            "_type": "video",
+            "id": video_id,
+            "title": str(item.get("text") or f"TikTok {video_id}"),
+            "description": str(item.get("text") or ""),
+            "extractor": "TikTokEmbed",
+            "extractor_key": "TikTokEmbed",
+            "webpage_url": webpage_url,
+            "original_url": webpage_url,
+            "duration": cls._as_int(video_meta.get("duration")),
+            "timestamp": cls._as_int(item.get("createTime")),
+            "thumbnail": thumbnail,
+            "uploader": author.get("uniqueId") if isinstance(author, dict) else None,
+            "uploader_id": author.get("userId") if isinstance(author, dict) else None,
+            "formats": formats,
+            "subtitles": {},
+        }
 
     @staticmethod
     def _tiktok_url_from_oembed(metadata: dict[str, Any]) -> str | None:
@@ -383,6 +497,32 @@ class Downloader:
         except ValueError:
             return False
         return hostname == "tiktok.com" or hostname.endswith(".tiktok.com")
+
+    @staticmethod
+    def _tiktok_video_id(url: str) -> str | None:
+        try:
+            path = urlsplit(url).path
+        except ValueError:
+            return None
+        match = re.search(r"/(?:video|v1|v2)/(\d{10,24})(?:/|$)", path)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _is_tiktok_media_url(url: str) -> bool:
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return False
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        allowed_suffixes = (
+            ".tiktok.com",
+            ".tiktokcdn.com",
+            ".tiktokcdn-us.com",
+            ".tiktokv.com",
+            ".byteoversea.com",
+            ".ibytedtos.com",
+        )
+        return parsed.scheme == "https" and any(hostname.endswith(suffix) for suffix in allowed_suffixes)
 
     @staticmethod
     def _is_tiktok_rehydration_error(message: str) -> bool:
