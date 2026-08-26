@@ -3,13 +3,17 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import secrets
 import shutil
 import sys
 import tempfile
 from contextlib import nullcontext
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from time import monotonic
 from typing import Any
+from urllib.parse import urlencode, urlsplit
+from urllib.request import Request, urlopen
 
 from .config import Settings
 from .cookies import CookieStore
@@ -23,6 +27,15 @@ class DownloadRejected(Exception):
 
 class Downloader:
     PROGRESS_PREFIX = "YL_PROGRESS|"
+    TIKTOK_OEMBED_MAX_BYTES = 256 * 1024
+    METADATA_CACHE_TTL_SECONDS = 10 * 60
+    TIKTOK_IMPERSONATE_TARGETS: tuple[str | None, ...] = (
+        None,
+        "Edge-101:Windows-10",
+        "Safari-26.0:Ios-26.0",
+        "Firefox-144:Macos-26",
+        "Safari-18.4:Ios-18.4",
+    )
 
     def __init__(self, settings: Settings, store: JobStore, cookies: CookieStore | None = None) -> None:
         self.settings = settings
@@ -31,22 +44,24 @@ class Downloader:
         self.semaphore = asyncio.Semaphore(settings.max_concurrent_downloads)
         self.processes: dict[str, asyncio.subprocess.Process] = {}
         self.tasks: dict[str, asyncio.Task[None]] = {}
+        self.metadata_cache: dict[tuple[str, str | None], tuple[float, dict[str, Any]]] = {}
 
     async def inspect(self, url: str, cookie_profile: str | None = None) -> ParseResponse:
         async with self.semaphore:
+            resolved_url = await self._canonicalize_tiktok_url(url)
             with tempfile.TemporaryDirectory(prefix=".inspect-", dir=self.settings.download_dir) as temporary:
                 work_dir = Path(temporary)
                 context = self.cookies.materialize(cookie_profile, work_dir) if self.cookies else nullcontext(None)
                 with context as cookie_file:
-                    command = [*self._base_command(cookie_file), "--dump-single-json", "--skip-download", url]
-                    output = await self._run_capture(command, self.settings.metadata_timeout_seconds)
+                    output, _ = await self._capture_metadata(resolved_url, cookie_file)
             try:
                 info = json.loads(output)
             except json.JSONDecodeError as exc:
                 raise DownloadRejected("解析器返回了无效数据，请更新引擎后重试。") from exc
             if not isinstance(info, dict) or info.get("_type") == "playlist":
                 raise DownloadRejected("当前仅支持单个视频链接，不支持播放列表。")
-            return self._parse_response(url, info)
+            self._remember_metadata(resolved_url, cookie_profile, info)
+            return self._parse_response(resolved_url, info)
 
     async def run(self, job: Job) -> None:
         task = asyncio.current_task()
@@ -99,6 +114,12 @@ class Downloader:
         shutil.rmtree(self.store.job_dir(job.job_id), ignore_errors=True)
 
     async def _download(self, job: Job) -> None:
+        cached_info = self._cached_metadata(job.url, job.cookie_profile)
+        resolved_url = await self._canonicalize_tiktok_url(job.url)
+        if resolved_url != job.url:
+            job.url = resolved_url
+            job.touch()
+            self.store.save(job)
         job_dir = self.store.job_dir(job.job_id)
         job_dir.mkdir(parents=True, exist_ok=True)
         context = self.cookies.materialize(job.cookie_profile, job_dir) if self.cookies else nullcontext(None)
@@ -108,16 +129,20 @@ class Downloader:
             job.touch()
             self.store.save(job)
 
-            inspect_command = [*self._base_command(cookie_file), "--dump-single-json", "--skip-download", job.url]
-            output = await self._run_capture(inspect_command, self.settings.metadata_timeout_seconds, job.job_id)
-            info = json.loads(output)
+            info = cached_info or self._cached_metadata(job.url, job.cookie_profile)
+            impersonate_target = None
+            if info is None:
+                output, impersonate_target = await self._capture_metadata(job.url, cookie_file, job.job_id)
+                info = json.loads(output)
             if not isinstance(info, dict) or info.get("_type") == "playlist":
                 raise DownloadRejected("当前仅支持单个视频链接，不支持播放列表。")
             job.update_from_info(info)
             self._enforce_limits(job)
             self.store.save(job)
 
-            command = self._download_command(job, cookie_file)
+            info_path = job_dir / ".yt-info.json"
+            info_path.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+            command = self._download_command(job, cookie_file, impersonate_target, info_path)
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
@@ -184,7 +209,88 @@ class Downloader:
             raise DownloadRejected(message[-1600:] or f"yt-dlp 退出码 {process.returncode}")
         return stdout.decode("utf-8", errors="replace").strip()
 
-    def _base_command(self, cookie_file: Path | None) -> list[str]:
+    async def _capture_metadata(
+        self,
+        url: str,
+        cookie_file: Path | None,
+        job_id: str | None = None,
+    ) -> tuple[str, str | None]:
+        targets = self.TIKTOK_IMPERSONATE_TARGETS if self._is_tiktok_url(url) else (None,)
+        for index, target in enumerate(targets):
+            command = [
+                *self._base_command(cookie_file, url, target),
+                "--dump-single-json",
+                "--skip-download",
+                url,
+            ]
+            try:
+                output = await self._run_capture(command, self.settings.metadata_timeout_seconds, job_id)
+            except DownloadRejected as exc:
+                can_retry = index < len(targets) - 1 and self._is_tiktok_rehydration_error(str(exc))
+                if not can_retry:
+                    raise
+            else:
+                return output, target
+        raise DownloadRejected("TikTok 未返回视频数据，请稍后重试。")
+
+    async def _canonicalize_tiktok_url(self, url: str) -> str:
+        if not self._is_tiktok_url(url):
+            return url
+        try:
+            metadata = await asyncio.to_thread(self._fetch_tiktok_oembed, url)
+        except (OSError, TimeoutError, ValueError, json.JSONDecodeError):
+            return url
+        return self._tiktok_url_from_oembed(metadata) or url
+
+    def _fetch_tiktok_oembed(self, url: str) -> dict[str, Any]:
+        endpoint = f"https://www.tiktok.com/oembed?{urlencode({'url': url})}"
+        request = Request(
+            endpoint,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36"
+                ),
+            },
+        )
+        with urlopen(request, timeout=min(self.settings.request_timeout_seconds, 20)) as response:  # noqa: S310
+            payload = response.read(self.TIKTOK_OEMBED_MAX_BYTES + 1)
+        if len(payload) > self.TIKTOK_OEMBED_MAX_BYTES:
+            raise ValueError("TikTok oEmbed response is too large")
+        metadata = json.loads(payload)
+        if not isinstance(metadata, dict):
+            raise ValueError("TikTok oEmbed response is invalid")
+        return metadata
+
+    @staticmethod
+    def _tiktok_url_from_oembed(metadata: dict[str, Any]) -> str | None:
+        video_id = str(metadata.get("embed_product_id") or "")
+        if not re.fullmatch(r"\d{10,24}", video_id):
+            return None
+
+        username = str(metadata.get("author_unique_id") or "").removeprefix("@")
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", username):
+            author_url = str(metadata.get("author_url") or "")
+            try:
+                author = urlsplit(author_url)
+            except ValueError:
+                return None
+            hostname = (author.hostname or "").lower().rstrip(".")
+            if hostname != "tiktok.com" and not hostname.endswith(".tiktok.com"):
+                return None
+            match = re.fullmatch(r"/@([A-Za-z0-9._-]{1,64})/?", author.path)
+            if not match:
+                return None
+            username = match.group(1)
+        return f"https://www.tiktok.com/@{username}/video/{video_id}"
+
+    def _base_command(
+        self,
+        cookie_file: Path | None,
+        url: str | None = None,
+        impersonate_target: str | None = None,
+    ) -> list[str]:
         command = [
             sys.executable,
             "-m",
@@ -197,14 +303,24 @@ class Downloader:
         ]
         if shutil.which("deno"):
             command.extend(["--js-runtimes", "deno"])
+        if url and self._is_tiktok_url(url):
+            command.extend(["--extractor-args", f"tiktok:app_info={self._new_tiktok_iid()}"])
+            if impersonate_target:
+                command.extend(["--impersonate", impersonate_target])
         if cookie_file:
             command.extend(["--cookies", str(cookie_file)])
         return command
 
-    def _download_command(self, job: Job, cookie_file: Path | None) -> list[str]:
+    def _download_command(
+        self,
+        job: Job,
+        cookie_file: Path | None,
+        impersonate_target: str | None = None,
+        info_path: Path | None = None,
+    ) -> list[str]:
         outtmpl = str(self.store.job_dir(job.job_id) / "%(title).120B-%(id)s.%(ext)s")
         command = [
-            *self._base_command(cookie_file),
+            *self._base_command(cookie_file, job.url, impersonate_target),
             "--newline",
             "--progress",
             "--progress-template",
@@ -235,7 +351,10 @@ class Downloader:
                     job.subtitle_language,
                     "--embed-subs",
                 ])
-        command.append(job.url)
+        if info_path:
+            command.extend(["--load-info-json", str(info_path)])
+        else:
+            command.append(job.url)
         return command
 
     def _consume_progress(self, job: Job, line: str) -> bool:
@@ -256,6 +375,42 @@ class Downloader:
         job.progress = min(95, 5 + (downloaded / total) * 90) if total else max(job.progress, 8)
         job.touch()
         return True
+
+    @staticmethod
+    def _is_tiktok_url(url: str) -> bool:
+        try:
+            hostname = (urlsplit(url).hostname or "").lower().rstrip(".")
+        except ValueError:
+            return False
+        return hostname == "tiktok.com" or hostname.endswith(".tiktok.com")
+
+    @staticmethod
+    def _is_tiktok_rehydration_error(message: str) -> bool:
+        return "universal data for rehydration" in message.lower()
+
+    @staticmethod
+    def _new_tiktok_iid() -> str:
+        return str(7_250_000_000_000_000_000 + secrets.randbelow(75_099_899_999_994_578))
+
+    def _remember_metadata(self, url: str, cookie_profile: str | None, info: dict[str, Any]) -> None:
+        now = monotonic()
+        stale = [
+            key for key, (created_at, _) in self.metadata_cache.items()
+            if now - created_at > self.METADATA_CACHE_TTL_SECONDS
+        ]
+        for key in stale:
+            self.metadata_cache.pop(key, None)
+        self.metadata_cache[(url, cookie_profile)] = (now, info)
+
+    def _cached_metadata(self, url: str, cookie_profile: str | None) -> dict[str, Any] | None:
+        cached = self.metadata_cache.get((url, cookie_profile))
+        if not cached:
+            return None
+        created_at, info = cached
+        if monotonic() - created_at > self.METADATA_CACHE_TTL_SECONDS:
+            self.metadata_cache.pop((url, cookie_profile), None)
+            return None
+        return info
 
     @staticmethod
     def _number(value: str) -> float | None:
@@ -375,5 +530,7 @@ class Downloader:
             return "文件超过站点下载大小上限。"
         if "requested format is not available" in lower:
             return "所选清晰度已经失效，请重新解析并选择格式。"
+        if "universal data for rehydration" in lower:
+            return "TikTok 未返回视频数据，请确认链接是可公开播放的视频，或让管理员更新 TikTok Cookie 后重试。"
         cleaned = re.sub(r"/[^\s]*/\.cookies\.txt", "[cookie]", message)
         return cleaned[-800:] or "任务失败，请稍后重试。"

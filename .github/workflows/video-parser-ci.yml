@@ -91,7 +91,7 @@ jobs:
       meta-images: ghcr.io/359073395/video-parser
       meta-tags: |
         type=raw,value=latest
-        type=raw,value=2.0.0
+        type=raw,value=2.0.1
         type=sha
     secrets:
       registry-auths: |

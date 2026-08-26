@@ -91,7 +91,7 @@ if (( PORT_WAS_SET == 0 )) && [[ -n "$(env_value PUBLIC_PORT)" ]]; then
 fi
 set_env PUBLIC_PORT "$PUBLIC_PORT"
 set_env VIDEO_PARSER_IMAGE "$IMAGE"
-set_env APP_VERSION "2.0.0"
+set_env APP_VERSION "2.0.1"
 
 GENERATED_PASSWORD=""
 if [[ "$(env_value AUTH_SECRET)" == "change-this-auth-secret" || -z "$(env_value AUTH_SECRET)" ]]; then
