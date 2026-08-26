@@ -90,7 +90,7 @@ jobs:
             type=raw,value=latest
             type=raw,value=2.0.0
             type=sha
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: project/video-parser
           file: project/video-parser/deploy/Dockerfile
