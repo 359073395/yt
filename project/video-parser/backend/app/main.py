@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from .assets import RemoteAssetError, fetch_remote_asset, signed_asset_url, verify_asset_token
 from .auth import AuthStore, AuthUser
 from .config import get_settings
-from .cookies import CookieStore, MAX_COOKIE_BYTES
+from .cookies import CookieStore, MAX_COOKIE_BYTES, PLATFORM_DOMAINS
 from .downloader import DownloadRejected, Downloader
 from .models import (
     AdminOverview,
@@ -103,12 +103,13 @@ async def cleanup_loop() -> None:
 async def lifespan(_: FastAPI):
     settings.download_dir.mkdir(parents=True, exist_ok=True)
     settings.cookie_dir.mkdir(parents=True, exist_ok=True)
+    settings.whisper_cache_dir.mkdir(parents=True, exist_ok=True)
     cleanup_task = asyncio.create_task(cleanup_loop())
     yield
     cleanup_task.cancel()
 
 
-app = FastAPI(title="影链工坊 2.1", version=settings.app_version, lifespan=lifespan)
+app = FastAPI(title="影链工坊 2.2", version=settings.app_version, lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -186,6 +187,7 @@ async def health() -> dict[str, object]:
             "deno": "available" if shutil.which("deno") else "missing",
             "ffmpeg": "available" if shutil.which("ffmpeg") else "missing",
             "chromium": "available" if chromium and Path(chromium).is_file() else "missing",
+            "transcription": "available" if downloader.transcriber.available else "disabled",
         },
     }
 
@@ -203,7 +205,13 @@ async def diagnostics() -> dict[str, object]:
         "status": "ok",
         "version": settings.app_version,
         "engine_channel": settings.engine_channel,
-        "components": {"yt_dlp": downloader.engine_version(), "deno": deno, "ffmpeg": ffmpeg, "chromium": chromium},
+        "components": {
+            "yt_dlp": downloader.engine_version(),
+            "deno": deno,
+            "ffmpeg": ffmpeg,
+            "chromium": chromium,
+            "transcription": f"faster-whisper/{settings.whisper_model}" if downloader.transcriber.available else "disabled",
+        },
     }
 
 
@@ -229,26 +237,26 @@ async def me(request: Request) -> MeResponse:
 
 @app.post("/api/parse", response_model=ParseResponse)
 async def parse_video(payload: ParseRequest, request: Request) -> ParseResponse:
-    _, client_ip = request_identity(request)
+    user, client_ip = request_identity(request)
     rate_limiter.check(f"parse:{client_ip}")
     url = validate_public_url(payload.url)
-    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile):
+    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile, user.id if user else None):
         raise HTTPException(status_code=400, detail="所选 Cookie 配置不存在。")
     try:
-        return await downloader.inspect(url, payload.cookie_profile)
+        return await downloader.inspect(url, payload.cookie_profile, user.id if user else None)
     except DownloadRejected as exc:
         raise HTTPException(status_code=422, detail=downloader._safe_error(exc)) from exc
 
 
 @app.post("/api/collections/inspect", response_model=CollectionInspectResponse)
 async def inspect_collection(payload: CollectionInspectRequest, request: Request) -> CollectionInspectResponse:
-    _, client_ip = request_identity(request)
+    user, client_ip = request_identity(request)
     rate_limiter.check(f"collection:{client_ip}")
     url = validate_public_url(payload.url)
-    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile):
+    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile, user.id if user else None):
         raise HTTPException(status_code=400, detail="所选 Cookie 配置不存在。")
     try:
-        return await downloader.inspect_collection(url, payload.max_items, payload.cookie_profile)
+        return await downloader.inspect_collection(url, payload.max_items, payload.cookie_profile, user.id if user else None)
     except DownloadRejected as exc:
         raise HTTPException(status_code=422, detail=downloader._safe_error(exc)) from exc
 
@@ -257,7 +265,7 @@ async def create_download(payload: JobCreateRequest, request: Request, api_key_m
     user, client_ip = request_identity(request)
     rate_limiter.check(f"job:{client_ip}")
     url = validate_public_url(payload.url)
-    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile):
+    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile, user.id if user else None):
         raise HTTPException(status_code=400, detail="所选 Cookie 配置不存在。")
     if not api_key_mode:
         auth_store.consume_quota(user, client_ip)
@@ -275,7 +283,7 @@ async def create_job(payload: JobCreateRequest, request: Request) -> JobCreateRe
 async def create_batch_jobs(payload: BatchJobCreateRequest, request: Request) -> BatchJobCreateResponse:
     user, client_ip = request_identity(request)
     rate_limiter.check(f"job:{client_ip}")
-    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile):
+    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile, user.id if user else None):
         raise HTTPException(status_code=400, detail="所选 Cookie 配置不存在。")
     urls = [validate_public_url(url) for url in payload.urls]
     quota = auth_store.consume_quota(user, client_ip, amount=len(urls))
@@ -287,6 +295,11 @@ async def create_batch_jobs(payload: BatchJobCreateRequest, request: Request) ->
             format_id="best",
             format_has_audio=True,
             audio_format=payload.audio_format,
+            transcript_mode=payload.transcript_mode,
+            transcript_format=payload.transcript_format,
+            transcript_language=payload.transcript_language,
+            include_description=payload.include_description,
+            include_thumbnail=payload.include_thumbnail,
             cookie_profile=payload.cookie_profile,
         )
         jobs.append(store.create(url, client_ip, job_payload, user.id if user else None))
@@ -425,6 +438,35 @@ async def update_user(user_id: int, payload: AdminUserUpdate, request: Request) 
 async def delete_user(user_id: int, request: Request) -> None:
     admin = auth_store.require_admin(request)
     auth_store.delete_user(user_id, admin.id)
+    cookie_store.delete_owner(user_id)
+
+
+@app.get("/api/cookies", response_model=list[CookieProfilePublic])
+async def list_my_cookie_profiles(request: Request) -> list[CookieProfilePublic]:
+    user = auth_store.require_user(request)
+    return cookie_store.list(user.id)
+
+
+@app.put("/api/cookies/{platform}", response_model=CookieProfilePublic)
+async def upload_my_cookie_profile(platform: str, request: Request, file: UploadFile = File(...)) -> CookieProfilePublic:
+    user = auth_store.require_user(request)
+    platform = platform.lower()
+    if platform not in PLATFORM_DOMAINS:
+        raise HTTPException(status_code=400, detail="暂不支持该平台的用户 Cookie。")
+    content = await file.read(MAX_COOKIE_BYTES + 1)
+    try:
+        return cookie_store.save(platform, content, owner_id=user.id, platform=platform)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/cookies/{platform}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_my_cookie_profile(platform: str, request: Request) -> None:
+    user = auth_store.require_user(request)
+    platform = platform.lower()
+    if platform not in PLATFORM_DOMAINS:
+        raise HTTPException(status_code=400, detail="Cookie 平台名称无效。")
+    cookie_store.delete(platform, user.id)
 
 
 @app.get("/api/admin/overview", response_model=AdminOverview)
@@ -513,6 +555,8 @@ async def v1_create_job(payload: JobCreateRequest, request: Request) -> JobCreat
     auth_store.require_api_scope(api_key, "jobs:create")
     rate_limiter.check(f"api:{api_key.id}")
     url = validate_public_url(payload.url)
+    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile):
+        raise HTTPException(status_code=400, detail="所选全局 Cookie 配置不存在。")
     auth_store.consume_api_quota(api_key)
     job = store.create(url, client_ip, payload)
     asyncio.create_task(downloader.run(job))

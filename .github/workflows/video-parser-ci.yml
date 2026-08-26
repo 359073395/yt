@@ -1,4 +1,4 @@
-name: Video Parser 2.1 CI
+name: Video Parser 2.2 CI
 
 on:
   push:
@@ -114,7 +114,7 @@ jobs:
           response=""
           for _ in $(seq 1 40); do
             response="$(curl -fsS --max-time 5 http://127.0.0.1:18080/api/health 2>/dev/null || true)"
-            if [[ "$response" == *'"version":"2.1.4"'* && "$response" == *'"chromium":"available"'* ]]; then
+            if [[ "$response" == *'"version":"2.2.0"'* && "$response" == *'"chromium":"available"'* && "$response" == *'"transcription":"available"'* ]]; then
               break
             fi
             if [[ "$(docker inspect --format '{{.State.Running}}' video-parser-smoke 2>/dev/null || true)" != "true" ]]; then
@@ -122,13 +122,14 @@ jobs:
             fi
             sleep 2
           done
-          if [[ "$response" != *'"version":"2.1.4"'* || "$response" != *'"chromium":"available"'* ]]; then
+          if [[ "$response" != *'"version":"2.2.0"'* || "$response" != *'"chromium":"available"'* || "$response" != *'"transcription":"available"'* ]]; then
             echo "Unexpected health response: ${response:-no response}"
             docker inspect video-parser-smoke
             docker logs video-parser-smoke
             exit 1
           fi
           echo "$response"
+          docker exec video-parser-smoke python -c 'from faster_whisper import WhisperModel; print("faster-whisper-import-ok")'
           docker exec -i video-parser-smoke python - <<'PY'
           import asyncio
 
@@ -176,7 +177,7 @@ jobs:
       meta-images: ghcr.io/359073395/video-parser
       meta-tags: |
         type=raw,value=latest
-        type=raw,value=2.1.4
+        type=raw,value=2.2.0
         type=sha
     secrets:
       registry-auths: |

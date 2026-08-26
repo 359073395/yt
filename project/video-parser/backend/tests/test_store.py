@@ -1,6 +1,6 @@
 from time import sleep
 
-from app.models import JobStatus
+from app.models import JobCreateRequest, JobStatus, MediaType, TranscriptFormat, TranscriptMode
 from app.store import JobStore
 
 
@@ -49,3 +49,29 @@ def test_store_bulk_marks_interrupted_jobs_failed_on_restart(tmp_path):
 
     assert all(restored.get(job.job_id).status == JobStatus.failed for job in jobs)
     assert all("服务更新" in restored.get(job.job_id).error for job in jobs)
+
+
+def test_store_persists_transcript_and_bundle_options(tmp_path):
+    database = tmp_path / "video-parser.sqlite3"
+    downloads = tmp_path / "downloads"
+    first = JobStore(downloads, ttl_seconds=60, database_path=database)
+    payload = JobCreateRequest(
+        url="https://example.com/video",
+        media_type=MediaType.transcript,
+        transcript_mode=TranscriptMode.ai,
+        transcript_format=TranscriptFormat.txt,
+        transcript_language="zh",
+        include_description=True,
+        include_thumbnail=True,
+    )
+    job = first.create(payload.url, "127.0.0.1", payload)
+
+    restored = JobStore(downloads, ttl_seconds=60, database_path=database).get(job.job_id)
+
+    assert restored is not None
+    assert restored.media_type == MediaType.transcript
+    assert restored.transcript_mode == TranscriptMode.ai
+    assert restored.transcript_format == TranscriptFormat.txt
+    assert restored.transcript_language == "zh"
+    assert restored.include_description
+    assert restored.include_thumbnail

@@ -8,6 +8,9 @@ import secrets
 import shutil
 import sys
 import tempfile
+import zipfile
+from datetime import datetime
+from xml.etree import ElementTree
 from contextlib import nullcontext
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -18,7 +21,7 @@ from urllib.request import Request, urlopen
 
 import httpx
 
-from .assets import RemoteAssetError, signed_asset_url
+from .assets import RemoteAssetError, fetch_remote_asset, signed_asset_url
 from .config import Settings
 from .cookies import CookieStore
 from .models import (
@@ -30,8 +33,11 @@ from .models import (
     MediaType,
     ParseResponse,
     SubtitleOption,
+    TranscriptFormat,
+    TranscriptMode,
 )
 from .store import JobStore
+from .transcriber import TranscriptSegment, Transcriber, TranscriptionUnavailable, clean_text, render_transcript
 
 
 class DownloadRejected(Exception):
@@ -63,18 +69,24 @@ class Downloader:
         self.douyin_browser_semaphore = asyncio.Semaphore(1)
         self.processes: dict[str, asyncio.subprocess.Process] = {}
         self.tasks: dict[str, asyncio.Task[None]] = {}
-        self.metadata_cache: dict[tuple[str, str | None], tuple[float, dict[str, Any]]] = {}
+        self.metadata_cache: dict[tuple[str, str | None, int | None], tuple[float, dict[str, Any]]] = {}
         self.douyin_video_profiles: dict[str, str] = {}
+        self.transcriber = Transcriber(settings)
 
-    async def inspect(self, url: str, cookie_profile: str | None = None) -> ParseResponse:
+    async def inspect(self, url: str, cookie_profile: str | None = None, user_id: int | None = None) -> ParseResponse:
         async with self.semaphore:
             resolved_url = await self._canonicalize_tiktok_url(url)
             with tempfile.TemporaryDirectory(prefix=".inspect-", dir=self.settings.download_dir) as temporary:
                 work_dir = Path(temporary)
-                context = self.cookies.materialize(cookie_profile, work_dir) if self.cookies else nullcontext(None)
+                context = self.cookies.materialize(
+                    cookie_profile,
+                    work_dir,
+                    owner_id=user_id,
+                    platform=self._cookie_platform(resolved_url),
+                ) if self.cookies else nullcontext(None)
                 with context as cookie_file:
                     if self._is_douyin_url(resolved_url):
-                        info = self._cached_metadata(resolved_url, cookie_profile)
+                        info = self._cached_metadata(resolved_url, cookie_profile, user_id)
                         if info is None:
                             info, _ = await self._capture_douyin_browser_info(resolved_url, cookie_file)
                         output = json.dumps(info, ensure_ascii=False)
@@ -86,7 +98,7 @@ class Downloader:
                 raise DownloadRejected("解析器返回了无效数据，请更新引擎后重试。") from exc
             if not isinstance(info, dict) or info.get("_type") == "playlist":
                 raise DownloadRejected("当前仅支持单个视频链接，不支持播放列表。")
-            self._remember_metadata(resolved_url, cookie_profile, info)
+            self._remember_metadata(resolved_url, cookie_profile, info, user_id)
             return self._parse_response(resolved_url, info)
 
     async def inspect_collection(
@@ -94,11 +106,17 @@ class Downloader:
         url: str,
         max_items: int,
         cookie_profile: str | None = None,
+        user_id: int | None = None,
     ) -> CollectionInspectResponse:
         async with self.semaphore:
             with tempfile.TemporaryDirectory(prefix=".collection-", dir=self.settings.download_dir) as temporary:
                 work_dir = Path(temporary)
-                context = self.cookies.materialize(cookie_profile, work_dir) if self.cookies else nullcontext(None)
+                context = self.cookies.materialize(
+                    cookie_profile,
+                    work_dir,
+                    owner_id=user_id,
+                    platform=self._cookie_platform(url),
+                ) if self.cookies else nullcontext(None)
                 with context as cookie_file:
                     if self._is_douyin_url(url):
                         return await self._inspect_douyin_collection(url, max_items, cookie_file)
@@ -364,7 +382,7 @@ class Downloader:
                     pass
 
         if not items:
-            cookie_hint = "请在管理后台上传名称为 default 的抖音 cookies.txt 后重试。" if not cookie_file else "当前抖音 Cookie 已失效，请重新上传后重试。"
+            cookie_hint = "请登录本站后在右上角“我的 Cookie”中导入抖音 cookies.txt。" if not cookie_file else "当前抖音 Cookie 已失效，请重新导出并覆盖。"
             raise DownloadRejected(f"抖音主页没有返回公开视频；{cookie_hint}")
         return CollectionInspectResponse(
             source_url=source_url,
@@ -498,10 +516,10 @@ class Downloader:
                 async with self.douyin_browser_semaphore:
                     return await asyncio.wait_for(
                         self._capture_douyin_browser_info_once(source_url, cookie_file),
-                        timeout=45,
+                        timeout=self.settings.metadata_timeout_seconds + 15,
                     )
             except TimeoutError:
-                last_error = DownloadRejected("抖音作品页加载超时，请稍后重试。")
+                last_error = DownloadRejected("抖音作品页加载超时，请在“我的 Cookie”中更新抖音 Cookie 后重试。")
                 if attempt:
                     raise last_error
             except DownloadRejected as exc:
@@ -627,7 +645,7 @@ class Downloader:
                     pass
 
         if not media_url:
-            cookie_hint = "请在管理后台上传名称为 default 的抖音 cookies.txt 后重试。" if not cookie_file else "当前抖音 Cookie 已失效，请重新上传后重试。"
+            cookie_hint = "请登录本站后在右上角“我的 Cookie”中导入抖音 cookies.txt。" if not cookie_file else "当前抖音 Cookie 已失效，请重新导出并覆盖。"
             raise DownloadRejected(f"抖音作品页没有返回可下载的视频；{cookie_hint}")
 
         width = self._as_int(video_meta.get("width"))
@@ -665,13 +683,18 @@ class Downloader:
     async def _download_douyin_browser(self, job: Job) -> None:
         job_dir = self.store.job_dir(job.job_id)
         job_dir.mkdir(parents=True, exist_ok=True)
-        context = self.cookies.materialize(job.cookie_profile, job_dir) if self.cookies else nullcontext(None)
+        context = self.cookies.materialize(
+            job.cookie_profile,
+            job_dir,
+            owner_id=job.user_id,
+            platform="douyin",
+        ) if self.cookies else nullcontext(None)
         with context as cookie_file:
             job.status = JobStatus.parsing
             job.progress = 2
             job.touch()
             self.store.save(job)
-            info = self._cached_metadata(job.url, job.cookie_profile) or self._cached_metadata(job.url, None)
+            info = self._cached_metadata(job.url, job.cookie_profile, job.user_id) or self._cached_metadata(job.url, None)
             if info is None:
                 info, _ = await self._capture_douyin_browser_info(job.url, cookie_file)
             job.update_from_info(info)
@@ -694,10 +717,12 @@ class Downloader:
             await self._stream_douyin_media(job, media_url, video_path, headers)
 
             output_path = video_path
-            if job.media_type == MediaType.audio:
+            if job.media_type in {MediaType.audio, MediaType.transcript}:
                 output_path = job_dir / f"{filename_stem}.{job.audio_format}"
                 await self._extract_audio(job, video_path, output_path)
                 video_path.unlink(missing_ok=True)
+
+            output_path = await self._prepare_output(job, info, output_path, output_path, cookie_file)
 
         self._complete_job(job, output_path)
 
@@ -727,10 +752,11 @@ class Downloader:
         await self._stream_tiktok_media(job, media_url, video_path, headers)
 
         output_path = video_path
-        if job.media_type == MediaType.audio:
+        if job.media_type in {MediaType.audio, MediaType.transcript}:
             output_path = job_dir / f"{filename_stem}.{job.audio_format}"
             await self._extract_audio(job, video_path, output_path)
             video_path.unlink(missing_ok=True)
+        output_path = await self._prepare_output(job, info, output_path, output_path, None)
         self._complete_job(job, output_path)
 
     async def _stream_douyin_media(
@@ -855,6 +881,216 @@ class Downloader:
             message = stderr.decode("utf-8", errors="replace").strip()
             raise DownloadRejected(message[-800:] or "音频转换失败。")
 
+    async def _prepare_output(
+        self,
+        job: Job,
+        info: dict[str, Any],
+        primary_path: Path,
+        transcript_source: Path,
+        cookie_file: Path | None,
+    ) -> Path:
+        del cookie_file  # Reserved for extractors whose subtitle tracks require authenticated requests.
+        job_dir = self.store.job_dir(job.job_id)
+        stem = primary_path.stem[:110]
+        artifacts: list[Path] = []
+        transcript_path: Path | None = None
+        if job.transcript_mode != TranscriptMode.none:
+            transcript_path = await self._create_transcript(job, info, transcript_source, job_dir / f"{stem}.{job.transcript_format.value}")
+
+        if job.media_type == MediaType.transcript:
+            primary_path.unlink(missing_ok=True)
+            if not transcript_path:
+                raise DownloadRejected("文案任务没有生成字幕或转写文件。")
+            artifacts.append(transcript_path)
+        else:
+            artifacts.append(primary_path)
+            if transcript_path:
+                artifacts.append(transcript_path)
+
+        if job.include_description:
+            description_path = job_dir / f"{stem}-文案.txt"
+            description_path.write_text(self._description_text(info), encoding="utf-8")
+            artifacts.append(description_path)
+
+        if job.include_thumbnail and info.get("thumbnail"):
+            try:
+                cover = await asyncio.to_thread(fetch_remote_asset, str(info["thumbnail"]), "cover")
+            except RemoteAssetError:
+                pass
+            else:
+                cover_path = job_dir / f"{stem}-封面.{cover.filename.rsplit('.', 1)[-1]}"
+                cover_path.write_bytes(cover.data)
+                artifacts.append(cover_path)
+
+        unique_artifacts = list(dict.fromkeys(path for path in artifacts if path.is_file()))
+        if len(unique_artifacts) == 1:
+            return unique_artifacts[0]
+        if not unique_artifacts:
+            raise DownloadRejected("任务完成但没有生成可下载文件。")
+
+        job.status = JobStatus.merging
+        job.progress = 99
+        job.touch()
+        self.store.save(job)
+        archive = job_dir / f"{stem}-影链工坊.zip"
+        with zipfile.ZipFile(archive, "w") as package:
+            for artifact in unique_artifacts:
+                compress_type = zipfile.ZIP_DEFLATED if artifact.suffix.lower() in {".txt", ".srt", ".vtt", ".json", ".xml"} else zipfile.ZIP_STORED
+                package.write(artifact, arcname=artifact.name, compress_type=compress_type, compresslevel=6 if compress_type == zipfile.ZIP_DEFLATED else None)
+        for artifact in unique_artifacts:
+            artifact.unlink(missing_ok=True)
+        return archive
+
+    async def _create_transcript(
+        self,
+        job: Job,
+        info: dict[str, Any],
+        source_path: Path,
+        output_path: Path,
+    ) -> Path:
+        mode = job.transcript_mode
+        if mode in {TranscriptMode.native, TranscriptMode.auto}:
+            try:
+                return await self._native_transcript(info, job, output_path)
+            except DownloadRejected:
+                if mode == TranscriptMode.native:
+                    raise
+        if mode not in {TranscriptMode.ai, TranscriptMode.auto}:
+            raise DownloadRejected("没有可用的文案提取方式。")
+        if not self.transcriber.available:
+            raise DownloadRejected("服务器未启用 AI 语音转写，请改选平台原生字幕。")
+        job.status = JobStatus.transcribing
+        job.progress = 97
+        job.speed = None
+        job.eta = None
+        job.touch()
+        self.store.save(job)
+        try:
+            return await self.transcriber.transcribe(
+                source_path,
+                output_path,
+                job.transcript_format,
+                job.transcript_language,
+            )
+        except TranscriptionUnavailable as exc:
+            raise DownloadRejected(str(exc)) from exc
+
+    async def _native_transcript(self, info: dict[str, Any], job: Job, output_path: Path) -> Path:
+        explicit = info.get("subtitles") if isinstance(info.get("subtitles"), dict) else {}
+        automatic = info.get("automatic_captions") if isinstance(info.get("automatic_captions"), dict) else {}
+        languages = list(dict.fromkeys([*explicit.keys(), *automatic.keys()]))
+        requested = job.subtitle_language or job.transcript_language
+        language = requested if requested in languages else self._preferred_language(languages)
+        if not language:
+            raise DownloadRejected("该视频没有平台原生字幕，可改选 AI 语音转写。")
+        tracks = explicit.get(language) or automatic.get(language)
+        track = self._preferred_subtitle_track(tracks)
+        if not track:
+            raise DownloadRejected("平台字幕地址不可用，可改选 AI 语音转写。")
+        try:
+            asset = await asyncio.to_thread(fetch_remote_asset, str(track["url"]), "subtitle")
+        except RemoteAssetError as exc:
+            raise DownloadRejected("平台字幕读取失败，可改选 AI 语音转写。") from exc
+        extension = str(track.get("ext") or asset.filename.rsplit(".", 1)[-1]).lower()
+        cues = self._subtitle_cues(asset.data, extension)
+        if not cues:
+            raise DownloadRejected("平台字幕内容为空，可改选 AI 语音转写。")
+        output_path.write_text(render_transcript(cues, job.transcript_format), encoding="utf-8")
+        return output_path
+
+    @staticmethod
+    def _description_text(info: dict[str, Any]) -> str:
+        title = clean_text(str(info.get("title") or "未命名视频"))
+        uploader = clean_text(str(info.get("uploader") or info.get("channel") or ""))
+        description = str(info.get("description") or "").strip()
+        webpage = str(info.get("webpage_url") or info.get("original_url") or "").strip()
+        lines = [f"标题：{title}"]
+        if uploader:
+            lines.append(f"作者：{uploader}")
+        if webpage:
+            lines.append(f"来源：{webpage}")
+        lines.extend([f"导出时间：{datetime.now().astimezone().isoformat(timespec='seconds')}", "", description or "（作品没有公开描述文案）"])
+        return "\n".join(lines).strip() + "\n"
+
+    @staticmethod
+    def _preferred_language(languages: list[Any]) -> str | None:
+        valid = [str(item) for item in languages if re.fullmatch(r"[A-Za-z0-9_.-]{1,32}", str(item))]
+        for prefix in ("zh-Hans", "zh-CN", "zh", "en", "en-US"):
+            match = next((item for item in valid if item.lower() == prefix.lower()), None)
+            if match:
+                return match
+        return valid[0] if valid else None
+
+    @classmethod
+    def _subtitle_cues(cls, data: bytes, extension: str) -> list[TranscriptSegment]:
+        text = data.decode("utf-8-sig", errors="replace")
+        if extension in {"json", "json3"}:
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                return []
+            cues: list[TranscriptSegment] = []
+            for event in payload.get("events", []) if isinstance(payload, dict) else []:
+                if not isinstance(event, dict):
+                    continue
+                words = "".join(str(item.get("utf8") or "") for item in event.get("segs", []) if isinstance(item, dict))
+                caption = clean_text(words)
+                if caption:
+                    start = float(event.get("tStartMs") or 0) / 1000
+                    duration = float(event.get("dDurationMs") or 2000) / 1000
+                    cues.append(TranscriptSegment(start, start + max(duration, 0.1), caption))
+            return cues
+        if extension in {"ttml", "xml"}:
+            try:
+                root = ElementTree.fromstring(text)
+            except ElementTree.ParseError:
+                return []
+            cues = []
+            for node in root.iter():
+                if node.tag.rsplit("}", 1)[-1] != "p":
+                    continue
+                caption = clean_text("".join(node.itertext()))
+                start = cls._subtitle_time(node.attrib.get("begin"))
+                end = cls._subtitle_time(node.attrib.get("end"))
+                if caption and start is not None:
+                    cues.append(TranscriptSegment(start, end if end is not None and end > start else start + 2, caption))
+            return cues
+
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        cues = []
+        index = 0
+        while index < len(lines):
+            if "-->" not in lines[index]:
+                index += 1
+                continue
+            start_raw, end_raw = [part.strip().split(" ", 1)[0] for part in lines[index].split("-->", 1)]
+            start = cls._subtitle_time(start_raw)
+            end = cls._subtitle_time(end_raw)
+            index += 1
+            caption_lines: list[str] = []
+            while index < len(lines) and lines[index].strip():
+                caption_lines.append(lines[index])
+                index += 1
+            caption = clean_text(re.sub(r"<[^>]+>", "", " ".join(caption_lines)))
+            if caption and start is not None:
+                cues.append(TranscriptSegment(start, end if end is not None and end > start else start + 2, caption))
+            index += 1
+        return cues
+
+    @staticmethod
+    def _subtitle_time(value: Any) -> float | None:
+        if not isinstance(value, str):
+            return None
+        raw = value.strip().replace(",", ".")
+        match = re.fullmatch(r"(?:(\d+):)?(\d{1,2}):(\d{1,2}(?:\.\d+)?)", raw)
+        if match:
+            return int(match.group(1) or 0) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)(ms|s)", raw)
+        if match:
+            amount = float(match.group(1))
+            return amount / 1000 if match.group(2) == "ms" else amount
+        return None
+
     def _complete_job(self, job: Job, file_path: Path) -> None:
         if not file_path.is_file() or file_path.stat().st_size <= 0:
             raise DownloadRejected("下载完成但未找到有效输出文件。")
@@ -908,7 +1144,7 @@ class Downloader:
                 self.tasks.pop(job.job_id, None)
 
     async def cancel(self, job: Job) -> None:
-        if job.status not in {JobStatus.queued, JobStatus.parsing, JobStatus.downloading, JobStatus.merging}:
+        if job.status not in {JobStatus.queued, JobStatus.parsing, JobStatus.downloading, JobStatus.merging, JobStatus.transcribing}:
             raise DownloadRejected("该任务当前不能取消。")
         job.status = JobStatus.cancelled
         job.error = "任务已取消。"
@@ -933,7 +1169,7 @@ class Downloader:
         if self._is_douyin_url(job.url):
             await self._download_douyin_browser(job)
             return
-        cached_info = self._cached_metadata(job.url, job.cookie_profile)
+        cached_info = self._cached_metadata(job.url, job.cookie_profile, job.user_id)
         resolved_url = await self._canonicalize_tiktok_url(job.url)
         if resolved_url != job.url:
             job.url = resolved_url
@@ -945,19 +1181,24 @@ class Downloader:
             except (OSError, TimeoutError, ValueError, json.JSONDecodeError):
                 pass
             else:
-                self._remember_metadata(job.url, job.cookie_profile, embed_info)
+                self._remember_metadata(job.url, job.cookie_profile, embed_info, job.user_id)
                 await self._download_tiktok_embed(job, embed_info)
                 return
         job_dir = self.store.job_dir(job.job_id)
         job_dir.mkdir(parents=True, exist_ok=True)
-        context = self.cookies.materialize(job.cookie_profile, job_dir) if self.cookies else nullcontext(None)
+        context = self.cookies.materialize(
+            job.cookie_profile,
+            job_dir,
+            owner_id=job.user_id,
+            platform=self._cookie_platform(job.url),
+        ) if self.cookies else nullcontext(None)
         with context as cookie_file:
             job.status = JobStatus.parsing
             job.progress = 2
             job.touch()
             self.store.save(job)
 
-            info = cached_info or self._cached_metadata(job.url, job.cookie_profile)
+            info = cached_info or self._cached_metadata(job.url, job.cookie_profile, job.user_id)
             impersonate_target = None
             if info is None:
                 output, impersonate_target = await self._capture_metadata(job.url, cookie_file, job.job_id)
@@ -1004,19 +1245,8 @@ class Downloader:
             file_path.unlink(missing_ok=True)
             raise DownloadRejected(f"文件超过 {self.settings.max_file_size_mb} MB 上限。")
 
-        job.file_path = file_path
-        job.filename = file_path.name
-        job.size_bytes = file_path.stat().st_size
-        job.downloaded_bytes = job.size_bytes
-        job.total_bytes = job.size_bytes
-        job.progress = 100
-        job.speed = None
-        job.eta = 0
-        job.status = JobStatus.completed
-        job.expires_at = job.updated_at + self.settings.job_ttl_seconds
-        job.touch()
-        job.expires_at = job.updated_at + self.settings.job_ttl_seconds
-        self.store.save(job)
+        output_path = await self._prepare_output(job, info, file_path, file_path, None)
+        self._complete_job(job, output_path)
 
     async def _run_capture(self, command: list[str], timeout: int, job_id: str | None = None) -> str:
         process = await asyncio.create_subprocess_exec(
@@ -1300,7 +1530,7 @@ class Downloader:
             "--output",
             outtmpl,
         ]
-        if job.media_type == MediaType.audio:
+        if job.media_type in {MediaType.audio, MediaType.transcript}:
             command.extend(["--format", "bestaudio/best", "--extract-audio", "--audio-format", job.audio_format])
         else:
             if job.format_id == "best":
@@ -1350,6 +1580,26 @@ class Downloader:
         except ValueError:
             return False
         return hostname == "tiktok.com" or hostname.endswith(".tiktok.com")
+
+    @staticmethod
+    def _cookie_platform(url: str) -> str | None:
+        try:
+            hostname = (urlsplit(url).hostname or "").lower().rstrip(".")
+        except ValueError:
+            return None
+        mappings = {
+            "douyin": ("douyin.com",),
+            "tiktok": ("tiktok.com",),
+            "youtube": ("youtube.com", "youtu.be"),
+            "bilibili": ("bilibili.com",),
+            "instagram": ("instagram.com",),
+            "facebook": ("facebook.com", "fb.watch"),
+            "twitter": ("twitter.com", "x.com"),
+        }
+        for platform, domains in mappings.items():
+            if any(hostname == domain or hostname.endswith(f".{domain}") for domain in domains):
+                return platform
+        return None
 
     @staticmethod
     def _is_douyin_url(url: str) -> bool:
@@ -1426,7 +1676,13 @@ class Downloader:
     def _new_tiktok_iid() -> str:
         return str(7_250_000_000_000_000_000 + secrets.randbelow(75_099_899_999_994_578))
 
-    def _remember_metadata(self, url: str, cookie_profile: str | None, info: dict[str, Any]) -> None:
+    def _remember_metadata(
+        self,
+        url: str,
+        cookie_profile: str | None,
+        info: dict[str, Any],
+        user_id: int | None = None,
+    ) -> None:
         now = monotonic()
         stale = [
             key for key, (created_at, _) in self.metadata_cache.items()
@@ -1434,15 +1690,21 @@ class Downloader:
         ]
         for key in stale:
             self.metadata_cache.pop(key, None)
-        self.metadata_cache[(url, cookie_profile)] = (now, info)
+        self.metadata_cache[(url, cookie_profile, user_id)] = (now, info)
 
-    def _cached_metadata(self, url: str, cookie_profile: str | None) -> dict[str, Any] | None:
-        cached = self.metadata_cache.get((url, cookie_profile))
+    def _cached_metadata(
+        self,
+        url: str,
+        cookie_profile: str | None,
+        user_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        key = (url, cookie_profile, user_id)
+        cached = self.metadata_cache.get(key)
         if not cached:
             return None
         created_at, info = cached
         if monotonic() - created_at > self.METADATA_CACHE_TTL_SECONDS:
-            self.metadata_cache.pop((url, cookie_profile), None)
+            self.metadata_cache.pop(key, None)
             return None
         return info
 
@@ -1466,7 +1728,7 @@ class Downloader:
         audio_exts = {".mp3", ".m4a", ".opus", ".wav", ".flac", ".aac", ".ogg"}
         ignored = {".part", ".ytdl", ".srt", ".vtt", ".ass", ".lrc", ".json", ".jpg", ".jpeg", ".png", ".webp", ".txt"}
         files = [path for path in job_dir.iterdir() if path.is_file() and not path.name.startswith(".") and path.suffix.lower() not in ignored]
-        if media_type == MediaType.audio:
+        if media_type in {MediaType.audio, MediaType.transcript}:
             audio = [path for path in files if path.suffix.lower() in audio_exts]
             files = audio or files
         if not files:
@@ -1527,7 +1789,7 @@ class Downloader:
         subtitles: list[SubtitleOption] = []
         explicit = info.get("subtitles") or {}
         automatic = info.get("automatic_captions") or {}
-        for language in sorted(set(explicit) | set(automatic))[:80]:
+        for language in self._ordered_subtitle_languages(set(explicit) | set(automatic)):
             if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,32}", str(language)):
                 continue
             is_automatic = language not in explicit
@@ -1557,6 +1819,7 @@ class Downloader:
             formats=formats,
             subtitles=subtitles,
             subtitle_note=None if subtitles else "该视频未提供可下载字幕",
+            ai_transcription_available=self.transcriber.available,
         )
 
     def _collection_response(
@@ -1664,6 +1927,18 @@ class Downloader:
         return min(candidates, key=lambda item: supported.get(str(item.get("ext") or "").lower(), 99))
 
     @staticmethod
+    def _ordered_subtitle_languages(languages: set[Any]) -> list[str]:
+        valid = sorted(
+            (str(item) for item in languages if re.fullmatch(r"[a-zA-Z0-9_.-]{1,32}", str(item))),
+            key=str.lower,
+        )
+        preferred_prefixes = ("zh-hans", "zh-cn", "zh", "zh-hant", "zh-tw", "en", "en-us", "en-gb", "id", "ja", "ko")
+        preferred: list[str] = []
+        for target in preferred_prefixes:
+            preferred.extend(item for item in valid if item.lower() == target and item not in preferred)
+        return [*preferred, *(item for item in valid if item not in preferred)][:120]
+
+    @staticmethod
     def _as_int(value: Any) -> int | None:
         try:
             return int(value) if value is not None else None
@@ -1684,12 +1959,12 @@ class Downloader:
         if "unsupported url" in lower:
             return "yt-dlp 暂不支持该链接或平台。"
         if "sign in" in lower or "cookies" in lower or "login" in lower:
-            return "平台要求登录验证，请让管理员更新 Cookie 配置后重试。"
+            return "平台要求登录验证，请登录本站后在“我的 Cookie”中更新对应平台 Cookie。"
         if "larger than max-filesize" in lower:
             return "文件超过站点下载大小上限。"
         if "requested format is not available" in lower:
             return "所选清晰度已经失效，请重新解析并选择格式。"
         if "universal data for rehydration" in lower:
-            return "TikTok 未返回视频数据，请确认链接是可公开播放的视频，或让管理员更新 TikTok Cookie 后重试。"
+            return "TikTok 未返回视频数据，请确认链接可公开播放，或在“我的 Cookie”中更新 TikTok Cookie。"
         cleaned = re.sub(r"/[^\s]*/\.cookies\.txt", "[cookie]", message)
         return cleaned[-800:] or "任务失败，请稍后重试。"

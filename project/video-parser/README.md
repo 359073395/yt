@@ -1,8 +1,8 @@
-# 影链工坊 2.1
+# 影链工坊 2.2
 
-基于官方 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 的自托管 Web 视频下载中心。支持单条视频解析和创作者主页/频道/播放列表批量下载，以及真实画质、封面、字幕、实时队列、任务历史、多用户额度、API Key 和加密 Cookie 配置。
+基于官方 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 的自托管 Web 视频下载与文案中心。支持单条视频和创作者主页批量下载、用户私有 Cookie、平台原生字幕、faster-whisper AI 语音转写、TXT/SRT/VTT 文案以及封面和描述打包导出。
 
-## 2.1 功能
+## 2.2 功能
 
 - 主页批量下载：粘贴一个创作者主页、频道或播放列表链接，扫描后把其中的视频全部加入队列
 - 抖音主页扫描：可粘贴带中文的整段分享文案或 `v.douyin.com` 短链，自动展开并读取作者公开视频；图文作品不会误计为视频
@@ -11,7 +11,10 @@
 - 视频格式选择：自动最佳画质或指定 yt-dlp 实际返回的格式；只有一个格式时不伪造清晰度选项
 - 封面：站内安全预览并支持下载原始封面
 - 音频提取：MP3、M4A、OPUS、FLAC、WAV
-- 字幕：明确显示是否可用；人工字幕和自动字幕既可单独下载，也可随视频嵌入
+- 字幕与文案：原生字幕优先；没有字幕时可使用 faster-whisper 在服务器本地识别语音
+- 三种文案格式：TXT 纯文字、SRT 剪辑字幕、VTT 网页字幕
+- 作品文案：展示并复制作品公开描述，可把标题、作者、描述、话题与来源一同导出
+- 下载包：视频或音频可附带语音文案、作品描述和原始封面，自动打包为 ZIP
 - 实时任务：SSE 推送进度、速度、ETA，支持取消和重试
 - 抖音直连下载：主页扫描取得的多清晰度签名地址直接流式保存，避免逐个重复打开作品页
 - TikTok 分享链接：优先读取官方 Embed v2 并直接流式保存；oEmbed、移动端 API、多浏览器指纹与解析缓存自动降级
@@ -19,7 +22,8 @@
 - 临时文件：到期自动清理，下载地址使用 15 分钟签名
 - 多用户：访客、普通用户、会员、管理员及每日额度
 - API Key：可为智能体或其他服务配置独立额度和权限
-- Cookie：管理员上传 Netscape cookies.txt，加密保存且不写入日志
+- 用户 Cookie：登录本站后导入各平台 Netscape cookies.txt；按用户隔离、加密保存并自动过滤其他网站条目
+- 管理员 Cookie：继续支持全站默认配置，为没有私有 Cookie 的任务提供降级
 - 新版引擎：`yt-dlp[default,curl-cffi]`、`yt-dlp-ejs`、Deno、FFmpeg、Chromium
 - 安全部署：非 root、只读容器根文件系统、移除 Linux capabilities
 
@@ -55,16 +59,25 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 
 ## 从 1.0 / 2.0 升级
 
-2.1 继续使用原来的 `/data/video-parser.sqlite3` 和 Docker volume，不需要迁移账号、会员或 API Key。升级脚本会自动：
+2.2 继续使用原来的 `/data/video-parser.sqlite3` 和 Docker volume，不需要迁移账号、会员、历史任务、Cookie 或 API Key。升级脚本会自动：
 
 1. 保留 `.env` 和数据卷。
 2. 将旧默认管理员密码替换为随机密码。
-3. 拉取 2.1.4 镜像，自动迁移 1.x 数据卷权限并启动健康检查。
+3. 拉取 2.2.0 镜像，自动增加任务字段并启动健康检查。
 4. 失败时回滚上一容器镜像。
 
 不要使用 `docker compose down --volumes` 更新，否则会删除数据库和历史文件。
 
 ## Cookie 配置
+
+普通用户登录本站后点击右上角账号菜单中的“我的 Cookie”，选择平台并上传浏览器导出的 Netscape `cookies.txt`。系统只保留所选平台及其媒体域名的条目，其他网站 Cookie 会在加密前删除。
+
+- 每个用户只能读取和删除自己的 Cookie。
+- 解析时会按链接平台自动选择当前用户的 Cookie，无需每次手工指定。
+- 不接收平台账号和密码；建议使用专用低权限账号。
+- Cookie 过期后重新导出并覆盖即可。
+
+管理员仍可进入“管理后台 → Cookie 配置”上传全局 Netscape `cookies.txt`：
 
 管理员登录后进入“管理后台 → Cookie 配置”，上传浏览器扩展导出的 Netscape `cookies.txt`。
 
@@ -72,6 +85,15 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 - Cookie 使用由 `AUTH_SECRET` 派生的密钥加密保存。
 - 更改 `AUTH_SECRET` 后需要重新上传 Cookie。
 - 只应使用专用的低权限平台账号，不要上传主账号 Cookie。
+
+## AI 语音转写
+
+选择“字幕 / 文案”，提取方式使用“自动”或“AI 识别视频语音”。自动模式会优先下载平台原生字幕，原生字幕不存在或读取失败时再运行 AI。
+
+- 默认模型为 `base`，CPU 使用 `int8`，兼顾中文效果和小服务器内存。
+- 模型在第一次 AI 任务时下载到 `/data/cache/whisper`，以后更新容器不会重复下载。
+- 第一次任务会比后续任务慢；视频越长，CPU 转写时间越长。
+- 可通过环境变量选择 `tiny`、`base`、`small` 等 faster-whisper 模型。
 
 ## 环境变量
 
@@ -87,6 +109,12 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 | `JOB_TTL_SECONDS` | `3600` | 完成文件保留时间 |
 | `METADATA_TIMEOUT_SECONDS` | `45` | 链接解析超时 |
 | `CHROMIUM_PATH` | 自动探测 | 抖音主页与作品页解析使用的 Chromium 路径 |
+| `TRANSCRIPTION_ENABLED` | `true` | 是否允许 AI 语音转写 |
+| `WHISPER_MODEL` | `base` | faster-whisper 模型名称 |
+| `WHISPER_DEVICE` | `cpu` | `cpu`、`cuda` 或 `auto` |
+| `WHISPER_COMPUTE_TYPE` | `int8` | CPU 默认量化类型 |
+| `WHISPER_CPU_THREADS` | `2` | 单个转写任务使用的 CPU 线程数 |
+| `WHISPER_CACHE_DIR` | `/data/cache/whisper` | 模型持久化缓存目录 |
 | `TRUSTED_PROXY_HEADERS` | `false` | 仅在可信反代后开启 |
 
 ## API
@@ -102,6 +130,9 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 - `GET /api/jobs/{jobId}/events`：SSE 实时状态
 - `POST /api/jobs/{jobId}/cancel`：取消任务
 - `POST /api/jobs/{jobId}/retry`：重试任务
+- `GET /api/cookies`：当前用户的私有 Cookie 配置
+- `PUT /api/cookies/{platform}`：导入并加密当前用户的平台 Cookie
+- `DELETE /api/cookies/{platform}`：删除当前用户的平台 Cookie
 
 API Key 接口保持兼容：
 

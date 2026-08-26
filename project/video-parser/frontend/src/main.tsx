@@ -23,6 +23,7 @@ import {
   Loader2,
   LogOut,
   Music2,
+  FileText,
   Play,
   RefreshCw,
   RotateCcw,
@@ -43,6 +44,7 @@ type JobStatus =
   | 'parsing'
   | 'downloading'
   | 'merging'
+  | 'transcribing'
   | 'completed'
   | 'failed'
   | 'cancelled'
@@ -64,10 +66,15 @@ type Job = {
   progress: number
   speed?: number | null
   eta?: number | null
-  media_type: 'video' | 'audio'
+  media_type: 'video' | 'audio' | 'transcript'
   format_id: string
   audio_format: string
   subtitle_language?: string | null
+  transcript_mode: 'none' | 'native' | 'ai' | 'auto'
+  transcript_format: 'txt' | 'srt' | 'vtt'
+  transcript_language?: string | null
+  include_description: boolean
+  include_thumbnail: boolean
   filename?: string | null
   download_url?: string | null
   error?: string | null
@@ -113,6 +120,7 @@ type ParsedMedia = {
   formats: FormatOption[]
   subtitles: SubtitleOption[]
   subtitle_note?: string | null
+  ai_transcription_available: boolean
 }
 
 type BatchJobCreateResponse = {
@@ -209,6 +217,11 @@ type CookieProfile = {
   name: string
   size_bytes: number
   updated_at: number
+  cookie_count: number
+  domains: string[]
+  expires_at?: number | null
+  expired: boolean
+  scope: 'user' | 'global'
 }
 
 type PlatformItem = {
@@ -231,6 +244,7 @@ const statusText: Record<JobStatus, string> = {
   parsing: '解析中',
   downloading: '下载中',
   merging: '合并中',
+  transcribing: 'AI 转写中',
   completed: '完成',
   failed: '失败',
   cancelled: '已取消',
@@ -243,7 +257,7 @@ const roleText: Record<UserRole, string> = {
   admin: '管理员',
 }
 
-const statusOrder: JobStatus[] = ['queued', 'parsing', 'downloading', 'merging', 'completed']
+const statusOrder: JobStatus[] = ['queued', 'parsing', 'downloading', 'transcribing', 'merging', 'completed']
 
 const demoJob: Job = {
   job_id: 'preview',
@@ -262,6 +276,10 @@ const demoJob: Job = {
   media_type: 'video',
   format_id: 'best',
   audio_format: 'mp3',
+  transcript_mode: 'none',
+  transcript_format: 'srt',
+  include_description: false,
+  include_thumbnail: false,
   created_at: Date.now() / 1000,
   updated_at: Date.now() / 1000,
   expires_at: Date.now() / 1000 + 3600,
@@ -486,6 +504,7 @@ function LegacyApp() {
           onAuth={handleAuth}
           adminRequest={adminRequest}
           onLogout={logout}
+          onCookies={() => undefined}
         />
       </header>
 
@@ -542,13 +561,24 @@ function App() {
   const [collectionUrl, setCollectionUrl] = React.useState('')
   const [collectionLimit, setCollectionLimit] = React.useState(20)
   const [collection, setCollection] = React.useState<CollectionInspectResponse | null>(null)
-  const [batchMediaType, setBatchMediaType] = React.useState<'video' | 'audio'>('video')
+  const [batchMediaType, setBatchMediaType] = React.useState<'video' | 'audio' | 'transcript'>('video')
   const [batchAudioFormat, setBatchAudioFormat] = React.useState('mp3')
+  const [batchTranscriptMode, setBatchTranscriptMode] = React.useState<'none' | 'native' | 'ai' | 'auto'>('none')
+  const [batchTranscriptFormat, setBatchTranscriptFormat] = React.useState<'txt' | 'srt' | 'vtt'>('txt')
+  const [batchIncludeDescription, setBatchIncludeDescription] = React.useState(false)
+  const [batchIncludeThumbnail, setBatchIncludeThumbnail] = React.useState(false)
   const [parsed, setParsed] = React.useState<ParsedMedia | null>(null)
-  const [mediaType, setMediaType] = React.useState<'video' | 'audio'>('video')
+  const [mediaType, setMediaType] = React.useState<'video' | 'audio' | 'transcript'>('video')
   const [formatId, setFormatId] = React.useState('best')
   const [audioFormat, setAudioFormat] = React.useState('mp3')
   const [subtitle, setSubtitle] = React.useState('')
+  const [transcriptMode, setTranscriptMode] = React.useState<'none' | 'native' | 'ai' | 'auto'>('none')
+  const [transcriptFormat, setTranscriptFormat] = React.useState<'txt' | 'srt' | 'vtt'>('txt')
+  const [transcriptLanguage, setTranscriptLanguage] = React.useState('auto')
+  const [includeDescription, setIncludeDescription] = React.useState(false)
+  const [includeThumbnail, setIncludeThumbnail] = React.useState(false)
+  const [cookieProfiles, setCookieProfiles] = React.useState<CookieProfile[]>([])
+  const [cookieManagerOpen, setCookieManagerOpen] = React.useState(false)
   const [history, setHistory] = React.useState<Job[]>([])
   const [job, setJob] = React.useState<Job | null>(null)
   const [isParsing, setIsParsing] = React.useState(false)
@@ -602,9 +632,27 @@ function App() {
     return []
   }
 
+  async function refreshCookies(authToken = token) {
+    if (!authToken) {
+      setCookieProfiles([])
+      return []
+    }
+    try {
+      const response = await apiFetch('/api/cookies', {}, authToken)
+      if (!response.ok) throw new Error(await readError(response))
+      const items = (await response.json()) as CookieProfile[]
+      setCookieProfiles(items)
+      return items
+    } catch {
+      setCookieProfiles([])
+      return []
+    }
+  }
+
   React.useEffect(() => {
     void refreshMe(token)
     void refreshHistory(token)
+    void refreshCookies(token)
   }, [token])
 
   React.useEffect(() => {
@@ -624,7 +672,7 @@ function App() {
     return () => source.close()
   }, [job?.job_id, job?.status])
 
-  const hasActiveHistory = history.some((item) => ['queued', 'parsing', 'downloading', 'merging'].includes(item.status))
+  const hasActiveHistory = history.some((item) => ['queued', 'parsing', 'downloading', 'transcribing', 'merging'].includes(item.status))
   React.useEffect(() => {
     if (!hasActiveHistory) return
     const timer = window.setInterval(() => void refreshHistory(), 2000)
@@ -654,6 +702,9 @@ function App() {
       setFormatId(body.formats[0]?.format_id || 'best')
       setMediaType('video')
       setSubtitle('')
+      setTranscriptMode('none')
+      setIncludeDescription(false)
+      setIncludeThumbnail(false)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '解析失败')
     } finally {
@@ -706,7 +757,16 @@ function App() {
       const response = await apiFetch('/api/jobs/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ urls, media_type: batchMediaType, audio_format: batchAudioFormat }),
+        body: JSON.stringify({
+          urls,
+          media_type: batchMediaType,
+          audio_format: batchAudioFormat,
+          transcript_mode: batchMediaType === 'transcript' ? (batchTranscriptMode === 'none' ? 'auto' : batchTranscriptMode) : batchTranscriptMode,
+          transcript_format: batchTranscriptFormat,
+          transcript_language: null,
+          include_description: batchIncludeDescription,
+          include_thumbnail: batchIncludeThumbnail,
+        }),
       })
       if (!response.ok) throw new Error(await readError(response))
       const body = (await response.json()) as BatchJobCreateResponse
@@ -738,6 +798,11 @@ function App() {
           format_has_audio: selected?.has_audio ?? false,
           audio_format: audioFormat,
           subtitle_language: mediaType === 'video' && subtitle ? subtitle : null,
+          transcript_mode: mediaType === 'transcript' ? (transcriptMode === 'none' ? 'auto' : transcriptMode) : transcriptMode,
+          transcript_format: transcriptFormat,
+          transcript_language: transcriptLanguage === 'auto' ? null : transcriptLanguage,
+          include_description: includeDescription,
+          include_thumbnail: includeThumbnail,
         }),
       })
       if (!response.ok) throw new Error(await readError(response))
@@ -787,6 +852,7 @@ function App() {
     window.localStorage.removeItem('video-parser-token')
     setToken('')
     setUser(null)
+    setCookieProfiles([])
   }
 
   async function copyDownloadLink(downloadUrl?: string | null) {
@@ -801,9 +867,9 @@ function App() {
   return (
     <main className="app-shell app-v2">
       <header className="top-nav">
-        <a className="brand" href="#top"><span className="brand-mark"><Play size={15} fill="currentColor" /></span>影链工坊 <em>2.1</em></a>
+        <a className="brand" href="#top"><span className="brand-mark"><Play size={15} fill="currentColor" /></span>影链工坊 <em>2.2</em></a>
         <nav><a href="#workspace">下载工作台</a><a href="#platforms">支持平台</a><a href="#notice">使用说明</a></nav>
-        <HeaderAccount quota={quota} user={user} onAuth={handleAuth} adminRequest={adminRequest} onLogout={logout} />
+        <HeaderAccount quota={quota} user={user} onAuth={handleAuth} adminRequest={adminRequest} onLogout={logout} onCookies={() => setCookieManagerOpen(true)} />
       </header>
 
       <section className="v2-intro" id="top">
@@ -818,6 +884,12 @@ function App() {
             <button className={inputMode === 'single' ? 'active' : ''} type="button" onClick={() => { setInputMode('single'); setMessage(null) }}>单条解析</button>
             <button className={inputMode === 'batch' ? 'active' : ''} type="button" onClick={() => { setInputMode('batch'); setMessage(null) }}>批量下载</button>
           </div>
+          {user && (
+            <div className="cookie-status-bar">
+              <span><Cookie size={15} />{cookieProfiles.length ? `已接入 ${cookieProfiles.length} 个平台登录状态` : '当前使用公开解析'}</span>
+              <button type="button" onClick={() => setCookieManagerOpen(true)}>{cookieProfiles.length ? '管理我的 Cookie' : '添加平台 Cookie'}</button>
+            </div>
+          )}
 
           {inputMode === 'single' ? (
             <form className="parser-form parser-form-v2" onSubmit={parseUrl}>
@@ -839,7 +911,7 @@ function App() {
                   <label className="collection-limit"><span>扫描数量</span><select value={collectionLimit} onChange={(event) => { setCollectionLimit(Number(event.target.value)); setCollection(null) }}><option value={10}>最近 10 个</option><option value={20}>最近 20 个</option><option value={50}>最近 50 个</option></select></label>
                   <button className="scan-button" type="submit" disabled={isCollectionParsing || !collectionUrl.trim()}>{isCollectionParsing ? <Loader2 className="spin" size={17} /> : <Search size={17} />}{isCollectionParsing ? '正在扫描' : '扫描主页'}</button>
                 </div>
-                <p className="batch-note">支持抖音短链及 YouTube、TikTok、Bilibili 等主页。扫描不消耗下载额度；抖音风控或登录可见主页需先上传名称为 default 的 Cookie。</p>
+                <p className="batch-note">支持抖音短链及 YouTube、TikTok、Bilibili 等主页。扫描不消耗下载额度；登录后可在“我的 Cookie”中接入各平台登录状态。</p>
               </form>
 
               {isCollectionParsing && <div className="collection-loading"><Loader2 className="spin" size={26} /><div><strong>正在读取主页视频列表</strong><span>主页内容较多时可能需要几十秒。</span></div></div>}
@@ -858,8 +930,15 @@ function App() {
                   </div>
                   {collection.truncated && <p className="collection-warning"><AlertTriangle size={14} />该主页还有更多视频，本次按你选择的上限下载；可提高扫描数量后重新扫描。</p>}
                   <div className="batch-options">
-                    <label><span>统一下载类型</span><select value={batchMediaType} onChange={(event) => setBatchMediaType(event.target.value as 'video' | 'audio')}><option value="video">视频 · 自动最佳画质</option><option value="audio">仅音频</option></select></label>
+                    <label><span>统一下载类型</span><select value={batchMediaType} onChange={(event) => { const next = event.target.value as 'video' | 'audio' | 'transcript'; setBatchMediaType(next); if (next === 'transcript' && batchTranscriptMode === 'none') setBatchTranscriptMode('auto'); if (next !== 'transcript' && batchMediaType === 'transcript') setBatchTranscriptMode('none') }}><option value="video">视频 · 自动最佳画质</option><option value="audio">仅音频</option><option value="transcript">仅字幕 / 口播文案</option></select></label>
                     {batchMediaType === 'audio' && <label><span>统一音频格式</span><select value={batchAudioFormat} onChange={(event) => setBatchAudioFormat(event.target.value)}><option value="mp3">MP3</option><option value="m4a">M4A</option><option value="opus">OPUS</option><option value="flac">FLAC</option><option value="wav">WAV</option></select></label>}
+                    {batchMediaType !== 'transcript' && <label><span>随每个文件生成文案</span><select value={batchTranscriptMode} onChange={(event) => setBatchTranscriptMode(event.target.value as 'none' | 'native' | 'ai' | 'auto')}><option value="none">不生成</option><option value="auto">自动 · 原生字幕优先，AI 兜底</option><option value="native">仅平台原生字幕</option><option value="ai">AI 识别视频语音</option></select></label>}
+                    {batchMediaType === 'transcript' && <label><span>提取方式</span><select value={batchTranscriptMode === 'none' ? 'auto' : batchTranscriptMode} onChange={(event) => setBatchTranscriptMode(event.target.value as 'native' | 'ai' | 'auto')}><option value="auto">自动 · 原生字幕优先，AI 兜底</option><option value="native">仅平台原生字幕</option><option value="ai">AI 识别视频语音</option></select></label>}
+                    {(batchMediaType === 'transcript' || batchTranscriptMode !== 'none') && <label><span>文案格式</span><select value={batchTranscriptFormat} onChange={(event) => setBatchTranscriptFormat(event.target.value as 'txt' | 'srt' | 'vtt')}><option value="txt">TXT · 纯文字</option><option value="srt">SRT · 带时间轴</option><option value="vtt">VTT · 网页字幕</option></select></label>}
+                  </div>
+                  <div className="bundle-options">
+                    <label><input type="checkbox" checked={batchIncludeDescription} onChange={(event) => setBatchIncludeDescription(event.target.checked)} />附带作品标题、描述与话题文案</label>
+                    <label><input type="checkbox" checked={batchIncludeThumbnail} onChange={(event) => setBatchIncludeThumbnail(event.target.checked)} />附带原始封面</label>
                   </div>
                   {!collectionQuotaEnough && <p className="collection-warning"><AlertTriangle size={14} />下载额度不足：需要 {collection.items.length} 次，当前剩余 {quota?.remaining ?? 0} 次。</p>}
                   <button className="primary-download" type="button" onClick={createBatch} disabled={isBatchCreating || !collectionQuotaEnough}>
@@ -887,9 +966,11 @@ function App() {
                 <div className="preview-image">{parsed.thumbnail ? <img src={parsed.thumbnail_proxy_url || parsed.thumbnail} alt="视频封面" /> : <FileVideo size={32} />}</div>
                 <div className="preview-copy"><span>{parsed.platform || '自动识别'} · {formatDuration(parsed.duration)}</span><h2>{parsed.title}</h2><p>{parsed.uploader || '公开内容'}</p>{parsed.thumbnail_download_url && <a className="cover-download" href={parsed.thumbnail_download_url}><Download size={14} />下载原始封面</a>}</div>
               </div>
+              {parsed.description && <details className="description-preview"><summary><FileText size={14} />查看作品公开文案</summary><p>{parsed.description}</p><button type="button" onClick={() => navigator.clipboard.writeText(parsed.description || '')}><Copy size={14} />复制文案</button></details>}
               <div className="media-tabs">
-                <button className={mediaType === 'video' ? 'active' : ''} type="button" onClick={() => setMediaType('video')}><FileVideo size={17} />视频</button>
-                <button className={mediaType === 'audio' ? 'active' : ''} type="button" onClick={() => setMediaType('audio')}><Music2 size={17} />仅音频</button>
+                <button className={mediaType === 'video' ? 'active' : ''} type="button" onClick={() => { if (mediaType === 'transcript') setTranscriptMode('none'); setMediaType('video') }}><FileVideo size={17} />视频</button>
+                <button className={mediaType === 'audio' ? 'active' : ''} type="button" onClick={() => { if (mediaType === 'transcript') setTranscriptMode('none'); setMediaType('audio') }}><Music2 size={17} />仅音频</button>
+                <button className={mediaType === 'transcript' ? 'active' : ''} type="button" onClick={() => { setMediaType('transcript'); if (transcriptMode === 'none') setTranscriptMode('auto') }}><FileText size={17} />字幕 / 文案</button>
               </div>
               <div className="option-grid">
                 {mediaType === 'video' ? (
@@ -897,12 +978,29 @@ function App() {
                     <label><span>画质与格式</span><select value={formatId} disabled={parsed.formats.length === 1} onChange={(event) => setFormatId(event.target.value)}>{parsed.formats.map((item) => <option value={item.format_id} key={item.format_id}>{item.label}{item.filesize ? ` · ${formatBytes(item.filesize)}` : ''}</option>)}</select><small>{parsed.formats.length === 1 ? '平台仅提供这一档可下载画质' : `检测到 ${parsed.formats.length - 1} 个具体格式`}</small></label>
                     <label><span><Captions size={14} />字幕</span><select value={subtitle} disabled={!parsed.subtitles.length} onChange={(event) => setSubtitle(event.target.value)}><option value="">{parsed.subtitles.length ? '不嵌入字幕' : '无可下载字幕'}</option>{parsed.subtitles.map((item) => <option value={item.language} key={item.language}>{item.label}{item.ext ? ` · ${item.ext.toUpperCase()}` : ''}{item.automatic ? '（自动）' : ''}</option>)}</select><small>{parsed.subtitle_note || '选择后会嵌入视频，也可单独下载字幕文件'}</small>{selectedSubtitle?.download_url && <a className="subtitle-download" href={selectedSubtitle.download_url}><Download size={13} />单独下载 {selectedSubtitle.label} 字幕</a>}</label>
                   </>
-                ) : (
+                ) : mediaType === 'audio' ? (
                   <label><span>音频格式</span><select value={audioFormat} onChange={(event) => setAudioFormat(event.target.value)}><option value="mp3">MP3 · 通用兼容</option><option value="m4a">M4A · 保留质量</option><option value="opus">OPUS · 高压缩率</option><option value="flac">FLAC · 无损</option><option value="wav">WAV · 未压缩</option></select></label>
+                ) : (
+                  <>
+                    <label><span><Sparkles size={14} />提取方式</span><select value={transcriptMode === 'none' ? 'auto' : transcriptMode} onChange={(event) => setTranscriptMode(event.target.value as 'native' | 'ai' | 'auto')}><option value="auto">自动 · 原生字幕优先，AI 兜底</option><option value="native" disabled={!parsed.subtitles.length}>仅平台原生字幕</option><option value="ai" disabled={!parsed.ai_transcription_available}>AI 识别视频语音</option></select><small>{parsed.subtitles.length ? `检测到 ${parsed.subtitles.length} 条平台字幕轨道` : '没有原生字幕时将自动识别口播语音'}</small></label>
+                    <label><span>导出格式</span><select value={transcriptFormat} onChange={(event) => setTranscriptFormat(event.target.value as 'txt' | 'srt' | 'vtt')}><option value="txt">TXT · 纯文字文案</option><option value="srt">SRT · 视频剪辑字幕</option><option value="vtt">VTT · 网页字幕</option></select></label>
+                    <label><span>语音语言</span><select value={transcriptLanguage} onChange={(event) => setTranscriptLanguage(event.target.value)}><option value="auto">自动识别语言</option><option value="zh">中文</option><option value="en">英语</option><option value="id">印尼语</option><option value="ja">日语</option><option value="ko">韩语</option></select><small>仅 AI 语音转写时使用</small></label>
+                  </>
                 )}
               </div>
+              {mediaType !== 'transcript' && (
+                <div className="transcript-addon">
+                  <label><span><FileText size={14} />随文件生成口播文案</span><select value={transcriptMode} onChange={(event) => setTranscriptMode(event.target.value as 'none' | 'native' | 'ai' | 'auto')}><option value="none">不生成</option><option value="auto">自动 · 原生字幕优先，AI 兜底</option><option value="native" disabled={!parsed.subtitles.length}>仅平台原生字幕</option><option value="ai" disabled={!parsed.ai_transcription_available}>AI 语音识别</option></select></label>
+                  {transcriptMode !== 'none' && <label><span>文案格式</span><select value={transcriptFormat} onChange={(event) => setTranscriptFormat(event.target.value as 'txt' | 'srt' | 'vtt')}><option value="txt">TXT</option><option value="srt">SRT</option><option value="vtt">VTT</option></select></label>}
+                </div>
+              )}
+              <div className="bundle-options">
+                <label><input type="checkbox" checked={includeDescription} onChange={(event) => setIncludeDescription(event.target.checked)} />附带标题、描述与话题文案</label>
+                <label><input type="checkbox" checked={includeThumbnail} onChange={(event) => setIncludeThumbnail(event.target.checked)} />附带原始封面</label>
+                {(includeDescription || includeThumbnail || (mediaType !== 'transcript' && transcriptMode !== 'none')) && <small>多个文件会自动打包为 ZIP。</small>}
+              </div>
               <button className="primary-download" type="button" onClick={createJob} disabled={isCreating}>
-                {isCreating ? <Loader2 className="spin" size={18} /> : <Download size={18} />}{isCreating ? '正在创建任务' : `加入下载队列 · ${quotaText(quota)}`}
+                {isCreating ? <Loader2 className="spin" size={18} /> : mediaType === 'transcript' ? <FileText size={18} /> : <Download size={18} />}{isCreating ? '正在创建任务' : `${mediaType === 'transcript' ? '开始提取文案' : '加入下载队列'} · ${quotaText(quota)}`}
               </button>
             </article>
           )}
@@ -913,6 +1011,7 @@ function App() {
 
       <section className="lower-grid"><HistoryPanel history={history} /><InfoPanel /></section>
       <FooterInfo quota={quota} />
+      {cookieManagerOpen && user && <CookieManager request={adminRequest} profiles={cookieProfiles} onChanged={() => refreshCookies()} onClose={() => setCookieManagerOpen(false)} />}
     </main>
   )
 }
@@ -931,13 +1030,13 @@ function QueuePanel({
   onCopy: (url?: string | null) => void
 }) {
   const current = job || history[0] || null
-  const queue = history.filter((item) => ['queued', 'parsing', 'downloading', 'merging'].includes(item.status))
+  const queue = history.filter((item) => ['queued', 'parsing', 'downloading', 'transcribing', 'merging'].includes(item.status))
   return (
     <aside className="queue-panel">
       <div className="queue-header"><div><span className="caption">Download queue</span><h2>下载队列</h2></div><span>{queue.length} 个进行中</span></div>
       {current ? (
         <div className="current-download">
-          <div className="current-title"><div className="mini-thumb">{current.thumbnail ? <img src={current.thumbnail_proxy_url || current.thumbnail} alt="" /> : <FileVideo size={22} />}</div><div><h3>{current.title || '正在读取视频信息'}</h3><p>{current.platform || '解析中'} · {current.media_type === 'audio' ? current.audio_format.toUpperCase() : current.format_id}</p></div></div>
+          <div className="current-title"><div className="mini-thumb">{current.thumbnail ? <img src={current.thumbnail_proxy_url || current.thumbnail} alt="" /> : current.media_type === 'transcript' ? <FileText size={22} /> : <FileVideo size={22} />}</div><div><h3>{current.title || '正在读取视频信息'}</h3><p>{current.platform || '解析中'} · {current.media_type === 'audio' ? current.audio_format.toUpperCase() : current.media_type === 'transcript' ? current.transcript_format.toUpperCase() : current.format_id}</p></div></div>
           <div className="current-state"><StatusBadge status={current.status} /><strong>{Math.round(current.progress)}%</strong></div>
           <div className="progress-track"><div style={{ width: `${Math.max(0, Math.min(current.progress, 100))}%` }} /></div>
           <div className="transfer-meta"><span>{formatBytes(current.downloaded_bytes)} / {formatBytes(current.total_bytes)}</span><span>{current.speed ? `${formatBytes(current.speed)}/s` : '等待数据'}{current.eta ? ` · ${current.eta}s` : ''}</span></div>
@@ -956,7 +1055,7 @@ function QueuePanel({
       <div className="queue-list">
         {history.slice(0, 8).map((item) => (
           <button className={current?.job_id === item.job_id ? 'active' : ''} type="button" key={item.job_id} onClick={() => onSelect(item)}>
-            <div><strong>{item.title || '等待解析'}</strong><span>{formatDate(item.created_at)} · {item.media_type === 'audio' ? '音频' : '视频'}</span></div><StatusBadge status={item.status} />
+            <div><strong>{item.title || '等待解析'}</strong><span>{formatDate(item.created_at)} · {item.media_type === 'audio' ? '音频' : item.media_type === 'transcript' ? '字幕 / 文案' : '视频'}</span></div><StatusBadge status={item.status} />
           </button>
         ))}
       </div>
@@ -970,12 +1069,14 @@ function HeaderAccount({
   onAuth,
   adminRequest,
   onLogout,
+  onCookies,
 }: {
   quota: Quota | null
   user: User | null
   onAuth: (mode: 'login' | 'register', username: string, password: string) => Promise<void>
   adminRequest: AdminRequest
   onLogout: () => void
+  onCookies: () => void
 }) {
   const [open, setOpen] = React.useState(false)
   const [adminOpen, setAdminOpen] = React.useState(false)
@@ -1027,6 +1128,10 @@ function HeaderAccount({
                 管理后台
               </button>
             )}
+            <button className="menu-action" type="button" onClick={() => { setOpen(false); onCookies() }}>
+              <Cookie size={16} />
+              我的 Cookie
+            </button>
           </section>
         )}
         {adminOpen && user.role === 'admin' && (
@@ -1068,6 +1173,88 @@ function HeaderAccount({
         </section>
       )}
     </div>
+  )
+}
+
+function CookieManager({
+  request,
+  profiles,
+  onChanged,
+  onClose,
+}: {
+  request: AdminRequest
+  profiles: CookieProfile[]
+  onChanged: () => Promise<unknown>
+  onClose: () => void
+}) {
+  const platforms = [
+    ['douyin', '抖音'],
+    ['tiktok', 'TikTok'],
+    ['youtube', 'YouTube'],
+    ['bilibili', '哔哩哔哩'],
+    ['instagram', 'Instagram'],
+    ['facebook', 'Facebook'],
+    ['twitter', 'X / Twitter'],
+  ] as const
+  const [platform, setPlatform] = React.useState<(typeof platforms)[number][0]>('douyin')
+  const [file, setFile] = React.useState<File | null>(null)
+  const [busy, setBusy] = React.useState(false)
+  const [message, setMessage] = React.useState<string | null>(null)
+  const [error, setError] = React.useState<string | null>(null)
+
+  async function upload(event: React.FormEvent) {
+    event.preventDefault()
+    if (!file) return
+    setBusy(true)
+    setError(null)
+    setMessage(null)
+    const form = new FormData()
+    form.append('file', file)
+    try {
+      const item = await request<CookieProfile>(`/api/cookies/${platform}`, { method: 'PUT', body: form })
+      await onChanged()
+      setFile(null)
+      setMessage(`${platforms.find(([id]) => id === item.name)?.[1] || item.name} Cookie 已加密保存并启用。`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Cookie 上传失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function remove(name: string) {
+    if (!window.confirm('确定删除这个平台的 Cookie 吗？')) return
+    await request<void>(`/api/cookies/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    await onChanged()
+  }
+
+  return (
+    <section className="admin-overlay cookie-center" aria-label="我的 Cookie">
+      <div className="admin-backdrop" onClick={onClose} />
+      <div className="admin-dialog cookie-dialog">
+        <header className="admin-dialog-header">
+          <div><span className="caption">Private login state</span><h2>我的平台 Cookie</h2><p>仅导入 Cookie，不接收平台账号和密码。每位用户独立加密保存，上传时会删除其他网站的 Cookie。</p></div>
+          <button className="secondary-button" type="button" onClick={onClose}>关闭</button>
+        </header>
+        <div className="cookie-security"><Shield size={18} /><div><strong>建议使用专用低权限账号</strong><p>从浏览器导出 Netscape cookies.txt，退出平台或删除这里的配置都可以使登录状态失效。不要上传包含全部网站的未筛选文件到其他服务。</p></div></div>
+        <form className="cookie-user-upload" onSubmit={upload}>
+          <label><span>平台</span><select value={platform} onChange={(event) => setPlatform(event.target.value as typeof platform)}>{platforms.map(([id, label]) => <option value={id} key={id}>{label}</option>)}</select></label>
+          <label><span>cookies.txt</span><input type="file" accept=".txt,text/plain" onChange={(event) => setFile(event.target.files?.[0] || null)} /></label>
+          <button type="submit" disabled={!file || busy}>{busy ? <Loader2 className="spin" size={16} /> : <Cookie size={16} />}{busy ? '正在加密' : '导入并启用'}</button>
+        </form>
+        {message && <div className="cookie-success"><CheckCircle2 size={16} />{message}</div>}
+        {error && <div className="inline-alert"><AlertTriangle size={16} />{error}</div>}
+        <div className="cookie-profile-list">
+          {profiles.map((item) => (
+            <article key={item.name}>
+              <div><strong>{platforms.find(([id]) => id === item.name)?.[1] || item.name}</strong><span>{item.cookie_count} 条 Cookie · {item.domains.join('、') || '域名未知'}</span><small>{item.expired ? 'Cookie 可能已经过期，请重新导出' : item.expires_at ? `最晚到期 ${formatDate(item.expires_at)}` : '包含浏览器会话 Cookie'}</small></div>
+              <button className="danger-button" type="button" onClick={() => remove(item.name)}><Trash2 size={15} />删除</button>
+            </article>
+          ))}
+          {!profiles.length && <p>尚未导入平台 Cookie，公开内容仍会正常解析。</p>}
+        </div>
+      </div>
+    </section>
   )
 }
 
@@ -1206,7 +1393,7 @@ function FooterInfo({ quota }: { quota: Quota | null }) {
           <span><FileVideo size={16} />普通用户每日 10 个</span>
           <span><Crown size={16} />会员与管理员无限制</span>
           <span><Gauge size={16} />默认 512 MB 文件上限</span>
-          <span><Shield size={16} />批量下载暂未开放</span>
+          <span><FileText size={16} />原生字幕优先，AI 转写兜底</span>
         </div>
       </article>
 

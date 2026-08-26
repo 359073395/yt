@@ -5,7 +5,7 @@ from pathlib import Path
 from time import time
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class JobStatus(StrEnum):
@@ -13,6 +13,7 @@ class JobStatus(StrEnum):
     parsing = "parsing"
     downloading = "downloading"
     merging = "merging"
+    transcribing = "transcribing"
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
@@ -22,6 +23,20 @@ class JobStatus(StrEnum):
 class MediaType(StrEnum):
     video = "video"
     audio = "audio"
+    transcript = "transcript"
+
+
+class TranscriptMode(StrEnum):
+    none = "none"
+    native = "native"
+    ai = "ai"
+    auto = "auto"
+
+
+class TranscriptFormat(StrEnum):
+    txt = "txt"
+    srt = "srt"
+    vtt = "vtt"
 
 
 class ParseRequest(BaseModel):
@@ -66,6 +81,7 @@ class ParseResponse(BaseModel):
     formats: list[FormatOption]
     subtitles: list[SubtitleOption]
     subtitle_note: str | None = None
+    ai_transcription_available: bool = False
 
 
 class CollectionInspectRequest(BaseModel):
@@ -99,7 +115,18 @@ class JobCreateRequest(BaseModel):
     format_has_audio: bool = False
     audio_format: str = Field(default="mp3", pattern=r"^(mp3|m4a|opus|wav|flac)$")
     subtitle_language: str | None = Field(default=None, max_length=32, pattern=r"^[a-zA-Z0-9_.-]+$")
+    transcript_mode: TranscriptMode = TranscriptMode.none
+    transcript_format: TranscriptFormat = TranscriptFormat.srt
+    transcript_language: str | None = Field(default=None, max_length=16, pattern=r"^[a-zA-Z0-9_.-]+$")
+    include_description: bool = False
+    include_thumbnail: bool = False
     cookie_profile: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
+
+    @model_validator(mode="after")
+    def normalize_transcript_job(self) -> "JobCreateRequest":
+        if self.media_type == MediaType.transcript and self.transcript_mode == TranscriptMode.none:
+            self.transcript_mode = TranscriptMode.auto
+        return self
 
 
 class JobCreateResponse(BaseModel):
@@ -110,6 +137,11 @@ class BatchJobCreateRequest(BaseModel):
     urls: list[str] = Field(min_length=1, max_length=50)
     media_type: MediaType = MediaType.video
     audio_format: str = Field(default="mp3", pattern=r"^(mp3|m4a|opus|wav|flac)$")
+    transcript_mode: TranscriptMode = TranscriptMode.none
+    transcript_format: TranscriptFormat = TranscriptFormat.srt
+    transcript_language: str | None = Field(default=None, max_length=16, pattern=r"^[a-zA-Z0-9_.-]+$")
+    include_description: bool = False
+    include_thumbnail: bool = False
     cookie_profile: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
 
     @field_validator("urls")
@@ -256,6 +288,11 @@ class CookieProfilePublic(BaseModel):
     name: str
     size_bytes: int
     updated_at: float
+    cookie_count: int = 0
+    domains: list[str] = Field(default_factory=list)
+    expires_at: float | None = None
+    expired: bool = False
+    scope: str = "global"
 
 
 class JobPublic(BaseModel):
@@ -279,6 +316,11 @@ class JobPublic(BaseModel):
     format_id: str = "best"
     audio_format: str = "mp3"
     subtitle_language: str | None = None
+    transcript_mode: TranscriptMode = TranscriptMode.none
+    transcript_format: TranscriptFormat = TranscriptFormat.srt
+    transcript_language: str | None = None
+    include_description: bool = False
+    include_thumbnail: bool = False
     filename: str | None = None
     download_url: str | None = None
     error: str | None = None
@@ -303,6 +345,11 @@ class Job:
         format_has_audio: bool = False,
         audio_format: str = "mp3",
         subtitle_language: str | None = None,
+        transcript_mode: TranscriptMode = TranscriptMode.none,
+        transcript_format: TranscriptFormat = TranscriptFormat.srt,
+        transcript_language: str | None = None,
+        include_description: bool = False,
+        include_thumbnail: bool = False,
         cookie_profile: str | None = None,
         created_at: float | None = None,
         persist: Callable[["Job"], None] | None = None,
@@ -329,6 +376,11 @@ class Job:
         self.format_has_audio = format_has_audio
         self.audio_format = audio_format
         self.subtitle_language = subtitle_language
+        self.transcript_mode = transcript_mode
+        self.transcript_format = transcript_format
+        self.transcript_language = transcript_language
+        self.include_description = include_description
+        self.include_thumbnail = include_thumbnail
         self.cookie_profile = cookie_profile
         self.filename: str | None = None
         self.file_path: Path | None = None
@@ -353,7 +405,7 @@ class Job:
         self.touch()
 
     def public(self) -> JobPublic:
-        active = self.status in {JobStatus.queued, JobStatus.parsing, JobStatus.downloading, JobStatus.merging}
+        active = self.status in {JobStatus.queued, JobStatus.parsing, JobStatus.downloading, JobStatus.transcribing, JobStatus.merging}
         return JobPublic(
             job_id=self.job_id,
             url=self.url,
@@ -373,6 +425,11 @@ class Job:
             format_id=self.format_id,
             audio_format=self.audio_format,
             subtitle_language=self.subtitle_language,
+            transcript_mode=self.transcript_mode,
+            transcript_format=self.transcript_format,
+            transcript_language=self.transcript_language,
+            include_description=self.include_description,
+            include_thumbnail=self.include_thumbnail,
             filename=self.filename,
             download_url=f"/api/jobs/{self.job_id}/download" if self.file_path else None,
             error=self.error,

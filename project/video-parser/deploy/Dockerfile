@@ -17,10 +17,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     XDG_CACHE_HOME=/data/cache \
     DENO_DIR=/data/cache/deno \
     CHROMIUM_PATH=/usr/bin/chromium \
+    WHISPER_CACHE_DIR=/data/cache/whisper \
     HOME=/tmp/yinglian
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates tini chromium \
+    && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates tini chromium libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=deno-runtime /deno /usr/local/bin/deno
@@ -32,7 +33,7 @@ COPY backend/app ./app
 COPY --from=frontend /src/frontend/dist ./static
 RUN groupadd --gid 10001 yinglian \
     && useradd --uid 10001 --gid yinglian --no-create-home --shell /usr/sbin/nologin yinglian \
-    && mkdir -p /data/downloads /data/cookies /data/cache /tmp/yinglian \
+    && mkdir -p /data/downloads /data/cookies /data/cache/whisper /tmp/yinglian \
     && chown -R yinglian:yinglian /app /data /tmp/yinglian
 
 EXPOSE 8080

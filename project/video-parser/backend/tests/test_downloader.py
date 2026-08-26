@@ -573,3 +573,29 @@ def test_queued_job_can_be_cancelled_without_starting(tmp_path):
         assert job.status == JobStatus.cancelled
 
     asyncio.run(scenario())
+
+
+def test_cookie_platform_detects_supported_hosts():
+    assert Downloader._cookie_platform("https://v.douyin.com/example/") == "douyin"
+    assert Downloader._cookie_platform("https://www.tiktok.com/@creator/video/123") == "tiktok"
+    assert Downloader._cookie_platform("https://youtu.be/example") == "youtube"
+    assert Downloader._cookie_platform("https://example.com/video") is None
+
+
+def test_subtitle_cues_parse_vtt_json3_and_ttml():
+    vtt = b"WEBVTT\n\n00:00:01.000 --> 00:00:02.500\nHello <b>world</b>\n"
+    json3 = b'{"events":[{"tStartMs":500,"dDurationMs":1000,"segs":[{"utf8":"Json text"}]}]}'
+    ttml = b'<tt><body><div><p begin="00:00:03.000" end="00:00:04.000">XML text</p></div></body></tt>'
+
+    assert Downloader._subtitle_cues(vtt, "vtt")[0].text == "Hello world"
+    assert Downloader._subtitle_cues(json3, "json3")[0].start == 0.5
+    assert Downloader._subtitle_cues(ttml, "ttml")[0].text == "XML text"
+
+
+def test_subtitle_languages_prioritize_common_chinese_and_english():
+    languages = {f"lang-{index:03d}" for index in range(150)} | {"zh-Hans", "en", "id"}
+
+    ordered = Downloader._ordered_subtitle_languages(languages)
+
+    assert ordered[:3] == ["zh-Hans", "en", "id"]
+    assert len(ordered) == 120
