@@ -6,7 +6,7 @@ DOMAIN=""
 INSTALL_DIR="/opt/video-parser"
 PUBLIC_PORT="8080"
 PORT_WAS_SET=0
-APP_VERSION="2.1.0"
+APP_VERSION="2.1.1"
 IMAGE="ghcr.io/359073395/video-parser:${APP_VERSION}"
 
 while [[ $# -gt 0 ]]; do
@@ -134,7 +134,7 @@ read_health() {
 
 healthy=0
 HEALTH_JSON=""
-for _ in $(seq 1 40); do
+for attempt in $(seq 1 90); do
   HEALTH_JSON="$(read_health)"
   if [[ "$HEALTH_JSON" == *"\"version\":\"${APP_VERSION}\""* ]]; then
     healthy=1
@@ -144,8 +144,28 @@ for _ in $(seq 1 40); do
   if [[ "$state" == "exited" || "$state" == "dead" ]]; then
     break
   fi
+  if (( attempt % 15 == 0 )); then
+    echo "仍在等待服务启动... $((attempt * 2))/180 秒（容器状态: ${state:-unknown}）"
+  fi
   sleep 2
 done
+
+if (( healthy == 0 )) && [[ "$(docker inspect --format '{{.State.Running}}' video-parser 2>/dev/null || true)" == "true" ]]; then
+  echo "服务长时间未监听端口，正在执行一次恢复性重启..."
+  docker restart video-parser >/dev/null
+  for attempt in $(seq 1 60); do
+    HEALTH_JSON="$(read_health)"
+    if [[ "$HEALTH_JSON" == *"\"version\":\"${APP_VERSION}\""* ]]; then
+      healthy=1
+      break
+    fi
+    state="$(docker inspect --format '{{.State.Status}}' video-parser 2>/dev/null || true)"
+    if [[ "$state" == "exited" || "$state" == "dead" ]]; then
+      break
+    fi
+    sleep 2
+  done
+fi
 
 if (( healthy == 0 )); then
   echo "新版本健康检查失败，期望版本 ${APP_VERSION}。"
@@ -155,6 +175,12 @@ if (( healthy == 0 )); then
   docker inspect --format '{{range .State.Health.Log}}{{println .ExitCode .Output}}{{end}}' video-parser 2>/dev/null || true
   echo "容器日志:"
   docker logs --tail 80 video-parser 2>/dev/null || true
+  echo "容器进程与资源:"
+  docker top video-parser -eo pid,ppid,stat,etime,rss,vsz,args 2>/dev/null || true
+  docker stats --no-stream video-parser 2>/dev/null || true
+  echo "主机内存与磁盘:"
+  free -m 2>/dev/null || true
+  df -h "$APP_DIR" /var/lib/docker 2>/dev/null || true
   if [[ -n "$OLD_IMAGE" ]] && docker image inspect video-parser:rollback >/dev/null 2>&1; then
     echo "正在自动回滚上一版本..."
     VIDEO_PARSER_IMAGE="video-parser:rollback" docker compose up -d --force-recreate

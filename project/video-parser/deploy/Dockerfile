@@ -36,4 +36,4 @@ RUN groupadd --gid 10001 yinglian \
 EXPOSE 8080
 USER 10001:10001
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["sh", "-c", "uvicorn app.main:app --host ${APP_HOST} --port ${APP_PORT}"]
+CMD ["sh", "-c", "echo 'Starting Yinglian Workshop API...' && exec uvicorn app.main:app --host ${APP_HOST} --port ${APP_PORT}"]

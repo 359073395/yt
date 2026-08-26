@@ -62,17 +62,30 @@ class JobStore:
             )
 
     def _load(self) -> None:
+        active = (
+            JobStatus.queued.value,
+            JobStatus.parsing.value,
+            JobStatus.downloading.value,
+            JobStatus.merging.value,
+        )
+        interrupted_at = time()
         with self.connect() as conn:
-            rows = conn.execute("SELECT * FROM download_jobs ORDER BY created_at DESC LIMIT 2000").fetchall()
-        active = {JobStatus.queued.value, JobStatus.parsing.value, JobStatus.downloading.value, JobStatus.merging.value}
+            conn.execute(
+                """
+                UPDATE download_jobs
+                SET status = ?, error = ?, progress = 0, speed = NULL, eta = NULL, updated_at = ?
+                WHERE status IN (?, ?, ?, ?)
+                """,
+                (
+                    JobStatus.failed.value,
+                    "服务更新或重启中断了任务，请点击重试。",
+                    interrupted_at,
+                    *active,
+                ),
+            )
+            rows = conn.execute("SELECT * FROM download_jobs ORDER BY created_at DESC LIMIT 500").fetchall()
         for row in rows:
             job = self._from_row(row)
-            if job.status.value in active:
-                job.status = JobStatus.failed
-                job.error = "服务更新或重启中断了任务，请点击重试。"
-                job.progress = 0
-                job.touch()
-                self.save(job)
             self.jobs[job.job_id] = job
 
     def _from_row(self, row: sqlite3.Row) -> Job:

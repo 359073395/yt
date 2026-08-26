@@ -95,8 +95,8 @@ EXPERIMENTAL_PLATFORMS = [
 
 async def cleanup_loop() -> None:
     while True:
-        store.cleanup()
         await asyncio.sleep(60)
+        store.cleanup()
 
 
 @asynccontextmanager

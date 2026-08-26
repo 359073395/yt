@@ -35,3 +35,17 @@ def test_store_restores_history_after_restart(tmp_path):
     assert restored is not None
     assert restored.title == "Persistent title"
     assert restored.status == JobStatus.completed
+
+
+def test_store_bulk_marks_interrupted_jobs_failed_on_restart(tmp_path):
+    database = tmp_path / "video-parser.sqlite3"
+    downloads = tmp_path / "downloads"
+    first = JobStore(downloads, ttl_seconds=60, database_path=database)
+    jobs = [first.create(f"https://example.com/video/{index}", "127.0.0.1") for index in range(8)]
+    jobs[0].status = JobStatus.downloading
+    first.save(jobs[0])
+
+    restored = JobStore(downloads, ttl_seconds=60, database_path=database)
+
+    assert all(restored.get(job.job_id).status == JobStatus.failed for job in jobs)
+    assert all("服务更新" in restored.get(job.job_id).error for job in jobs)
