@@ -12,7 +12,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from time import monotonic
 from typing import Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from .assets import RemoteAssetError, signed_asset_url
@@ -46,6 +46,10 @@ class Downloader:
         "Safari-26.0:Ios-26.0",
         "Firefox-144:Macos-26",
         "Safari-18.4:Ios-18.4",
+    )
+    BROWSER_USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
     )
 
     def __init__(self, settings: Settings, store: JobStore, cookies: CookieStore | None = None) -> None:
@@ -85,12 +89,263 @@ class Downloader:
                 work_dir = Path(temporary)
                 context = self.cookies.materialize(cookie_profile, work_dir) if self.cookies else nullcontext(None)
                 with context as cookie_file:
+                    if self._is_douyin_url(url):
+                        return await self._inspect_douyin_collection(url, max_items, cookie_file)
                     output = await self._capture_collection(url, max_items, cookie_file)
         try:
             info = json.loads(output)
         except json.JSONDecodeError as exc:
             raise DownloadRejected("主页解析器返回了无效数据，请更新引擎后重试。") from exc
         return self._collection_response(url, info, max_items)
+
+    async def _inspect_douyin_collection(
+        self,
+        source_url: str,
+        max_items: int,
+        cookie_file: Path | None,
+    ) -> CollectionInspectResponse:
+        sec_uid = self._douyin_sec_uid(source_url)
+        resolved_url = source_url if sec_uid else await asyncio.to_thread(self._resolve_douyin_url, source_url)
+        sec_uid = sec_uid or self._douyin_sec_uid(resolved_url)
+        if not sec_uid:
+            path = urlsplit(resolved_url).path
+            if re.search(r"/(?:video|note)/\d+", path):
+                raise DownloadRejected("这是抖音单个作品链接，请切换到“单条解析”。")
+            raise DownloadRejected("没有从该抖音链接识别出创作者主页，请复制作者主页分享链接后重试。")
+        canonical_url = f"https://www.douyin.com/user/{sec_uid}"
+        return await self._scan_douyin_profile_browser(
+            source_url,
+            canonical_url,
+            sec_uid,
+            max_items,
+            cookie_file,
+        )
+
+    def _resolve_douyin_url(self, url: str) -> str:
+        resolved = ""
+        last_error: OSError | None = None
+        for method in ("HEAD", "GET"):
+            request = Request(
+                url,
+                method=method,
+                headers={"User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"},
+            )
+            try:
+                with urlopen(request, timeout=min(self.settings.request_timeout_seconds, 20)) as response:  # noqa: S310
+                    resolved = response.url
+                break
+            except OSError as exc:
+                last_error = exc
+        if not resolved:
+            raise DownloadRejected("抖音短链接展开失败，请稍后重试。") from last_error
+        if not self._is_douyin_url(resolved):
+            raise DownloadRejected("抖音短链接跳转到了非抖音站点，已拒绝继续扫描。")
+        return resolved
+
+    @staticmethod
+    def _douyin_sec_uid(url: str) -> str | None:
+        parsed = urlsplit(url)
+        match = re.search(r"/(?:share/)?user/(MS4wLjABAAAA[A-Za-z0-9_-]+)", parsed.path)
+        if match:
+            return match.group(1)
+        query = parse_qs(parsed.query)
+        for name in ("sec_uid", "sec_user_id"):
+            candidate = (query.get(name) or [""])[0]
+            if re.fullmatch(r"MS4wLjABAAAA[A-Za-z0-9_-]+", candidate):
+                return candidate
+        return None
+
+    async def _scan_douyin_profile_browser(
+        self,
+        source_url: str,
+        canonical_url: str,
+        sec_uid: str,
+        max_items: int,
+        cookie_file: Path | None,
+    ) -> CollectionInspectResponse:
+        chromium = shutil.which("chromium") or shutil.which("chromium-browser")
+        if not chromium:
+            raise DownloadRejected("服务器缺少抖音主页扫描组件，请更新影链工坊后重试。")
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as exc:
+            raise DownloadRejected("服务器缺少抖音主页扫描组件，请更新影链工坊后重试。") from exc
+
+        items: dict[str, CollectionItem] = {}
+        api_payloads: list[dict[str, Any]] = []
+        response_tasks: set[asyncio.Task[None]] = set()
+        has_more = False
+        total_count: int | None = None
+        profile_title = "抖音创作者主页"
+
+        def add_item(item: CollectionItem) -> None:
+            if item.url not in items and len(items) < max_items:
+                items[item.url] = item
+
+        def consume_payload(payload: dict[str, Any]) -> None:
+            nonlocal has_more, total_count, profile_title
+            has_more = has_more or bool(payload.get("has_more"))
+            raw_items = payload.get("aweme_list")
+            if not isinstance(raw_items, list):
+                return
+            for aweme in raw_items:
+                if len(items) >= max_items or not isinstance(aweme, dict):
+                    continue
+                video_id = str(aweme.get("aweme_id") or "")
+                video = aweme.get("video") if isinstance(aweme.get("video"), dict) else {}
+                if not re.fullmatch(r"\d{15,24}", video_id) or not video.get("play_addr"):
+                    continue
+                author = aweme.get("author") if isinstance(aweme.get("author"), dict) else {}
+                nickname = str(author.get("nickname") or "").strip()
+                if nickname:
+                    profile_title = nickname
+                author_total = author.get("aweme_count")
+                if isinstance(author_total, int):
+                    total_count = author_total
+                cover = video.get("cover") if isinstance(video.get("cover"), dict) else {}
+                cover_urls = cover.get("url_list") if isinstance(cover.get("url_list"), list) else []
+                thumbnail = next((value for value in cover_urls if isinstance(value, str) and value.startswith("https://")), None)
+                duration = video.get("duration")
+                add_item(CollectionItem(
+                    url=f"https://www.douyin.com/video/{video_id}",
+                    title=str(aweme.get("desc") or f"抖音视频 {video_id}"),
+                    thumbnail=thumbnail,
+                    thumbnail_proxy_url=self._signed_asset(thumbnail, "cover", download=False),
+                    duration=float(duration) / 1000 if isinstance(duration, (int, float)) else None,
+                    uploader=nickname or None,
+                ))
+
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(
+                executable_path=chromium,
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
+            try:
+                context = await browser.new_context(
+                    locale="zh-CN",
+                    user_agent=self.BROWSER_USER_AGENT,
+                    viewport={"width": 1280, "height": 900},
+                )
+                browser_cookies = self._browser_cookies(cookie_file)
+                if browser_cookies:
+                    await context.add_cookies(browser_cookies)
+                page = await context.new_page()
+                page.set_default_timeout(self.settings.metadata_timeout_seconds * 1000)
+
+                async def capture_response(response: Any) -> None:
+                    if "/aweme/v1/web/aweme/post/" not in response.url:
+                        return
+                    try:
+                        payload = await response.json()
+                    except Exception:  # noqa: BLE001
+                        return
+                    if isinstance(payload, dict):
+                        api_payloads.append(payload)
+
+                def schedule_response(response: Any) -> None:
+                    task = asyncio.create_task(capture_response(response))
+                    response_tasks.add(task)
+                    task.add_done_callback(response_tasks.discard)
+
+                page.on("response", schedule_response)
+                await page.goto(canonical_url, wait_until="domcontentloaded")
+                unchanged_rounds = 0
+                previous_count = -1
+                for _ in range(14):
+                    await page.wait_for_timeout(900)
+                    for payload in api_payloads:
+                        consume_payload(payload)
+                    api_payloads.clear()
+                    dom_entries = await page.locator('a[href*="/video/"]').evaluate_all(
+                        """anchors => anchors.map(anchor => ({
+                          href: anchor.href,
+                          title: (anchor.getAttribute('aria-label') || anchor.getAttribute('title') || anchor.innerText || anchor.textContent || '').trim(),
+                          thumbnail: anchor.querySelector('img')?.src || null,
+                        }))""",
+                    )
+                    for entry in dom_entries:
+                        if len(items) >= max_items or not isinstance(entry, dict):
+                            continue
+                        match = re.search(r"https?://(?:www\.)?douyin\.com/video/(\d{15,24})", str(entry.get("href") or ""))
+                        if not match:
+                            continue
+                        video_id = match.group(1)
+                        thumbnail = entry.get("thumbnail")
+                        if not isinstance(thumbnail, str) or not thumbnail.startswith("https://"):
+                            thumbnail = None
+                        title = str(entry.get("title") or "").strip() or f"抖音视频 {video_id}"
+                        add_item(CollectionItem(
+                            url=f"https://www.douyin.com/video/{video_id}",
+                            title=title[:300],
+                            thumbnail=thumbnail,
+                            thumbnail_proxy_url=self._signed_asset(thumbnail, "cover", download=False),
+                        ))
+                    if len(items) >= max_items:
+                        break
+                    if len(items) == previous_count:
+                        unchanged_rounds += 1
+                    else:
+                        unchanged_rounds = 0
+                    if unchanged_rounds >= 3:
+                        break
+                    previous_count = len(items)
+                    await page.mouse.wheel(0, 6000)
+                page_title = (await page.title()).removesuffix(" - 抖音").strip()
+                if page_title:
+                    profile_title = page_title
+                if response_tasks:
+                    await asyncio.gather(*response_tasks, return_exceptions=True)
+                for payload in api_payloads:
+                    consume_payload(payload)
+            finally:
+                await browser.close()
+
+        if not items:
+            cookie_hint = "请在管理后台上传名称为 default 的抖音 cookies.txt 后重试。" if not cookie_file else "当前抖音 Cookie 已失效，请重新上传后重试。"
+            raise DownloadRejected(f"抖音主页没有返回公开视频；{cookie_hint}")
+        return CollectionInspectResponse(
+            source_url=source_url,
+            title=profile_title,
+            extractor="DouyinProfile",
+            total_count=total_count,
+            items=list(items.values()),
+            truncated=len(items) >= max_items or has_more or bool(total_count and total_count > len(items)),
+        )
+
+    @staticmethod
+    def _browser_cookies(cookie_file: Path | None) -> list[dict[str, Any]]:
+        if not cookie_file:
+            return []
+        cookies: list[dict[str, Any]] = []
+        for raw_line in cookie_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line
+            if line.startswith("#HttpOnly_"):
+                line = line.removeprefix("#HttpOnly_")
+            elif not line or line.startswith("#"):
+                continue
+            fields = line.split("\t")
+            if len(fields) < 7:
+                continue
+            domain, _, path, secure, expires, name, value = fields[:7]
+            normalized_domain = domain.lstrip(".").lower()
+            if normalized_domain != "douyin.com" and not normalized_domain.endswith(".douyin.com"):
+                continue
+            item: dict[str, Any] = {
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": path or "/",
+                "secure": secure.upper() == "TRUE",
+            }
+            try:
+                expiry = int(expires)
+            except ValueError:
+                expiry = 0
+            if expiry > 0:
+                item["expires"] = expiry
+            cookies.append(item)
+        return cookies
 
     async def run(self, job: Job) -> None:
         task = asyncio.current_task()
@@ -551,6 +806,19 @@ class Downloader:
         except ValueError:
             return False
         return hostname == "tiktok.com" or hostname.endswith(".tiktok.com")
+
+    @staticmethod
+    def _is_douyin_url(url: str) -> bool:
+        try:
+            hostname = (urlsplit(url).hostname or "").lower().rstrip(".")
+        except ValueError:
+            return False
+        return (
+            hostname == "douyin.com"
+            or hostname.endswith(".douyin.com")
+            or hostname == "iesdouyin.com"
+            or hostname.endswith(".iesdouyin.com")
+        )
 
     @staticmethod
     def _tiktok_video_id(url: str) -> str | None:

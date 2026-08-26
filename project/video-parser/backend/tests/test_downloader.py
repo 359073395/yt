@@ -3,7 +3,7 @@ import json
 
 from app.config import Settings
 from app.downloader import DownloadRejected, Downloader
-from app.models import JobCreateRequest, JobStatus, MediaType
+from app.models import CollectionInspectResponse, CollectionItem, JobCreateRequest, JobStatus, MediaType
 from app.store import JobStore
 
 
@@ -50,6 +50,8 @@ COLLECTION_INFO = {
         },
     ],
 }
+
+DOUYIN_SEC_UID = "MS4wLjABAAAA5sbHNLYP00fNurvgupe9AnOBQwXfAGyZL3XihK-7CbQ"
 
 
 def tiktok_embed_html():
@@ -153,6 +155,77 @@ def test_tiktok_collection_retries_with_browser_impersonation(tmp_path, monkeypa
 
     assert len(result.items) == 2
     assert targets == [None, "Edge-101:Windows-10"]
+
+
+def test_douyin_share_profile_short_link_uses_browser_scanner(tmp_path, monkeypatch):
+    downloader, _ = make_downloader(tmp_path)
+    captured = {}
+    monkeypatch.setattr(
+        downloader,
+        "_resolve_douyin_url",
+        lambda _url: f"https://www.iesdouyin.com/share/user/{DOUYIN_SEC_UID}?sec_uid={DOUYIN_SEC_UID}",
+    )
+
+    async def fake_scan(source_url, canonical_url, sec_uid, max_items, cookie_file):
+        captured.update({
+            "source_url": source_url,
+            "canonical_url": canonical_url,
+            "sec_uid": sec_uid,
+            "max_items": max_items,
+            "cookie_file": cookie_file,
+        })
+        return CollectionInspectResponse(
+            source_url=source_url,
+            title="Fixture Douyin Creator",
+            extractor="DouyinProfile",
+            items=[CollectionItem(url="https://www.douyin.com/video/7678266474595665907", title="Fixture")],
+        )
+
+    monkeypatch.setattr(downloader, "_scan_douyin_profile_browser", fake_scan)
+    source = "https://v.douyin.com/qybx95SkFnQ/"
+    result = asyncio.run(downloader.inspect_collection(source, 50))
+
+    assert result.extractor == "DouyinProfile"
+    assert captured["canonical_url"] == f"https://www.douyin.com/user/{DOUYIN_SEC_UID}"
+    assert captured["sec_uid"] == DOUYIN_SEC_UID
+    assert captured["max_items"] == 50
+
+
+def test_douyin_batch_rejects_single_video_with_specific_message(tmp_path, monkeypatch):
+    downloader, _ = make_downloader(tmp_path)
+    monkeypatch.setattr(
+        downloader,
+        "_resolve_douyin_url",
+        lambda _url: "https://www.douyin.com/video/7678266474595665907",
+    )
+
+    try:
+        asyncio.run(downloader.inspect_collection("https://v.douyin.com/fixture/", 20))
+    except DownloadRejected as exc:
+        assert "单条解析" in str(exc)
+    else:
+        raise AssertionError("A Douyin single-video short link was accepted as a profile")
+
+
+def test_douyin_cookie_file_is_converted_for_browser(tmp_path):
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text(
+        "# Netscape HTTP Cookie File\n"
+        "#HttpOnly_.douyin.com\tTRUE\t/\tTRUE\t1893456000\tsessionid\tsecret\n"
+        ".example.com\tTRUE\t/\tTRUE\t1893456000\tignored\tvalue\n",
+        encoding="utf-8",
+    )
+
+    cookies = Downloader._browser_cookies(cookie_file)
+
+    assert cookies == [{
+        "name": "sessionid",
+        "value": "secret",
+        "domain": ".douyin.com",
+        "path": "/",
+        "secure": True,
+        "expires": 1893456000,
+    }]
 
 
 def test_tiktok_oembed_restores_canonical_author_url(tmp_path, monkeypatch):

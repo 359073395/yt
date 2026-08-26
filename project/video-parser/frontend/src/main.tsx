@@ -281,6 +281,13 @@ function formatBytes(value?: number | null) {
   return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
 }
 
+function extractSharedUrl(value: string): string | null {
+  const direct = value.match(/https?:\/\/[^\s<>"'，。！？；：、【】（）《》\u200b-\u200d\ufeff]+/i)?.[0]
+  const fallback = value.match(/(?:www\.|v\.)?douyin\.com\/[^\s<>"'，。！？；：、【】（）《》\u200b-\u200d\ufeff]+/i)?.[0]
+  const candidate = direct || (fallback ? `https://${fallback}` : '')
+  return candidate ? candidate.replace(/[)\]}>.,!;]+$/g, '') : null
+}
+
 function formatDuration(value?: number | null) {
   if (!value) return '未知'
   const minutes = Math.floor(value / 60)
@@ -626,12 +633,13 @@ function App() {
 
   async function parseUrl(event: React.FormEvent) {
     event.preventDefault()
-    const value = url.trim()
+    const value = extractSharedUrl(url)
     setMessage(null)
-    if (!/^https?:\/\//i.test(value)) {
-      setMessage('请输入有效的 http/https 视频链接。')
+    if (!value) {
+      setMessage('没有从分享文案中找到有效的视频链接。')
       return
     }
+    setUrl(value)
     setIsParsing(true)
     setParsed(null)
     try {
@@ -657,11 +665,12 @@ function App() {
     event.preventDefault()
     setMessage(null)
     setCollection(null)
-    const value = collectionUrl.trim()
-    if (!/^https?:\/\//i.test(value)) {
-      setMessage('请粘贴以 http:// 或 https:// 开头的主页、频道或播放列表链接。')
+    const value = extractSharedUrl(collectionUrl)
+    if (!value) {
+      setMessage('没有从分享文案中找到有效的主页、频道或播放列表链接。')
       return
     }
+    setCollectionUrl(value)
     setIsCollectionParsing(true)
     try {
       const response = await apiFetch('/api/collections/inspect', {
@@ -826,11 +835,11 @@ function App() {
               <form className="collection-scan" onSubmit={scanCollection}>
                 <div className="batch-heading"><label htmlFor="collection-url">主页 / 频道 / 播放列表链接</label><span>单次最多 50 个视频</span></div>
                 <div className="collection-link-row">
-                  <div className="collection-link-input"><Link2 size={19} /><input id="collection-url" value={collectionUrl} onChange={(event) => { setCollectionUrl(event.target.value); setCollection(null) }} placeholder="粘贴创作者主页、频道或播放列表链接" autoComplete="off" /></div>
+                  <div className="collection-link-input"><Link2 size={19} /><input id="collection-url" value={collectionUrl} onChange={(event) => { setCollectionUrl(event.target.value); setCollection(null) }} placeholder="可粘贴整段分享文案、主页短链或频道链接" autoComplete="off" /></div>
                   <label className="collection-limit"><span>扫描数量</span><select value={collectionLimit} onChange={(event) => { setCollectionLimit(Number(event.target.value)); setCollection(null) }}><option value={10}>最近 10 个</option><option value={20}>最近 20 个</option><option value={50}>最近 50 个</option></select></label>
                   <button className="scan-button" type="submit" disabled={isCollectionParsing || !collectionUrl.trim()}>{isCollectionParsing ? <Loader2 className="spin" size={17} /> : <Search size={17} />}{isCollectionParsing ? '正在扫描' : '扫描主页'}</button>
                 </div>
-                <p className="batch-note">扫描只读取公开视频列表，不消耗下载额度。私密、登录可见或被风控的主页需要先上传 Cookie。</p>
+                <p className="batch-note">支持抖音短链及 YouTube、TikTok、Bilibili 等主页。扫描不消耗下载额度；抖音风控或登录可见主页需先上传名称为 default 的 Cookie。</p>
               </form>
 
               {isCollectionParsing && <div className="collection-loading"><Loader2 className="spin" size={26} /><div><strong>正在读取主页视频列表</strong><span>主页内容较多时可能需要几十秒。</span></div></div>}

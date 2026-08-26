@@ -184,6 +184,7 @@ async def health() -> dict[str, object]:
             "yt_dlp": downloader.engine_version(),
             "deno": "available" if shutil.which("deno") else "missing",
             "ffmpeg": "available" if shutil.which("ffmpeg") else "missing",
+            "chromium": "available" if shutil.which("chromium") or shutil.which("chromium-browser") else "missing",
         },
     }
 
@@ -191,12 +192,16 @@ async def health() -> dict[str, object]:
 @app.get("/api/diagnostics")
 async def diagnostics() -> dict[str, object]:
     """Return detailed component versions for interactive troubleshooting."""
-    deno, ffmpeg = await asyncio.gather(binary_version("deno", "--version"), binary_version("ffmpeg", "-version"))
+    deno, ffmpeg, chromium = await asyncio.gather(
+        binary_version("deno", "--version"),
+        binary_version("ffmpeg", "-version"),
+        binary_version(shutil.which("chromium") or "chromium-browser", "--version"),
+    )
     return {
         "status": "ok",
         "version": settings.app_version,
         "engine_channel": settings.engine_channel,
-        "components": {"yt_dlp": downloader.engine_version(), "deno": deno, "ffmpeg": ffmpeg},
+        "components": {"yt_dlp": downloader.engine_version(), "deno": deno, "ffmpeg": ffmpeg, "chromium": chromium},
     }
 
 

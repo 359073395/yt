@@ -5,6 +5,7 @@
 ## 2.1 功能
 
 - 主页批量下载：粘贴一个创作者主页、频道或播放列表链接，扫描后把其中的视频全部加入队列
+- 抖音主页扫描：可粘贴带中文的整段分享文案或 `v.douyin.com` 短链，自动展开并读取作者公开视频
 - 安全批量队列：单次可扫描最近 10、20 或 50 个视频，统一选择视频或音频，逐项计入额度
 - 先解析再下载：展示封面、标题、作者、时长、真实分辨率、格式和预计大小
 - 视频格式选择：自动最佳画质或指定 yt-dlp 实际返回的格式；只有一个格式时不伪造清晰度选项
@@ -18,7 +19,7 @@
 - 多用户：访客、普通用户、会员、管理员及每日额度
 - API Key：可为智能体或其他服务配置独立额度和权限
 - Cookie：管理员上传 Netscape cookies.txt，加密保存且不写入日志
-- 新版引擎：`yt-dlp[default,curl-cffi]`、`yt-dlp-ejs`、Deno、FFmpeg
+- 新版引擎：`yt-dlp[default,curl-cffi]`、`yt-dlp-ejs`、Deno、FFmpeg、Chromium
 - 安全部署：非 root、只读容器根文件系统、移除 Linux capabilities
 
 ## 一键安装或更新
@@ -57,7 +58,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 
 1. 保留 `.env` 和数据卷。
 2. 将旧默认管理员密码替换为随机密码。
-3. 拉取 2.1.2 镜像，自动迁移 1.x 数据卷权限并启动健康检查。
+3. 拉取 2.1.3 镜像，自动迁移 1.x 数据卷权限并启动健康检查。
 4. 失败时回滚上一容器镜像。
 
 不要使用 `docker compose down --volumes` 更新，否则会删除数据库和历史文件。

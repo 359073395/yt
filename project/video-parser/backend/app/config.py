@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     request_timeout_seconds: int = Field(default=20, ge=5, le=120)
     metadata_timeout_seconds: int = Field(default=45, ge=10, le=180)
     engine_channel: str = Field(default="stable", pattern=r"^(stable|nightly)$")
-    app_version: str = "2.1.2"
+    app_version: str = "2.1.3"
     trusted_proxy_headers: bool = False
 
     @property

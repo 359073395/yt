@@ -13,8 +13,8 @@ async def test_health_does_not_spawn_component_processes(monkeypatch):
     response = await main.health()
 
     assert response["status"] == "ok"
-    assert response["version"] == "2.1.2"
-    assert set(response["components"]) == {"yt_dlp", "deno", "ffmpeg"}
+    assert response["version"] == "2.1.3"
+    assert set(response["components"]) == {"yt_dlp", "deno", "ffmpeg", "chromium"}
 
 
 @pytest.mark.asyncio
@@ -28,3 +28,4 @@ async def test_diagnostics_reports_component_versions(monkeypatch):
 
     assert response["components"]["deno"] == "deno-test-version"
     assert response["components"]["ffmpeg"] == "ffmpeg-test-version"
+    assert response["components"]["chromium"].endswith("-test-version")

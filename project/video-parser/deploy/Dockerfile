@@ -15,10 +15,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DOWNLOAD_DIR=/data/downloads \
     STATIC_DIR=/app/static \
     XDG_CACHE_HOME=/data/cache \
-    DENO_DIR=/data/cache/deno
+    DENO_DIR=/data/cache/deno \
+    HOME=/tmp/yinglian
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates tini \
+    && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates tini chromium \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=deno-runtime /deno /usr/local/bin/deno
