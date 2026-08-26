@@ -6,7 +6,8 @@ DOMAIN=""
 INSTALL_DIR="/opt/video-parser"
 PUBLIC_PORT="8080"
 PORT_WAS_SET=0
-IMAGE="ghcr.io/359073395/video-parser:2.0.2"
+APP_VERSION="2.0.3"
+IMAGE="ghcr.io/359073395/video-parser:${APP_VERSION}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -91,7 +92,9 @@ if (( PORT_WAS_SET == 0 )) && [[ -n "$(env_value PUBLIC_PORT)" ]]; then
 fi
 set_env PUBLIC_PORT "$PUBLIC_PORT"
 set_env VIDEO_PARSER_IMAGE "$IMAGE"
-set_env APP_VERSION "2.0.2"
+set_env APP_HOST "0.0.0.0"
+set_env APP_PORT "8080"
+set_env APP_VERSION "$APP_VERSION"
 
 GENERATED_PASSWORD=""
 if [[ "$(env_value AUTH_SECRET)" == "change-this-auth-secret" || -z "$(env_value AUTH_SECRET)" ]]; then
@@ -120,33 +123,42 @@ else
   VIDEO_PARSER_IMAGE="video-parser:local" docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --remove-orphans
 fi
 
+read_health() {
+  local response=""
+  response="$(curl -fsS --max-time 5 "http://127.0.0.1:${PUBLIC_PORT}/api/health" 2>/dev/null || true)"
+  if [[ -z "$response" ]]; then
+    response="$(docker exec video-parser python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=5).read().decode())" 2>/dev/null || true)"
+  fi
+  printf '%s' "$response"
+}
+
 healthy=0
+HEALTH_JSON=""
 for _ in $(seq 1 40); do
-  state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' video-parser 2>/dev/null || true)"
-  if [[ "$state" == "healthy" ]]; then
+  HEALTH_JSON="$(read_health)"
+  if [[ "$HEALTH_JSON" == *"\"version\":\"${APP_VERSION}\""* ]]; then
     healthy=1
     break
   fi
-  if [[ "$state" == "unhealthy" || "$state" == "exited" ]]; then
+  state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' video-parser 2>/dev/null || true)"
+  if [[ "$state" == "exited" || "$state" == "dead" ]]; then
     break
   fi
   sleep 2
 done
 
 if (( healthy == 0 )); then
-  echo "新版本健康检查失败。"
+  echo "新版本健康检查失败，期望版本 ${APP_VERSION}。"
+  echo "容器状态: $(docker inspect --format '{{.State.Status}} / {{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' video-parser 2>/dev/null || echo unknown)"
+  echo "健康接口返回: ${HEALTH_JSON:-无响应}"
+  echo "Docker 健康检查记录:"
+  docker inspect --format '{{range .State.Health.Log}}{{println .ExitCode .Output}}{{end}}' video-parser 2>/dev/null || true
+  echo "容器日志:"
   docker logs --tail 80 video-parser 2>/dev/null || true
   if [[ -n "$OLD_IMAGE" ]] && docker image inspect video-parser:rollback >/dev/null 2>&1; then
     echo "正在自动回滚上一版本..."
     VIDEO_PARSER_IMAGE="video-parser:rollback" docker compose up -d --force-recreate
   fi
-  exit 1
-fi
-
-HEALTH_JSON="$(curl -fsS "http://127.0.0.1:${PUBLIC_PORT}/api/health" 2>/dev/null || true)"
-if [[ "$HEALTH_JSON" != *'"version":"2.0.2"'* ]]; then
-  echo "容器虽然启动成功，但版本校验失败。"
-  echo "健康检查返回: ${HEALTH_JSON:-无响应}"
   exit 1
 fi
 

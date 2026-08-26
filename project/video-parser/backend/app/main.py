@@ -163,6 +163,22 @@ async def binary_version(binary: str, *arguments: str) -> str:
 
 @app.get("/api/health")
 async def health() -> dict[str, object]:
+    """Return a fast liveness response without spawning subprocesses."""
+    return {
+        "status": "ok",
+        "version": settings.app_version,
+        "engine_channel": settings.engine_channel,
+        "components": {
+            "yt_dlp": downloader.engine_version(),
+            "deno": "available" if shutil.which("deno") else "missing",
+            "ffmpeg": "available" if shutil.which("ffmpeg") else "missing",
+        },
+    }
+
+
+@app.get("/api/diagnostics")
+async def diagnostics() -> dict[str, object]:
+    """Return detailed component versions for interactive troubleshooting."""
     deno, ffmpeg = await asyncio.gather(binary_version("deno", "--version"), binary_version("ffmpeg", "-version"))
     return {
         "status": "ok",
