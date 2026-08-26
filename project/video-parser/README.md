@@ -57,7 +57,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 
 1. 保留 `.env` 和数据卷。
 2. 将旧默认管理员密码替换为随机密码。
-3. 拉取 2.1.1 镜像并启动健康检查。
+3. 拉取 2.1.2 镜像，自动迁移 1.x 数据卷权限并启动健康检查。
 4. 失败时回滚上一容器镜像。
 
 不要使用 `docker compose down --volumes` 更新，否则会删除数据库和历史文件。

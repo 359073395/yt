@@ -6,7 +6,7 @@ DOMAIN=""
 INSTALL_DIR="/opt/video-parser"
 PUBLIC_PORT="8080"
 PORT_WAS_SET=0
-APP_VERSION="2.1.1"
+APP_VERSION="2.1.2"
 IMAGE="ghcr.io/359073395/video-parser:${APP_VERSION}"
 
 while [[ $# -gt 0 ]]; do
@@ -115,13 +115,20 @@ if docker inspect video-parser >/dev/null 2>&1; then
 fi
 
 echo "正在获取影链工坊 2.1 镜像..."
+DEPLOY_IMAGE="$IMAGE"
 if VIDEO_PARSER_IMAGE="$IMAGE" docker compose pull video-parser; then
-  VIDEO_PARSER_IMAGE="$IMAGE" docker compose up -d --remove-orphans --force-recreate
+  :
 else
   echo "预构建镜像暂不可用，改用本机源码构建。"
-  VIDEO_PARSER_IMAGE="video-parser:local" docker compose -f docker-compose.yml -f docker-compose.build.yml build --pull --no-cache video-parser
-  VIDEO_PARSER_IMAGE="video-parser:local" docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --remove-orphans
+  DEPLOY_IMAGE="video-parser:local"
+  VIDEO_PARSER_IMAGE="$DEPLOY_IMAGE" docker compose -f docker-compose.yml -f docker-compose.build.yml build --pull --no-cache video-parser
 fi
+
+# 1.x used root inside the container. Its persistent volume is therefore not
+# writable by the unprivileged 2.x runtime until ownership is migrated once.
+bash deploy/migrate-data-permissions.sh video-parser "$DEPLOY_IMAGE"
+
+VIDEO_PARSER_IMAGE="$DEPLOY_IMAGE" docker compose up -d --remove-orphans --force-recreate
 
 read_health() {
   local response=""
