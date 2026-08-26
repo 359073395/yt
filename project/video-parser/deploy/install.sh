@@ -6,7 +6,7 @@ DOMAIN=""
 INSTALL_DIR="/opt/video-parser"
 PUBLIC_PORT="8080"
 PORT_WAS_SET=0
-IMAGE="ghcr.io/359073395/video-parser:latest"
+IMAGE="ghcr.io/359073395/video-parser:2.0.2"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -140,6 +140,13 @@ if (( healthy == 0 )); then
     echo "正在自动回滚上一版本..."
     VIDEO_PARSER_IMAGE="video-parser:rollback" docker compose up -d --force-recreate
   fi
+  exit 1
+fi
+
+HEALTH_JSON="$(curl -fsS "http://127.0.0.1:${PUBLIC_PORT}/api/health" 2>/dev/null || true)"
+if [[ "$HEALTH_JSON" != *'"version":"2.0.2"'* ]]; then
+  echo "容器虽然启动成功，但版本校验失败。"
+  echo "健康检查返回: ${HEALTH_JSON:-无响应}"
   exit 1
 fi
 
