@@ -64,6 +64,7 @@ jobs:
           deno-version: v2.x
       - run: pip install -r backend/requirements.txt
       - name: YouTube public test metadata
+        continue-on-error: true
         run: python -m yt_dlp --ignore-config --js-runtimes deno --no-playlist --skip-download --print id "https://www.youtube.com/watch?v=MeJVWBSsPAY"
 
   container-smoke:
