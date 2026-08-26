@@ -55,6 +55,8 @@ type Job = {
   title?: string | null
   platform?: string | null
   thumbnail?: string | null
+  thumbnail_proxy_url?: string | null
+  thumbnail_download_url?: string | null
   duration?: number | null
   size_bytes?: number | null
   downloaded_bytes: number
@@ -81,6 +83,7 @@ type FormatOption = {
   label: string
   ext?: string | null
   resolution?: string | null
+  width?: number | null
   height?: number | null
   fps?: number | null
   filesize?: number | null
@@ -88,7 +91,13 @@ type FormatOption = {
   has_audio: boolean
 }
 
-type SubtitleOption = { language: string; label: string; automatic: boolean }
+type SubtitleOption = {
+  language: string
+  label: string
+  automatic: boolean
+  ext?: string | null
+  download_url?: string | null
+}
 
 type ParsedMedia = {
   url: string
@@ -96,11 +105,37 @@ type ParsedMedia = {
   extractor?: string | null
   platform?: string | null
   thumbnail?: string | null
+  thumbnail_proxy_url?: string | null
+  thumbnail_download_url?: string | null
   duration?: number | null
   uploader?: string | null
   description?: string | null
   formats: FormatOption[]
   subtitles: SubtitleOption[]
+  subtitle_note?: string | null
+}
+
+type BatchJobCreateResponse = {
+  jobs: { url: string; job_id: string }[]
+  quota: Quota
+}
+
+type CollectionItem = {
+  url: string
+  title: string
+  thumbnail?: string | null
+  thumbnail_proxy_url?: string | null
+  duration?: number | null
+  uploader?: string | null
+}
+
+type CollectionInspectResponse = {
+  source_url: string
+  title: string
+  extractor?: string | null
+  total_count?: number | null
+  items: CollectionItem[]
+  truncated: boolean
 }
 
 type UserRole = 'user' | 'member' | 'admin'
@@ -495,7 +530,13 @@ function LegacyApp() {
 }
 
 function App() {
+  const [inputMode, setInputMode] = React.useState<'single' | 'batch'>('single')
   const [url, setUrl] = React.useState('')
+  const [collectionUrl, setCollectionUrl] = React.useState('')
+  const [collectionLimit, setCollectionLimit] = React.useState(20)
+  const [collection, setCollection] = React.useState<CollectionInspectResponse | null>(null)
+  const [batchMediaType, setBatchMediaType] = React.useState<'video' | 'audio'>('video')
+  const [batchAudioFormat, setBatchAudioFormat] = React.useState('mp3')
   const [parsed, setParsed] = React.useState<ParsedMedia | null>(null)
   const [mediaType, setMediaType] = React.useState<'video' | 'audio'>('video')
   const [formatId, setFormatId] = React.useState('best')
@@ -505,6 +546,8 @@ function App() {
   const [job, setJob] = React.useState<Job | null>(null)
   const [isParsing, setIsParsing] = React.useState(false)
   const [isCreating, setIsCreating] = React.useState(false)
+  const [isCollectionParsing, setIsCollectionParsing] = React.useState(false)
+  const [isBatchCreating, setIsBatchCreating] = React.useState(false)
   const [message, setMessage] = React.useState<string | null>(null)
   const [token, setToken] = React.useState(() => window.localStorage.getItem('video-parser-token') || '')
   const [user, setUser] = React.useState<User | null>(null)
@@ -540,10 +583,16 @@ function App() {
   async function refreshHistory(authToken = token) {
     try {
       const response = await apiFetch('/api/jobs', {}, authToken)
-      if (response.ok) setHistory((await response.json()) as Job[])
+      if (response.ok) {
+        const items = (await response.json()) as Job[]
+        setHistory(items)
+        setJob((current) => current ? items.find((item) => item.job_id === current.job_id) || current : current)
+        return items
+      }
     } catch {
       // History is supplementary; the active task keeps streaming independently.
     }
+    return []
   }
 
   React.useEffect(() => {
@@ -568,6 +617,13 @@ function App() {
     return () => source.close()
   }, [job?.job_id, job?.status])
 
+  const hasActiveHistory = history.some((item) => ['queued', 'parsing', 'downloading', 'merging'].includes(item.status))
+  React.useEffect(() => {
+    if (!hasActiveHistory) return
+    const timer = window.setInterval(() => void refreshHistory(), 2000)
+    return () => window.clearInterval(timer)
+  }, [hasActiveHistory, token])
+
   async function parseUrl(event: React.FormEvent) {
     event.preventDefault()
     const value = url.trim()
@@ -587,13 +643,73 @@ function App() {
       if (!response.ok) throw new Error(await readError(response))
       const body = (await response.json()) as ParsedMedia
       setParsed(body)
-      setFormatId('best')
+      setFormatId(body.formats[0]?.format_id || 'best')
       setMediaType('video')
       setSubtitle('')
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '解析失败')
     } finally {
       setIsParsing(false)
+    }
+  }
+
+  async function scanCollection(event: React.FormEvent) {
+    event.preventDefault()
+    setMessage(null)
+    setCollection(null)
+    const value = collectionUrl.trim()
+    if (!/^https?:\/\//i.test(value)) {
+      setMessage('请粘贴以 http:// 或 https:// 开头的主页、频道或播放列表链接。')
+      return
+    }
+    setIsCollectionParsing(true)
+    try {
+      const response = await apiFetch('/api/collections/inspect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: value,
+          max_items: collectionLimit,
+        }),
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      setCollection((await response.json()) as CollectionInspectResponse)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '主页扫描失败')
+    } finally {
+      setIsCollectionParsing(false)
+    }
+  }
+
+  async function createBatch() {
+    setMessage(null)
+    const urls = collection?.items.map((item) => item.url) || []
+    if (!urls.length) {
+      setMessage('请先扫描一个包含公开视频的主页。')
+      return
+    }
+    if (quota && !quota.unlimited && (quota.remaining ?? 0) < urls.length) {
+      setMessage(`当前剩余额度不足：需要 ${urls.length} 次，剩余 ${quota.remaining ?? 0} 次。`)
+      return
+    }
+    setIsBatchCreating(true)
+    try {
+      const response = await apiFetch('/api/jobs/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls, media_type: batchMediaType, audio_format: batchAudioFormat }),
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      const body = (await response.json()) as BatchJobCreateResponse
+      setQuota(body.quota)
+      const items = await refreshHistory()
+      const first = items.find((item) => item.job_id === body.jobs[0]?.job_id) || items[0]
+      if (first) setJob(first)
+      setMessage(`已从“${collection?.title || '该主页'}”将 ${body.jobs.length} 个视频全部加入下载队列。`)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '批量任务创建失败')
+    } finally {
+      setIsBatchCreating(false)
     }
   }
 
@@ -670,10 +786,13 @@ function App() {
     setMessage('15 分钟有效的下载链接已复制。')
   }
 
+  const selectedSubtitle = parsed?.subtitles.find((item) => item.language === subtitle)
+  const collectionQuotaEnough = !collection || !quota || quota.unlimited || (quota.remaining ?? 0) >= collection.items.length
+
   return (
     <main className="app-shell app-v2">
       <header className="top-nav">
-        <a className="brand" href="#top"><span className="brand-mark"><Play size={15} fill="currentColor" /></span>影链工坊 <em>2.0</em></a>
+        <a className="brand" href="#top"><span className="brand-mark"><Play size={15} fill="currentColor" /></span>影链工坊 <em>2.1</em></a>
         <nav><a href="#workspace">下载工作台</a><a href="#platforms">支持平台</a><a href="#notice">使用说明</a></nav>
         <HeaderAccount quota={quota} user={user} onAuth={handleAuth} adminRequest={adminRequest} onLogout={logout} />
       </header>
@@ -681,37 +800,83 @@ function App() {
       <section className="v2-intro" id="top">
         <span className="version-pill"><Zap size={14} />Powered by yt-dlp · Web 下载中心</span>
         <h1>粘贴链接，选择你真正需要的格式。</h1>
-        <p>画质、音频、字幕、进度和历史记录，一处完成。文件仅临时保存在你的服务器。</p>
+        <p>画质、封面、字幕和批量任务，一处完成。文件仅临时保存在你的服务器。</p>
       </section>
 
       <section className="workbench" id="workspace">
         <div className="parser-workspace">
-          <form className="parser-form parser-form-v2" onSubmit={parseUrl}>
-            <label htmlFor="video-url">视频链接</label>
-            <div className="input-row">
-              <Link2 size={20} />
-              <input id="video-url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="粘贴 YouTube / 抖音 / Bilibili / TikTok 等链接" autoComplete="off" />
-              <button type="submit" disabled={isParsing}>
-                {isParsing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}{isParsing ? '正在解析' : '解析链接'}
-              </button>
+          <div className="entry-mode" role="tablist" aria-label="下载模式">
+            <button className={inputMode === 'single' ? 'active' : ''} type="button" onClick={() => { setInputMode('single'); setMessage(null) }}>单条解析</button>
+            <button className={inputMode === 'batch' ? 'active' : ''} type="button" onClick={() => { setInputMode('batch'); setMessage(null) }}>批量下载</button>
+          </div>
+
+          {inputMode === 'single' ? (
+            <form className="parser-form parser-form-v2" onSubmit={parseUrl}>
+              <label htmlFor="video-url">视频链接</label>
+              <div className="input-row">
+                <Link2 size={20} />
+                <input id="video-url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="粘贴 YouTube / 抖音 / Bilibili / TikTok 等链接" autoComplete="off" />
+                <button type="submit" disabled={isParsing}>
+                  {isParsing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}{isParsing ? '正在解析' : '解析链接'}
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="batch-form">
+              <form className="collection-scan" onSubmit={scanCollection}>
+                <div className="batch-heading"><label htmlFor="collection-url">主页 / 频道 / 播放列表链接</label><span>单次最多 50 个视频</span></div>
+                <div className="collection-link-row">
+                  <div className="collection-link-input"><Link2 size={19} /><input id="collection-url" value={collectionUrl} onChange={(event) => { setCollectionUrl(event.target.value); setCollection(null) }} placeholder="粘贴创作者主页、频道或播放列表链接" autoComplete="off" /></div>
+                  <label className="collection-limit"><span>扫描数量</span><select value={collectionLimit} onChange={(event) => { setCollectionLimit(Number(event.target.value)); setCollection(null) }}><option value={10}>最近 10 个</option><option value={20}>最近 20 个</option><option value={50}>最近 50 个</option></select></label>
+                  <button className="scan-button" type="submit" disabled={isCollectionParsing || !collectionUrl.trim()}>{isCollectionParsing ? <Loader2 className="spin" size={17} /> : <Search size={17} />}{isCollectionParsing ? '正在扫描' : '扫描主页'}</button>
+                </div>
+                <p className="batch-note">扫描只读取公开视频列表，不消耗下载额度。私密、登录可见或被风控的主页需要先上传 Cookie。</p>
+              </form>
+
+              {isCollectionParsing && <div className="collection-loading"><Loader2 className="spin" size={26} /><div><strong>正在读取主页视频列表</strong><span>主页内容较多时可能需要几十秒。</span></div></div>}
+
+              {collection && (
+                <section className="collection-result">
+                  <div className="collection-result-head"><div><span>{collection.extractor || '自动识别'} · 已发现 {collection.items.length} 个</span><h2>{collection.title}</h2></div><strong>{collection.items.length}</strong></div>
+                  <div className="collection-items">
+                    {collection.items.map((item, index) => (
+                      <article className="collection-item" key={item.url}>
+                        <span className="collection-index">{index + 1}</span>
+                        <div className="collection-thumb">{item.thumbnail ? <img src={item.thumbnail_proxy_url || item.thumbnail} alt="" /> : <FileVideo size={18} />}</div>
+                        <div><h3>{item.title}</h3><p>{item.uploader || '公开视频'} · {formatDuration(item.duration)}</p></div>
+                      </article>
+                    ))}
+                  </div>
+                  {collection.truncated && <p className="collection-warning"><AlertTriangle size={14} />该主页还有更多视频，本次按你选择的上限下载；可提高扫描数量后重新扫描。</p>}
+                  <div className="batch-options">
+                    <label><span>统一下载类型</span><select value={batchMediaType} onChange={(event) => setBatchMediaType(event.target.value as 'video' | 'audio')}><option value="video">视频 · 自动最佳画质</option><option value="audio">仅音频</option></select></label>
+                    {batchMediaType === 'audio' && <label><span>统一音频格式</span><select value={batchAudioFormat} onChange={(event) => setBatchAudioFormat(event.target.value)}><option value="mp3">MP3</option><option value="m4a">M4A</option><option value="opus">OPUS</option><option value="flac">FLAC</option><option value="wav">WAV</option></select></label>}
+                  </div>
+                  {!collectionQuotaEnough && <p className="collection-warning"><AlertTriangle size={14} />下载额度不足：需要 {collection.items.length} 次，当前剩余 {quota?.remaining ?? 0} 次。</p>}
+                  <button className="primary-download" type="button" onClick={createBatch} disabled={isBatchCreating || !collectionQuotaEnough}>
+                    {isBatchCreating ? <Loader2 className="spin" size={18} /> : <ClipboardCopy size={18} />}{isBatchCreating ? '正在加入下载队列' : `全部下载这 ${collection.items.length} 个视频`}
+                  </button>
+                  <p className="batch-note">确认后每个视频计一次额度，并按服务器并发上限自动排队，不会同时挤占全部带宽。</p>
+                </section>
+              )}
             </div>
-          </form>
+          )}
 
           {message && <div className="inline-alert" role="status"><AlertTriangle size={16} />{message}</div>}
 
-          {!parsed && !isParsing && (
+          {inputMode === 'single' && !parsed && !isParsing && (
             <div className="empty-parser">
               <div><Link2 size={28} /></div>
               <h2>从一个公开链接开始</h2>
               <p>先读取视频信息和可用格式，不会立即消耗下载额度。</p>
             </div>
           )}
-          {isParsing && <div className="empty-parser parsing"><Loader2 className="spin" size={30} /><h2>正在连接解析引擎</h2><p>部分平台可能需要几秒钟完成格式探测。</p></div>}
-          {parsed && (
+          {inputMode === 'single' && isParsing && <div className="empty-parser parsing"><Loader2 className="spin" size={30} /><h2>正在连接解析引擎</h2><p>部分平台可能需要几秒钟完成格式探测。</p></div>}
+          {inputMode === 'single' && parsed && (
             <article className="media-config">
               <div className="media-preview">
-                <div className="preview-image">{parsed.thumbnail ? <img src={parsed.thumbnail} alt="" /> : <FileVideo size={32} />}</div>
-                <div><span>{parsed.platform || '自动识别'} · {formatDuration(parsed.duration)}</span><h2>{parsed.title}</h2><p>{parsed.uploader || '公开内容'}</p></div>
+                <div className="preview-image">{parsed.thumbnail ? <img src={parsed.thumbnail_proxy_url || parsed.thumbnail} alt="视频封面" /> : <FileVideo size={32} />}</div>
+                <div className="preview-copy"><span>{parsed.platform || '自动识别'} · {formatDuration(parsed.duration)}</span><h2>{parsed.title}</h2><p>{parsed.uploader || '公开内容'}</p>{parsed.thumbnail_download_url && <a className="cover-download" href={parsed.thumbnail_download_url}><Download size={14} />下载原始封面</a>}</div>
               </div>
               <div className="media-tabs">
                 <button className={mediaType === 'video' ? 'active' : ''} type="button" onClick={() => setMediaType('video')}><FileVideo size={17} />视频</button>
@@ -720,8 +885,8 @@ function App() {
               <div className="option-grid">
                 {mediaType === 'video' ? (
                   <>
-                    <label><span>画质与格式</span><select value={formatId} onChange={(event) => setFormatId(event.target.value)}>{parsed.formats.map((item) => <option value={item.format_id} key={item.format_id}>{item.label}{item.filesize ? ` · ${formatBytes(item.filesize)}` : ''}</option>)}</select></label>
-                    <label><span><Captions size={14} />字幕</span><select value={subtitle} onChange={(event) => setSubtitle(event.target.value)}><option value="">不下载字幕</option>{parsed.subtitles.map((item) => <option value={item.language} key={item.language}>{item.label}{item.automatic ? '（自动）' : ''}</option>)}</select></label>
+                    <label><span>画质与格式</span><select value={formatId} disabled={parsed.formats.length === 1} onChange={(event) => setFormatId(event.target.value)}>{parsed.formats.map((item) => <option value={item.format_id} key={item.format_id}>{item.label}{item.filesize ? ` · ${formatBytes(item.filesize)}` : ''}</option>)}</select><small>{parsed.formats.length === 1 ? '平台仅提供这一档可下载画质' : `检测到 ${parsed.formats.length - 1} 个具体格式`}</small></label>
+                    <label><span><Captions size={14} />字幕</span><select value={subtitle} disabled={!parsed.subtitles.length} onChange={(event) => setSubtitle(event.target.value)}><option value="">{parsed.subtitles.length ? '不嵌入字幕' : '无可下载字幕'}</option>{parsed.subtitles.map((item) => <option value={item.language} key={item.language}>{item.label}{item.ext ? ` · ${item.ext.toUpperCase()}` : ''}{item.automatic ? '（自动）' : ''}</option>)}</select><small>{parsed.subtitle_note || '选择后会嵌入视频，也可单独下载字幕文件'}</small>{selectedSubtitle?.download_url && <a className="subtitle-download" href={selectedSubtitle.download_url}><Download size={13} />单独下载 {selectedSubtitle.label} 字幕</a>}</label>
                   </>
                 ) : (
                   <label><span>音频格式</span><select value={audioFormat} onChange={(event) => setAudioFormat(event.target.value)}><option value="mp3">MP3 · 通用兼容</option><option value="m4a">M4A · 保留质量</option><option value="opus">OPUS · 高压缩率</option><option value="flac">FLAC · 无损</option><option value="wav">WAV · 未压缩</option></select></label>
@@ -763,13 +928,14 @@ function QueuePanel({
       <div className="queue-header"><div><span className="caption">Download queue</span><h2>下载队列</h2></div><span>{queue.length} 个进行中</span></div>
       {current ? (
         <div className="current-download">
-          <div className="current-title"><div className="mini-thumb">{current.thumbnail ? <img src={current.thumbnail} alt="" /> : <FileVideo size={22} />}</div><div><h3>{current.title || '正在读取视频信息'}</h3><p>{current.platform || '解析中'} · {current.media_type === 'audio' ? current.audio_format.toUpperCase() : current.format_id}</p></div></div>
+          <div className="current-title"><div className="mini-thumb">{current.thumbnail ? <img src={current.thumbnail_proxy_url || current.thumbnail} alt="" /> : <FileVideo size={22} />}</div><div><h3>{current.title || '正在读取视频信息'}</h3><p>{current.platform || '解析中'} · {current.media_type === 'audio' ? current.audio_format.toUpperCase() : current.format_id}</p></div></div>
           <div className="current-state"><StatusBadge status={current.status} /><strong>{Math.round(current.progress)}%</strong></div>
           <div className="progress-track"><div style={{ width: `${Math.max(0, Math.min(current.progress, 100))}%` }} /></div>
           <div className="transfer-meta"><span>{formatBytes(current.downloaded_bytes)} / {formatBytes(current.total_bytes)}</span><span>{current.speed ? `${formatBytes(current.speed)}/s` : '等待数据'}{current.eta ? ` · ${current.eta}s` : ''}</span></div>
           {current.error && <p className="error-text">{current.error}</p>}
           <div className="action-row">
             {current.download_url && <a className="download-button" href={current.download_url}><Download size={17} />下载文件</a>}
+            {current.thumbnail_download_url && <a className="secondary-button" href={current.thumbnail_download_url}><Download size={15} />封面</a>}
             {current.download_url && <button className="secondary-button" type="button" onClick={() => onCopy(current.download_url)}><Copy size={16} />复制链接</button>}
             {current.can_cancel && <button className="secondary-button danger-soft" type="button" onClick={() => onAction('cancel', current)}><XCircle size={16} />取消</button>}
             {current.can_retry && <button className="secondary-button" type="button" onClick={() => onAction('retry', current)}><RotateCcw size={16} />重试</button>}
@@ -923,7 +1089,7 @@ function TaskPanel({ job, onCopy }: { job: Job; onCopy: (downloadUrl?: string | 
 
       <article className="result-row">
         <div className="thumb">
-          {job.thumbnail ? <img src={job.thumbnail} alt="" /> : <FileVideo size={28} />}
+          {job.thumbnail ? <img src={job.thumbnail_proxy_url || job.thumbnail} alt="" /> : <FileVideo size={28} />}
         </div>
         <div className="result-main">
           <h3>{job.title || '链接提交后会显示视频标题'}</h3>

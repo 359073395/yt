@@ -596,7 +596,9 @@ class AuthStore:
             unlimited=False,
         )
 
-    def consume_quota(self, user: AuthUser | None, client_ip: str) -> QuotaPublic:
+    def consume_quota(self, user: AuthUser | None, client_ip: str, amount: int = 1) -> QuotaPublic:
+        if amount < 1 or amount > 50:
+            raise ValueError("单次额度扣除数量必须在 1 到 50 之间。")
         if user and self._is_unlimited(user):
             return self.quota_for(user, client_ip)
         subject_type, subject_key = self._quota_subject(user, client_ip)
@@ -609,12 +611,16 @@ class AuthStore:
             ).fetchone()
             used = int(row["count"]) if row else 0
             limit = self._limit_for(user)
-            if used >= limit:
+            if used + amount > limit:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="今日下载次数已用完，开通会员后可无限下载。",
+                    detail=(
+                        "今日下载次数已用完，开通会员后可无限下载。"
+                        if amount == 1
+                        else f"今日剩余额度不足，当前批量任务需要 {amount} 次下载额度。"
+                    ),
                 )
-            new_count = used + 1
+            new_count = used + amount
             conn.execute(
                 """
                 INSERT INTO daily_usage (usage_date, subject_type, subject_key, count)

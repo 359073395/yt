@@ -15,9 +15,19 @@ from typing import Any
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+from .assets import RemoteAssetError, signed_asset_url
 from .config import Settings
 from .cookies import CookieStore
-from .models import FormatOption, Job, JobStatus, MediaType, ParseResponse, SubtitleOption
+from .models import (
+    CollectionInspectResponse,
+    CollectionItem,
+    FormatOption,
+    Job,
+    JobStatus,
+    MediaType,
+    ParseResponse,
+    SubtitleOption,
+)
 from .store import JobStore
 
 
@@ -63,6 +73,24 @@ class Downloader:
                 raise DownloadRejected("当前仅支持单个视频链接，不支持播放列表。")
             self._remember_metadata(resolved_url, cookie_profile, info)
             return self._parse_response(resolved_url, info)
+
+    async def inspect_collection(
+        self,
+        url: str,
+        max_items: int,
+        cookie_profile: str | None = None,
+    ) -> CollectionInspectResponse:
+        async with self.semaphore:
+            with tempfile.TemporaryDirectory(prefix=".collection-", dir=self.settings.download_dir) as temporary:
+                work_dir = Path(temporary)
+                context = self.cookies.materialize(cookie_profile, work_dir) if self.cookies else nullcontext(None)
+                with context as cookie_file:
+                    output = await self._capture_collection(url, max_items, cookie_file)
+        try:
+            info = json.loads(output)
+        except json.JSONDecodeError as exc:
+            raise DownloadRejected("主页解析器返回了无效数据，请更新引擎后重试。") from exc
+        return self._collection_response(url, info, max_items)
 
     async def run(self, job: Job) -> None:
         task = asyncio.current_task()
@@ -243,6 +271,29 @@ class Downloader:
                 return output, target
         raise DownloadRejected("TikTok 未返回视频数据，请稍后重试。")
 
+    async def _capture_collection(self, url: str, max_items: int, cookie_file: Path | None) -> str:
+        is_tiktok = self._is_tiktok_url(url)
+        targets = self.TIKTOK_IMPERSONATE_TARGETS if is_tiktok else (None,)
+        for index, target in enumerate(targets):
+            command = [
+                *self._base_command(cookie_file, url, target, allow_playlist=True),
+                "--flat-playlist",
+                "--playlist-end",
+                str(max_items + 1),
+                "--dump-single-json",
+                "--skip-download",
+                url,
+            ]
+            try:
+                output = await self._run_capture(command, self.settings.metadata_timeout_seconds)
+            except DownloadRejected:
+                can_retry = index < len(targets) - 1 and is_tiktok
+                if not can_retry:
+                    raise
+            else:
+                return output
+        raise DownloadRejected("TikTok 主页未返回视频列表，请稍后重试或上传 Cookie。")
+
     async def _canonicalize_tiktok_url(self, url: str) -> str:
         if not self._is_tiktok_url(url):
             return url
@@ -337,24 +388,24 @@ class Downloader:
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36"
             ),
         }
-        formats = []
-        for index, media_url in enumerate(urls[:5]):
-            if not isinstance(media_url, str) or not cls._is_tiktok_media_url(media_url):
-                continue
-            formats.append({
-                "format_id": f"embed-{index}",
-                "format_note": "TikTok 官方嵌入源",
-                "url": media_url,
-                "ext": "mp4",
-                "protocol": "https",
-                "width": cls._as_int(video_meta.get("width")),
-                "height": cls._as_int(video_meta.get("height")),
-                "vcodec": "h264",
-                "acodec": "aac",
-                "http_headers": headers,
-            })
-        if not formats:
+        media_url = next(
+            (candidate for candidate in urls[:5] if isinstance(candidate, str) and cls._is_tiktok_media_url(candidate)),
+            None,
+        )
+        if not media_url:
             raise ValueError("TikTok embed media URL is invalid")
+        formats = [{
+            "format_id": "embed-0",
+            "format_note": "原始画质",
+            "url": media_url,
+            "ext": "mp4",
+            "protocol": "https",
+            "width": cls._as_int(video_meta.get("width")),
+            "height": cls._as_int(video_meta.get("height")),
+            "vcodec": "h264",
+            "acodec": "aac",
+            "http_headers": headers,
+        }]
 
         author = video_data.get("authorInfos") if isinstance(video_data, dict) else {}
         covers = item.get("coversOrigin") or item.get("covers") or []
@@ -404,17 +455,20 @@ class Downloader:
         cookie_file: Path | None,
         url: str | None = None,
         impersonate_target: str | None = None,
+        *,
+        allow_playlist: bool = False,
     ) -> list[str]:
         command = [
             sys.executable,
             "-m",
             "yt_dlp",
             "--ignore-config",
-            "--no-playlist",
             "--no-warnings",
             "--socket-timeout",
             str(self.settings.request_timeout_seconds),
         ]
+        if not allow_playlist:
+            command.append("--no-playlist")
         if shutil.which("deno"):
             command.extend(["--js-runtimes", "deno"])
         if url and self._is_tiktok_url(url):
@@ -580,9 +634,6 @@ class Downloader:
         return max(files, key=lambda path: path.stat().st_mtime)
 
     def _parse_response(self, url: str, info: dict[str, Any]) -> ParseResponse:
-        formats: list[FormatOption] = [
-            FormatOption(format_id="best", label="自动选择最佳画质", has_video=True, has_audio=True)
-        ]
         seen: set[str] = set()
         candidates: list[FormatOption] = []
         for item in info.get("formats") or []:
@@ -595,13 +646,17 @@ class Downloader:
             has_audio = bool(acodec and acodec != "none")
             if not has_video:
                 continue
+            width = self._as_int(item.get("width"))
             height = self._as_int(item.get("height"))
             fps = self._number(str(item.get("fps") or ""))
             ext = item.get("ext")
-            resolution = item.get("resolution") or (f"{height}p" if height else None)
-            details = [resolution or "视频", str(ext or "未知格式")]
+            resolution = item.get("resolution") or (f"{width}×{height}" if width and height else f"{height}p" if height else None)
+            details = [resolution or "视频", str(ext or "未知格式").upper()]
             if fps:
                 details.append(f"{int(fps)}fps")
+            format_note = str(item.get("format_note") or "").strip()
+            if format_note and format_note.lower() not in {part.lower() for part in details}:
+                details.append(format_note)
             details.append("含音频" if has_audio else "自动合并音频")
             candidates.append(
                 FormatOption(
@@ -609,7 +664,7 @@ class Downloader:
                     label=" · ".join(details),
                     ext=ext,
                     resolution=resolution,
-                    width=self._as_int(item.get("width")),
+                    width=width,
                     height=height,
                     fps=fps,
                     filesize=self._as_int(item.get("filesize") or item.get("filesize_approx")),
@@ -621,7 +676,13 @@ class Downloader:
             )
             seen.add(format_id)
         candidates.sort(key=lambda item: (item.height or 0, item.fps or 0, item.filesize or 0), reverse=True)
-        formats.extend(candidates[:40])
+        candidates = candidates[:40]
+        formats = candidates if len(candidates) == 1 else [
+            FormatOption(format_id="best", label="自动选择最佳画质", has_video=True, has_audio=True),
+            *candidates,
+        ]
+        if not formats:
+            formats = [FormatOption(format_id="best", label="自动选择最佳画质", has_video=True, has_audio=True)]
 
         subtitles: list[SubtitleOption] = []
         explicit = info.get("subtitles") or {}
@@ -630,19 +691,137 @@ class Downloader:
             if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,32}", str(language)):
                 continue
             is_automatic = language not in explicit
-            subtitles.append(SubtitleOption(language=str(language), label=str(language), automatic=is_automatic))
+            tracks = automatic.get(language) if is_automatic else explicit.get(language)
+            track = self._preferred_subtitle_track(tracks)
+            subtitles.append(
+                SubtitleOption(
+                    language=str(language),
+                    label=str(language),
+                    automatic=is_automatic,
+                    ext=str(track.get("ext")) if track and track.get("ext") else None,
+                    download_url=self._signed_asset(track.get("url"), "subtitle", download=True) if track else None,
+                )
+            )
+        thumbnail = info.get("thumbnail")
         return ParseResponse(
             url=url,
             title=str(info.get("title") or "未命名视频"),
             extractor=info.get("extractor_key") or info.get("extractor"),
             platform=info.get("extractor_key") or info.get("extractor"),
-            thumbnail=info.get("thumbnail"),
+            thumbnail=thumbnail,
+            thumbnail_proxy_url=self._signed_asset(thumbnail, "cover", download=False),
+            thumbnail_download_url=self._signed_asset(thumbnail, "cover", download=True),
             duration=info.get("duration"),
             uploader=info.get("uploader") or info.get("channel"),
             description=(str(info.get("description"))[:500] if info.get("description") else None),
             formats=formats,
             subtitles=subtitles,
+            subtitle_note=None if subtitles else "该视频未提供可下载字幕",
         )
+
+    def _collection_response(
+        self,
+        source_url: str,
+        info: Any,
+        max_items: int,
+    ) -> CollectionInspectResponse:
+        if not isinstance(info, dict):
+            raise DownloadRejected("该链接没有返回可识别的视频主页。")
+        raw_entries = info.get("entries")
+        if not isinstance(raw_entries, list):
+            raise DownloadRejected("这不是可批量扫描的主页、频道或播放列表链接。")
+
+        items: list[CollectionItem] = []
+        seen: set[str] = set()
+        for entry in raw_entries:
+            if len(items) >= max_items or not isinstance(entry, dict):
+                continue
+            item_url = self._collection_entry_url(entry, info)
+            if not item_url or item_url in seen:
+                continue
+            seen.add(item_url)
+            thumbnail = self._collection_thumbnail(entry)
+            items.append(
+                CollectionItem(
+                    url=item_url,
+                    title=str(entry.get("title") or entry.get("id") or "未命名视频"),
+                    thumbnail=thumbnail,
+                    thumbnail_proxy_url=self._signed_asset(thumbnail, "cover", download=False),
+                    duration=self._number(str(entry.get("duration") or "")),
+                    uploader=entry.get("uploader") or entry.get("channel"),
+                )
+            )
+        if not items:
+            raise DownloadRejected("没有从这个主页中找到可下载的视频；私密主页可能需要 Cookie。")
+
+        total_count = self._as_int(info.get("playlist_count") or info.get("n_entries"))
+        discovered_more = len(raw_entries) > len(items)
+        truncated = discovered_more or bool(total_count and total_count > len(items))
+        return CollectionInspectResponse(
+            source_url=source_url,
+            title=str(info.get("title") or info.get("playlist_title") or info.get("uploader") or "视频主页"),
+            extractor=info.get("extractor_key") or info.get("extractor"),
+            total_count=total_count,
+            items=items,
+            truncated=truncated,
+        )
+
+    @staticmethod
+    def _collection_entry_url(entry: dict[str, Any], collection: dict[str, Any]) -> str | None:
+        for key in ("webpage_url", "original_url", "url"):
+            candidate = entry.get(key)
+            if isinstance(candidate, str) and candidate.lower().startswith(("https://", "http://")):
+                return candidate
+
+        video_id = str(entry.get("id") or "").strip()
+        extractor = str(entry.get("extractor_key") or collection.get("extractor_key") or "").lower()
+        if not video_id:
+            return None
+        if "youtube" in extractor and re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
+            return f"https://www.youtube.com/watch?v={video_id}"
+        if "bilibili" in extractor and re.fullmatch(r"(?:BV[A-Za-z0-9]+|av\d+)", video_id, flags=re.IGNORECASE):
+            return f"https://www.bilibili.com/video/{video_id}"
+        if "tiktok" in extractor and re.fullmatch(r"\d{10,24}", video_id):
+            uploader = str(entry.get("uploader_id") or entry.get("uploader") or "_").removeprefix("@")
+            if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", uploader):
+                return f"https://www.tiktok.com/@{uploader}/video/{video_id}"
+        return None
+
+    @staticmethod
+    def _collection_thumbnail(entry: dict[str, Any]) -> str | None:
+        thumbnail = entry.get("thumbnail")
+        if isinstance(thumbnail, str):
+            return thumbnail
+        thumbnails = entry.get("thumbnails")
+        if not isinstance(thumbnails, list):
+            return None
+        for item in reversed(thumbnails):
+            if isinstance(item, dict) and isinstance(item.get("url"), str):
+                return item["url"]
+        return None
+
+    def _signed_asset(self, source_url: Any, kind: str, *, download: bool) -> str | None:
+        if not isinstance(source_url, str):
+            return None
+        try:
+            return signed_asset_url(source_url, kind, self.settings.auth_secret, download=download)
+        except RemoteAssetError:
+            return None
+
+    @staticmethod
+    def _preferred_subtitle_track(tracks: Any) -> dict[str, Any] | None:
+        if not isinstance(tracks, list):
+            return None
+        supported = {"vtt": 0, "srt": 1, "ass": 2, "ttml": 3, "json3": 4}
+        candidates = [
+            item for item in tracks
+            if isinstance(item, dict)
+            and isinstance(item.get("url"), str)
+            and str(item.get("url")).lower().startswith("https://")
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: supported.get(str(item.get("ext") or "").lower(), 99))
 
     @staticmethod
     def _as_int(value: Any) -> int | None:

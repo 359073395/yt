@@ -5,7 +5,7 @@ from pathlib import Path
 from time import time
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class JobStatus(StrEnum):
@@ -48,6 +48,8 @@ class SubtitleOption(BaseModel):
     language: str
     label: str
     automatic: bool = False
+    ext: str | None = None
+    download_url: str | None = None
 
 
 class ParseResponse(BaseModel):
@@ -56,11 +58,38 @@ class ParseResponse(BaseModel):
     extractor: str | None = None
     platform: str | None = None
     thumbnail: str | None = None
+    thumbnail_proxy_url: str | None = None
+    thumbnail_download_url: str | None = None
     duration: float | None = None
     uploader: str | None = None
     description: str | None = None
     formats: list[FormatOption]
     subtitles: list[SubtitleOption]
+    subtitle_note: str | None = None
+
+
+class CollectionInspectRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+    max_items: int = Field(default=20, ge=1, le=50)
+    cookie_profile: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
+
+
+class CollectionItem(BaseModel):
+    url: str
+    title: str
+    thumbnail: str | None = None
+    thumbnail_proxy_url: str | None = None
+    duration: float | None = None
+    uploader: str | None = None
+
+
+class CollectionInspectResponse(BaseModel):
+    source_url: str
+    title: str
+    extractor: str | None = None
+    total_count: int | None = None
+    items: list[CollectionItem]
+    truncated: bool = False
 
 
 class JobCreateRequest(BaseModel):
@@ -74,6 +103,34 @@ class JobCreateRequest(BaseModel):
 
 
 class JobCreateResponse(BaseModel):
+    job_id: str
+
+
+class BatchJobCreateRequest(BaseModel):
+    urls: list[str] = Field(min_length=1, max_length=50)
+    media_type: MediaType = MediaType.video
+    audio_format: str = Field(default="mp3", pattern=r"^(mp3|m4a|opus|wav|flac)$")
+    cookie_profile: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
+
+    @field_validator("urls")
+    @classmethod
+    def normalize_urls(cls, urls: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_url in urls:
+            url = raw_url.strip()
+            if len(url) < 8 or len(url) > 2048:
+                raise ValueError("每条链接长度必须在 8 到 2048 个字符之间")
+            if url not in seen:
+                normalized.append(url)
+                seen.add(url)
+        if not normalized:
+            raise ValueError("请至少提交一条链接")
+        return normalized
+
+
+class BatchJobItemResponse(BaseModel):
+    url: str
     job_id: str
 
 
@@ -100,6 +157,11 @@ class QuotaPublic(BaseModel):
     used: int
     remaining: int | None
     unlimited: bool
+
+
+class BatchJobCreateResponse(BaseModel):
+    jobs: list[BatchJobItemResponse]
+    quota: QuotaPublic
 
 
 class AuthResponse(BaseModel):
@@ -204,6 +266,8 @@ class JobPublic(BaseModel):
     extractor: str | None = None
     platform: str | None = None
     thumbnail: str | None = None
+    thumbnail_proxy_url: str | None = None
+    thumbnail_download_url: str | None = None
     duration: float | None = None
     size_bytes: int | None = None
     downloaded_bytes: int = 0

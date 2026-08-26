@@ -6,7 +6,7 @@ DOMAIN=""
 INSTALL_DIR="/opt/video-parser"
 PUBLIC_PORT="8080"
 PORT_WAS_SET=0
-APP_VERSION="2.0.3"
+APP_VERSION="2.1.0"
 IMAGE="ghcr.io/359073395/video-parser:${APP_VERSION}"
 
 while [[ $# -gt 0 ]]; do
@@ -114,7 +114,7 @@ if docker inspect video-parser >/dev/null 2>&1; then
   fi
 fi
 
-echo "正在获取影链工坊 2.0 镜像..."
+echo "正在获取影链工坊 2.1 镜像..."
 if VIDEO_PARSER_IMAGE="$IMAGE" docker compose pull video-parser; then
   VIDEO_PARSER_IMAGE="$IMAGE" docker compose up -d --remove-orphans --force-recreate
 else
@@ -164,7 +164,7 @@ fi
 
 SERVER_IP="$(curl -fsS https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
 echo
-echo "影链工坊 2.0 已通过健康检查。"
+echo "影链工坊 2.1 已通过健康检查。"
 echo "版本信息: http://${SERVER_IP}:${PUBLIC_PORT}/api/health"
 if [[ -n "$DOMAIN" ]]; then
   echo "请把 ${DOMAIN} 反向代理到 http://127.0.0.1:${PUBLIC_PORT}"

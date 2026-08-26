@@ -1,13 +1,16 @@
-# 影链工坊 2.0
+# 影链工坊 2.1
 
-基于官方 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 的自托管 Web 视频下载中心。支持解析后选择画质、仅音频、字幕、实时队列、任务历史、多用户额度、API Key 和加密 Cookie 配置。
+基于官方 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 的自托管 Web 视频下载中心。支持单条视频解析和创作者主页/频道/播放列表批量下载，以及真实画质、封面、字幕、实时队列、任务历史、多用户额度、API Key 和加密 Cookie 配置。
 
-## 2.0 功能
+## 2.1 功能
 
-- 先解析再下载：展示封面、标题、作者、时长、格式和预计大小
-- 视频格式选择：自动最佳画质或指定 yt-dlp 格式
+- 主页批量下载：粘贴一个创作者主页、频道或播放列表链接，扫描后把其中的视频全部加入队列
+- 安全批量队列：单次可扫描最近 10、20 或 50 个视频，统一选择视频或音频，逐项计入额度
+- 先解析再下载：展示封面、标题、作者、时长、真实分辨率、格式和预计大小
+- 视频格式选择：自动最佳画质或指定 yt-dlp 实际返回的格式；只有一个格式时不伪造清晰度选项
+- 封面：站内安全预览并支持下载原始封面
 - 音频提取：MP3、M4A、OPUS、FLAC、WAV
-- 字幕：人工字幕和自动字幕，可随视频嵌入
+- 字幕：明确显示是否可用；人工字幕和自动字幕既可单独下载，也可随视频嵌入
 - 实时任务：SSE 推送进度、速度、ETA，支持取消和重试
 - TikTok 分享链接：优先读取官方 Embed v2 直链，oEmbed、移动端 API、多浏览器指纹与解析缓存自动降级
 - 持久化历史：SQLite 保存任务，服务更新或重启后仍可查看
@@ -48,13 +51,13 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 
 打开 http://localhost:8080。
 
-## 从 1.0 升级
+## 从 1.0 / 2.0 升级
 
-2.0 继续使用原来的 `/data/video-parser.sqlite3` 和 Docker volume，不需要迁移账号、会员或 API Key。升级脚本会自动：
+2.1 继续使用原来的 `/data/video-parser.sqlite3` 和 Docker volume，不需要迁移账号、会员或 API Key。升级脚本会自动：
 
 1. 保留 `.env` 和数据卷。
 2. 将旧默认管理员密码替换为随机密码。
-3. 拉取 2.0 镜像并启动健康检查。
+3. 拉取 2.1.0 镜像并启动健康检查。
 4. 失败时回滚上一容器镜像。
 
 不要使用 `docker compose down --volumes` 更新，否则会删除数据库和历史文件。
@@ -88,7 +91,9 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 浏览器接口：
 
 - `POST /api/parse`：解析元数据、格式和字幕
+- `POST /api/collections/inspect`：扫描主页、频道或播放列表中的视频
 - `POST /api/jobs`：创建下载任务
+- `POST /api/jobs/batch`：把扫描结果批量加入队列
 - `GET /api/jobs`：当前用户或访客历史
 - `GET /api/jobs/{jobId}`：任务状态
 - `GET /api/jobs/{jobId}/events`：SSE 实时状态

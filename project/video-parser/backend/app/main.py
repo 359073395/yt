@@ -9,9 +9,10 @@ from time import time
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from .assets import RemoteAssetError, fetch_remote_asset, signed_asset_url, verify_asset_token
 from .auth import AuthStore, AuthUser
 from .config import get_settings
 from .cookies import CookieStore, MAX_COOKIE_BYTES
@@ -26,6 +27,11 @@ from .models import (
     ApiKeyUpdateRequest,
     AuthRequest,
     AuthResponse,
+    BatchJobCreateRequest,
+    BatchJobCreateResponse,
+    BatchJobItemResponse,
+    CollectionInspectRequest,
+    CollectionInspectResponse,
     CookieProfilePublic,
     Job,
     JobCreateRequest,
@@ -102,7 +108,7 @@ async def lifespan(_: FastAPI):
     cleanup_task.cancel()
 
 
-app = FastAPI(title="影链工坊 2.0", version=settings.app_version, lifespan=lifespan)
+app = FastAPI(title="影链工坊 2.1", version=settings.app_version, lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -137,6 +143,12 @@ def signed_download_url(job: Job) -> str | None:
 def public_job(job: Job) -> JobPublic:
     item = job.public()
     item.download_url = signed_download_url(job)
+    if job.thumbnail:
+        try:
+            item.thumbnail_proxy_url = signed_asset_url(job.thumbnail, "cover", settings.auth_secret, download=False)
+            item.thumbnail_download_url = signed_asset_url(job.thumbnail, "cover", settings.auth_secret, download=True)
+        except RemoteAssetError:
+            pass
     return item
 
 
@@ -221,6 +233,19 @@ async def parse_video(payload: ParseRequest, request: Request) -> ParseResponse:
         raise HTTPException(status_code=422, detail=downloader._safe_error(exc)) from exc
 
 
+@app.post("/api/collections/inspect", response_model=CollectionInspectResponse)
+async def inspect_collection(payload: CollectionInspectRequest, request: Request) -> CollectionInspectResponse:
+    _, client_ip = request_identity(request)
+    rate_limiter.check(f"collection:{client_ip}")
+    url = validate_public_url(payload.url)
+    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile):
+        raise HTTPException(status_code=400, detail="所选 Cookie 配置不存在。")
+    try:
+        return await downloader.inspect_collection(url, payload.max_items, payload.cookie_profile)
+    except DownloadRejected as exc:
+        raise HTTPException(status_code=422, detail=downloader._safe_error(exc)) from exc
+
+
 async def create_download(payload: JobCreateRequest, request: Request, api_key_mode: bool = False) -> JobCreateResponse:
     user, client_ip = request_identity(request)
     rate_limiter.check(f"job:{client_ip}")
@@ -237,6 +262,33 @@ async def create_download(payload: JobCreateRequest, request: Request, api_key_m
 @app.post("/api/jobs", response_model=JobCreateResponse, status_code=status.HTTP_202_ACCEPTED)
 async def create_job(payload: JobCreateRequest, request: Request) -> JobCreateResponse:
     return await create_download(payload, request)
+
+
+@app.post("/api/jobs/batch", response_model=BatchJobCreateResponse, status_code=status.HTTP_202_ACCEPTED)
+async def create_batch_jobs(payload: BatchJobCreateRequest, request: Request) -> BatchJobCreateResponse:
+    user, client_ip = request_identity(request)
+    rate_limiter.check(f"job:{client_ip}")
+    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile):
+        raise HTTPException(status_code=400, detail="所选 Cookie 配置不存在。")
+    urls = [validate_public_url(url) for url in payload.urls]
+    quota = auth_store.consume_quota(user, client_ip, amount=len(urls))
+    jobs: list[Job] = []
+    for url in urls:
+        job_payload = JobCreateRequest(
+            url=url,
+            media_type=payload.media_type,
+            format_id="best",
+            format_has_audio=True,
+            audio_format=payload.audio_format,
+            cookie_profile=payload.cookie_profile,
+        )
+        jobs.append(store.create(url, client_ip, job_payload, user.id if user else None))
+    for job in jobs:
+        asyncio.create_task(downloader.run(job))
+    return BatchJobCreateResponse(
+        jobs=[BatchJobItemResponse(url=job.url, job_id=job.job_id) for job in jobs],
+        quota=quota,
+    )
 
 
 @app.get("/api/jobs", response_model=list[JobPublic])
@@ -300,6 +352,33 @@ async def retry_job(job_id: str, request: Request) -> JobPublic:
 async def download_job(job_id: str, expires: int, signature: str) -> FileResponse:
     verify_download_signature(job_id, expires, signature)
     return file_response(job_id)
+
+
+@app.get("/api/assets/{kind}")
+async def download_remote_asset(
+    kind: str,
+    source: str,
+    expires: int,
+    signature: str,
+    download: bool = True,
+) -> Response:
+    try:
+        source_url = verify_asset_token(kind, source, expires, signature, settings.auth_secret)
+        asset = await asyncio.to_thread(fetch_remote_asset, source_url, kind)
+    except RemoteAssetError as exc:
+        message = str(exc)
+        code = status.HTTP_410_GONE if "过期" in message else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=message) from exc
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=asset.data,
+        media_type=asset.content_type,
+        headers={
+            "Content-Disposition": f'{disposition}; filename="{asset.filename}"',
+            "Cache-Control": "private, max-age=300",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 def file_response(job_id: str) -> FileResponse:

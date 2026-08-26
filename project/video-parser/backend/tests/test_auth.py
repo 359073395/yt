@@ -59,6 +59,19 @@ def test_anonymous_daily_limit_by_ip(tmp_path):
     assert store.consume_quota(None, "203.0.113.10").used == 1
 
 
+def test_batch_quota_is_consumed_atomically(tmp_path):
+    store = make_store(tmp_path)
+    user = store.create_user("batchuser", "password123")
+
+    quota = store.consume_quota(user, "127.0.0.1", amount=4)
+
+    assert quota.used == 4
+    assert quota.remaining == 6
+    with pytest.raises(HTTPException):
+        store.consume_quota(user, "127.0.0.1", amount=7)
+    assert store.quota_for(user, "127.0.0.1").used == 4
+
+
 def test_member_has_unlimited_quota(tmp_path):
     store = make_store(tmp_path)
     user = store.create_user("carol", "password123")
