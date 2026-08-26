@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 from enum import StrEnum
 from pathlib import Path
 from time import time
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
@@ -13,11 +15,62 @@ class JobStatus(StrEnum):
     merging = "merging"
     completed = "completed"
     failed = "failed"
+    cancelled = "cancelled"
     expired = "expired"
+
+
+class MediaType(StrEnum):
+    video = "video"
+    audio = "audio"
+
+
+class ParseRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+    cookie_profile: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
+
+
+class FormatOption(BaseModel):
+    format_id: str
+    label: str
+    ext: str | None = None
+    resolution: str | None = None
+    width: int | None = None
+    height: int | None = None
+    fps: float | None = None
+    filesize: int | None = None
+    vcodec: str | None = None
+    acodec: str | None = None
+    has_video: bool = False
+    has_audio: bool = False
+
+
+class SubtitleOption(BaseModel):
+    language: str
+    label: str
+    automatic: bool = False
+
+
+class ParseResponse(BaseModel):
+    url: str
+    title: str
+    extractor: str | None = None
+    platform: str | None = None
+    thumbnail: str | None = None
+    duration: float | None = None
+    uploader: str | None = None
+    description: str | None = None
+    formats: list[FormatOption]
+    subtitles: list[SubtitleOption]
 
 
 class JobCreateRequest(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
+    media_type: MediaType = MediaType.video
+    format_id: str = Field(default="best", min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
+    format_has_audio: bool = False
+    audio_format: str = Field(default="mp3", pattern=r"^(mp3|m4a|opus|wav|flac)$")
+    subtitle_language: str | None = Field(default=None, max_length=32, pattern=r"^[a-zA-Z0-9_.-]+$")
+    cookie_profile: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
 
 
 class JobCreateResponse(BaseModel):
@@ -137,6 +190,12 @@ class PlatformsResponse(BaseModel):
     experimental: list[PlatformItem]
 
 
+class CookieProfilePublic(BaseModel):
+    name: str
+    size_bytes: int
+    updated_at: float
+
+
 class JobPublic(BaseModel):
     job_id: str
     url: str
@@ -150,20 +209,45 @@ class JobPublic(BaseModel):
     downloaded_bytes: int = 0
     total_bytes: int | None = None
     progress: float = 0
+    speed: float | None = None
+    eta: int | None = None
+    media_type: MediaType = MediaType.video
+    format_id: str = "best"
+    audio_format: str = "mp3"
+    subtitle_language: str | None = None
     filename: str | None = None
     download_url: str | None = None
     error: str | None = None
     created_at: float
     updated_at: float
     expires_at: float | None = None
+    can_cancel: bool = False
+    can_retry: bool = False
 
 
 class Job:
-    def __init__(self, job_id: str, url: str, client_ip: str, ttl_seconds: int) -> None:
-        now = time()
+    def __init__(
+        self,
+        job_id: str,
+        url: str,
+        client_ip: str,
+        ttl_seconds: int,
+        *,
+        user_id: int | None = None,
+        media_type: MediaType = MediaType.video,
+        format_id: str = "best",
+        format_has_audio: bool = False,
+        audio_format: str = "mp3",
+        subtitle_language: str | None = None,
+        cookie_profile: str | None = None,
+        created_at: float | None = None,
+        persist: Callable[["Job"], None] | None = None,
+    ) -> None:
+        now = created_at or time()
         self.job_id = job_id
         self.url = url
         self.client_ip = client_ip
+        self.user_id = user_id
         self.status = JobStatus.queued
         self.title: str | None = None
         self.extractor: str | None = None
@@ -174,15 +258,26 @@ class Job:
         self.downloaded_bytes = 0
         self.total_bytes: int | None = None
         self.progress = 0.0
+        self.speed: float | None = None
+        self.eta: int | None = None
+        self.media_type = media_type
+        self.format_id = format_id
+        self.format_has_audio = format_has_audio
+        self.audio_format = audio_format
+        self.subtitle_language = subtitle_language
+        self.cookie_profile = cookie_profile
         self.filename: str | None = None
         self.file_path: Path | None = None
         self.error: str | None = None
         self.created_at = now
         self.updated_at = now
         self.expires_at: float | None = now + ttl_seconds
+        self._persist = persist
 
-    def touch(self) -> None:
+    def touch(self, persist: bool = False) -> None:
         self.updated_at = time()
+        if persist and self._persist:
+            self._persist(self)
 
     def update_from_info(self, info: dict[str, Any]) -> None:
         self.title = info.get("title") or self.title
@@ -190,14 +285,11 @@ class Job:
         self.platform = self.extractor or self.platform
         self.thumbnail = info.get("thumbnail") or self.thumbnail
         self.duration = info.get("duration") or self.duration
-        self.size_bytes = (
-            info.get("filesize")
-            or info.get("filesize_approx")
-            or self.size_bytes
-        )
+        self.size_bytes = info.get("filesize") or info.get("filesize_approx") or self.size_bytes
         self.touch()
 
     def public(self) -> JobPublic:
+        active = self.status in {JobStatus.queued, JobStatus.parsing, JobStatus.downloading, JobStatus.merging}
         return JobPublic(
             job_id=self.job_id,
             url=self.url,
@@ -211,10 +303,18 @@ class Job:
             downloaded_bytes=self.downloaded_bytes,
             total_bytes=self.total_bytes,
             progress=round(self.progress, 2),
+            speed=self.speed,
+            eta=self.eta,
+            media_type=self.media_type,
+            format_id=self.format_id,
+            audio_format=self.audio_format,
+            subtitle_language=self.subtitle_language,
             filename=self.filename,
             download_url=f"/api/jobs/{self.job_id}/download" if self.file_path else None,
             error=self.error,
             created_at=self.created_at,
             updated_at=self.updated_at,
             expires_at=self.expires_at,
+            can_cancel=active,
+            can_retry=self.status in {JobStatus.failed, JobStatus.cancelled, JobStatus.expired},
         )

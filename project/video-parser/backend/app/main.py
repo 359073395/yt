@@ -1,30 +1,40 @@
 import asyncio
+import hashlib
+import hmac
+import json
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
+from time import time
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .auth import AuthStore
+from .auth import AuthStore, AuthUser
 from .config import get_settings
-from .downloader import Downloader
+from .cookies import CookieStore, MAX_COOKIE_BYTES
+from .downloader import DownloadRejected, Downloader
 from .models import (
+    AdminOverview,
     AdminUserCreate,
     AdminUserUpdate,
-    AdminOverview,
     ApiKeyCreateRequest,
     ApiKeyCreateResponse,
     ApiKeyPublic,
     ApiKeyUpdateRequest,
     AuthRequest,
     AuthResponse,
+    CookieProfilePublic,
+    Job,
     JobCreateRequest,
     JobCreateResponse,
     JobPublic,
     JobStatus,
     MeResponse,
+    ParseRequest,
+    ParseResponse,
     PlatformItem,
     PlatformsResponse,
     QuotaPublic,
@@ -34,9 +44,10 @@ from .security import RateLimiter, client_ip_from_request, validate_public_url
 from .store import JobStore
 
 settings = get_settings()
-store = JobStore(settings.download_dir, settings.job_ttl_seconds)
+store = JobStore(settings.download_dir, settings.job_ttl_seconds, settings.database_path)
 rate_limiter = RateLimiter(settings.rate_limit_per_minute)
-downloader = Downloader(settings, store)
+cookie_store = CookieStore(settings.cookie_dir, settings.auth_secret)
+downloader = Downloader(settings, store, cookie_store)
 auth_store = AuthStore(
     database_path=settings.database_path,
     secret=settings.auth_secret,
@@ -47,34 +58,30 @@ auth_store = AuthStore(
 )
 
 SUPPORTED_PLATFORMS = [
-    PlatformItem(name="YouTube", extractor="youtube", region="international", status="supported"),
+    PlatformItem(name="YouTube", extractor="youtube", region="international", status="supported", note="部分视频需要 Cookie 与 JavaScript 运行时。"),
     PlatformItem(name="TikTok", extractor="TikTok", region="international", status="supported"),
-    PlatformItem(name="Instagram", extractor="Instagram", region="international", status="supported"),
-    PlatformItem(name="Facebook", extractor="Facebook", region="international", status="supported"),
+    PlatformItem(name="Instagram", extractor="Instagram", region="international", status="supported", note="登录内容需要 Cookie。"),
+    PlatformItem(name="Facebook", extractor="Facebook", region="international", status="supported", note="登录内容需要 Cookie。"),
     PlatformItem(name="X / Twitter", extractor="Twitter", region="international", status="supported"),
     PlatformItem(name="Vimeo", extractor="Vimeo", region="international", status="supported"),
     PlatformItem(name="SoundCloud", extractor="SoundCloud", region="international", status="supported"),
     PlatformItem(name="Reddit", extractor="Reddit", region="international", status="supported"),
     PlatformItem(name="Twitch", extractor="Twitch", region="international", status="supported"),
     PlatformItem(name="Dailymotion", extractor="Dailymotion", region="international", status="supported"),
-    PlatformItem(name="Rumble", extractor="Rumble", region="international", status="supported"),
-    PlatformItem(name="抖音", extractor="Douyin", region="china", status="supported"),
-    PlatformItem(name="小红书", extractor="XiaoHongShu", region="china", status="supported"),
-    PlatformItem(name="哔哩哔哩", extractor="BiliBili", region="china", status="supported"),
+    PlatformItem(name="抖音", extractor="Douyin", region="china", status="supported", note="平台风控时需要更新 Cookie。"),
+    PlatformItem(name="小红书", extractor="XiaoHongShu", region="china", status="supported", note="能力随 yt-dlp 提取器更新。"),
+    PlatformItem(name="哔哩哔哩", extractor="BiliBili", region="china", status="supported", note="会员或高画质内容需要 Cookie。"),
     PlatformItem(name="微博", extractor="Weibo", region="china", status="supported"),
     PlatformItem(name="AcFun", extractor="AcFunVideo", region="china", status="supported"),
     PlatformItem(name="优酷", extractor="youku", region="china", status="supported"),
     PlatformItem(name="爱奇艺", extractor="iqiyi", region="china", status="supported"),
     PlatformItem(name="腾讯视频", extractor="vqq", region="china", status="supported"),
-    PlatformItem(name="百度视频", extractor="BaiduVideo", region="china", status="supported"),
     PlatformItem(name="斗鱼", extractor="DouyuTV", region="china", status="supported"),
     PlatformItem(name="虎牙", extractor="huya", region="china", status="supported"),
-    PlatformItem(name="QQ 音乐 MV", extractor="qqmusic:mv", region="china", status="supported"),
-    PlatformItem(name="网易 MV", extractor="netease:mv", region="china", status="supported"),
 ]
 
 EXPERIMENTAL_PLATFORMS = [
-    PlatformItem(name="快手", extractor=None, region="china", status="experimental", note="当前 yt-dlp extractor 列表未显示明确支持，会尝试通用解析。"),
+    PlatformItem(name="快手", extractor=None, region="china", status="experimental", note="尝试通用解析，不保证长期可用。"),
     PlatformItem(name="Shopee", extractor=None, region="international", status="experimental", note="商品页暂不保证。"),
     PlatformItem(name="TikTok Shop", extractor=None, region="international", status="experimental", note="商品页暂不保证。"),
 ]
@@ -89,55 +96,207 @@ async def cleanup_loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.download_dir.mkdir(parents=True, exist_ok=True)
+    settings.cookie_dir.mkdir(parents=True, exist_ok=True)
     cleanup_task = asyncio.create_task(cleanup_loop())
     yield
     cleanup_task.cancel()
 
 
-app = FastAPI(title="影链工坊", version="1.0.0", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="影链工坊 2.0", version=settings.app_version, lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+def request_identity(request: Request) -> tuple[AuthUser | None, str]:
+    return (
+        auth_store.user_from_request(request),
+        client_ip_from_request(request, settings.trusted_proxy_headers),
+    )
+
+
+def require_owned_job(job_id: str, request: Request) -> Job:
+    job = store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在。")
+    user, client_ip = request_identity(request)
+    if user and user.role == "admin":
+        return job
+    if not store.is_owner(job, user.id if user else None, client_ip):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权操作该任务。")
+    return job
+
+
+def signed_download_url(job: Job) -> str | None:
+    if not job.file_path:
+        return None
+    expires = int(time()) + 15 * 60
+    payload = f"{job.job_id}:{expires}".encode()
+    signature = hmac.new(settings.auth_secret.encode(), payload, hashlib.sha256).hexdigest()
+    return f"/api/jobs/{job.job_id}/download?expires={expires}&signature={signature}"
+
+
+def public_job(job: Job) -> JobPublic:
+    item = job.public()
+    item.download_url = signed_download_url(job)
+    return item
+
+
+def verify_download_signature(job_id: str, expires: int, signature: str) -> None:
+    if expires < int(time()):
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="下载链接已过期，请刷新任务后重试。")
+    payload = f"{job_id}:{expires}".encode()
+    expected = hmac.new(settings.auth_secret.encode(), payload, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="下载链接签名无效。")
+
+
+async def binary_version(binary: str, *arguments: str) -> str:
+    path = shutil.which(binary)
+    if not path:
+        return "missing"
+    try:
+        process = await asyncio.create_subprocess_exec(path, *arguments, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        output, _ = await asyncio.wait_for(process.communicate(), timeout=3)
+        return output.decode(errors="replace").splitlines()[0][:120]
+    except Exception:  # noqa: BLE001
+        return "unavailable"
 
 
 @app.get("/api/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, object]:
+    deno, ffmpeg = await asyncio.gather(binary_version("deno", "--version"), binary_version("ffmpeg", "-version"))
+    return {
+        "status": "ok",
+        "version": settings.app_version,
+        "engine_channel": settings.engine_channel,
+        "components": {"yt_dlp": downloader.engine_version(), "deno": deno, "ffmpeg": ffmpeg},
+    }
 
 
 @app.post("/api/auth/register", response_model=AuthResponse)
 async def register(payload: AuthRequest, request: Request) -> AuthResponse:
     client_ip = client_ip_from_request(request, settings.trusted_proxy_headers)
     user = auth_store.create_user(payload.username, payload.password)
-    return AuthResponse(
-        token=auth_store.create_token(user),
-        user=auth_store.user_public(user),
-        quota=auth_store.quota_for(user, client_ip),
-    )
+    return AuthResponse(token=auth_store.create_token(user), user=auth_store.user_public(user), quota=auth_store.quota_for(user, client_ip))
 
 
 @app.post("/api/auth/login", response_model=AuthResponse)
 async def login(payload: AuthRequest, request: Request) -> AuthResponse:
     client_ip = client_ip_from_request(request, settings.trusted_proxy_headers)
     user = auth_store.authenticate(payload.username, payload.password)
-    return AuthResponse(
-        token=auth_store.create_token(user),
-        user=auth_store.user_public(user),
-        quota=auth_store.quota_for(user, client_ip),
-    )
+    return AuthResponse(token=auth_store.create_token(user), user=auth_store.user_public(user), quota=auth_store.quota_for(user, client_ip))
 
 
 @app.get("/api/me", response_model=MeResponse)
 async def me(request: Request) -> MeResponse:
-    client_ip = client_ip_from_request(request, settings.trusted_proxy_headers)
-    user = auth_store.user_from_request(request)
-    return MeResponse(
-        user=auth_store.user_public(user) if user else None,
-        quota=auth_store.quota_for(user, client_ip),
-    )
+    user, client_ip = request_identity(request)
+    return MeResponse(user=auth_store.user_public(user) if user else None, quota=auth_store.quota_for(user, client_ip))
+
+
+@app.post("/api/parse", response_model=ParseResponse)
+async def parse_video(payload: ParseRequest, request: Request) -> ParseResponse:
+    _, client_ip = request_identity(request)
+    rate_limiter.check(f"parse:{client_ip}")
+    url = validate_public_url(payload.url)
+    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile):
+        raise HTTPException(status_code=400, detail="所选 Cookie 配置不存在。")
+    try:
+        return await downloader.inspect(url, payload.cookie_profile)
+    except DownloadRejected as exc:
+        raise HTTPException(status_code=422, detail=downloader._safe_error(exc)) from exc
+
+
+async def create_download(payload: JobCreateRequest, request: Request, api_key_mode: bool = False) -> JobCreateResponse:
+    user, client_ip = request_identity(request)
+    rate_limiter.check(f"job:{client_ip}")
+    url = validate_public_url(payload.url)
+    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile):
+        raise HTTPException(status_code=400, detail="所选 Cookie 配置不存在。")
+    if not api_key_mode:
+        auth_store.consume_quota(user, client_ip)
+    job = store.create(url, client_ip, payload, user.id if user else None)
+    asyncio.create_task(downloader.run(job))
+    return JobCreateResponse(job_id=job.job_id)
+
+
+@app.post("/api/jobs", response_model=JobCreateResponse, status_code=status.HTTP_202_ACCEPTED)
+async def create_job(payload: JobCreateRequest, request: Request) -> JobCreateResponse:
+    return await create_download(payload, request)
+
+
+@app.get("/api/jobs", response_model=list[JobPublic])
+async def job_history(request: Request) -> list[JobPublic]:
+    user, client_ip = request_identity(request)
+    jobs = [store.get(item.job_id) for item in store.list_for(user.id if user else None, client_ip)]
+    return [public_job(job) for job in jobs if job]
+
+
+@app.get("/api/jobs/{job_id}", response_model=JobPublic)
+async def get_job(job_id: str) -> JobPublic:
+    job = store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在。")
+    return public_job(job)
+
+
+@app.get("/api/jobs/{job_id}/events")
+async def job_events(job_id: str) -> StreamingResponse:
+    if not store.get(job_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在。")
+
+    async def stream():
+        previous = ""
+        while True:
+            job = store.get(job_id)
+            if not job:
+                break
+            data = json.dumps(public_job(job).model_dump(mode="json"), ensure_ascii=False)
+            if data != previous:
+                yield f"data: {data}\n\n"
+                previous = data
+            if job.status in {JobStatus.completed, JobStatus.failed, JobStatus.cancelled, JobStatus.expired}:
+                break
+            await asyncio.sleep(0.75)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/jobs/{job_id}/cancel", response_model=JobPublic)
+async def cancel_job(job_id: str, request: Request) -> JobPublic:
+    job = require_owned_job(job_id, request)
+    try:
+        await downloader.cancel(job)
+    except DownloadRejected as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return public_job(job)
+
+
+@app.post("/api/jobs/{job_id}/retry", response_model=JobPublic, status_code=status.HTTP_202_ACCEPTED)
+async def retry_job(job_id: str, request: Request) -> JobPublic:
+    job = require_owned_job(job_id, request)
+    if not job.public().can_retry:
+        raise HTTPException(status_code=409, detail="该任务当前不能重试。")
+    store.retry(job)
+    asyncio.create_task(downloader.run(job))
+    return public_job(job)
+
+
+@app.get("/api/jobs/{job_id}/download")
+async def download_job(job_id: str, expires: int, signature: str) -> FileResponse:
+    verify_download_signature(job_id, expires, signature)
+    return file_response(job_id)
+
+
+def file_response(job_id: str) -> FileResponse:
+    job = store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在。")
+    if job.status == JobStatus.expired:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="文件已过期。")
+    if job.status != JobStatus.completed or not job.file_path:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="任务尚未完成。")
+    if not job.file_path.exists():
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="文件已被清理。")
+    return FileResponse(path=job.file_path, filename=job.filename or job.file_path.name, media_type="application/octet-stream")
 
 
 @app.get("/api/admin/users", response_model=list[UserPublic])
@@ -149,14 +308,7 @@ async def list_users(request: Request) -> list[UserPublic]:
 @app.post("/api/admin/users", response_model=UserPublic, status_code=status.HTTP_201_CREATED)
 async def create_admin_user(payload: AdminUserCreate, request: Request) -> UserPublic:
     auth_store.require_admin(request)
-    user = auth_store.create_user(
-        payload.username,
-        payload.password,
-        role=payload.role,
-        user_status=payload.status,
-        member_expires_at=payload.member_expires_at,
-        daily_limit_override=payload.daily_limit_override,
-    )
+    user = auth_store.create_user(payload.username, payload.password, role=payload.role, user_status=payload.status, member_expires_at=payload.member_expires_at, daily_limit_override=payload.daily_limit_override)
     return auth_store.user_public(user)
 
 
@@ -164,16 +316,7 @@ async def create_admin_user(payload: AdminUserCreate, request: Request) -> UserP
 async def update_user(user_id: int, payload: AdminUserUpdate, request: Request) -> UserPublic:
     auth_store.require_admin(request)
     fields = payload.model_fields_set
-    return auth_store.update_user(
-        user_id,
-        role=payload.role,
-        user_status=payload.status,
-        member_expires_at=payload.member_expires_at,
-        daily_limit_override=payload.daily_limit_override,
-        daily_used=payload.daily_used,
-        set_member_expires_at="member_expires_at" in fields,
-        set_daily_limit_override="daily_limit_override" in fields,
-    )
+    return auth_store.update_user(user_id, role=payload.role, user_status=payload.status, member_expires_at=payload.member_expires_at, daily_limit_override=payload.daily_limit_override, daily_used=payload.daily_used, set_member_expires_at="member_expires_at" in fields, set_daily_limit_override="daily_limit_override" in fields)
 
 
 @app.delete("/api/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -191,14 +334,38 @@ async def admin_overview(request: Request) -> AdminOverview:
 @app.get("/api/admin/jobs", response_model=list[JobPublic])
 async def admin_jobs(request: Request) -> list[JobPublic]:
     auth_store.require_admin(request)
-    return store.list_public()
+    return [public_job(job) for job in sorted(store.jobs.values(), key=lambda item: item.created_at, reverse=True)]
 
 
 @app.post("/api/admin/cleanup")
 async def admin_cleanup(request: Request) -> dict[str, int]:
     auth_store.require_admin(request)
-    removed = store.cleanup()
-    return {"removed": removed, "storage_bytes": store.storage_bytes()}
+    return {"removed": store.cleanup(), "storage_bytes": store.storage_bytes()}
+
+
+@app.get("/api/admin/cookies", response_model=list[CookieProfilePublic])
+async def list_cookie_profiles(request: Request) -> list[CookieProfilePublic]:
+    auth_store.require_admin(request)
+    return cookie_store.list()
+
+
+@app.put("/api/admin/cookies/{profile}", response_model=CookieProfilePublic)
+async def upload_cookie_profile(profile: str, request: Request, file: UploadFile = File(...)) -> CookieProfilePublic:
+    auth_store.require_admin(request)
+    content = await file.read(MAX_COOKIE_BYTES + 1)
+    try:
+        return cookie_store.save(profile, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/admin/cookies/{profile}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_cookie_profile(profile: str, request: Request) -> None:
+    auth_store.require_admin(request)
+    try:
+        cookie_store.delete(profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/admin/api-keys", response_model=list[ApiKeyPublic])
@@ -216,31 +383,13 @@ async def create_api_key(payload: ApiKeyCreateRequest, request: Request) -> ApiK
 @app.patch("/api/admin/api-keys/{api_key_id}", response_model=ApiKeyPublic)
 async def update_api_key(api_key_id: int, payload: ApiKeyUpdateRequest, request: Request) -> ApiKeyPublic:
     auth_store.require_admin(request)
-    return auth_store.update_api_key(
-        api_key_id,
-        name=payload.name,
-        key_status=payload.status,
-        daily_limit=payload.daily_limit,
-        scopes=payload.scopes,
-    )
+    return auth_store.update_api_key(api_key_id, name=payload.name, key_status=payload.status, daily_limit=payload.daily_limit, scopes=payload.scopes)
 
 
 @app.delete("/api/admin/api-keys/{api_key_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_api_key(api_key_id: int, request: Request) -> None:
     auth_store.require_admin(request)
     auth_store.delete_api_key(api_key_id)
-
-
-@app.post("/api/jobs", response_model=JobCreateResponse, status_code=status.HTTP_202_ACCEPTED)
-async def create_job(payload: JobCreateRequest, request: Request) -> JobCreateResponse:
-    client_ip = client_ip_from_request(request, settings.trusted_proxy_headers)
-    user = auth_store.user_from_request(request)
-    rate_limiter.check(client_ip)
-    url = validate_public_url(payload.url)
-    auth_store.consume_quota(user, client_ip)
-    job = store.create(url, client_ip)
-    asyncio.create_task(downloader.run(job))
-    return JobCreateResponse(job_id=job.job_id)
 
 
 @app.get("/api/v1/platforms", response_model=PlatformsResponse)
@@ -263,7 +412,7 @@ async def v1_create_job(payload: JobCreateRequest, request: Request) -> JobCreat
     rate_limiter.check(f"api:{api_key.id}")
     url = validate_public_url(payload.url)
     auth_store.consume_api_quota(api_key)
-    job = store.create(url, client_ip)
+    job = store.create(url, client_ip, payload)
     asyncio.create_task(downloader.run(job))
     return JobCreateResponse(job_id=job.job_id)
 
@@ -276,7 +425,7 @@ async def v1_get_job(job_id: str, request: Request) -> JobPublic:
     job = store.get(job_id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在。")
-    return job.public()
+    return public_job(job)
 
 
 @app.get("/api/v1/jobs/{job_id}/download")
@@ -284,42 +433,12 @@ async def v1_download_job(job_id: str, request: Request) -> FileResponse:
     client_ip = client_ip_from_request(request, settings.trusted_proxy_headers)
     api_key = auth_store.api_key_from_request(request, client_ip)
     auth_store.require_api_scope(api_key, "files:download")
-    return _download_job_response(job_id)
+    return file_response(job_id)
 
 
 @app.get("/api/v1/openapi.json")
 async def v1_openapi() -> dict:
     return app.openapi()
-
-
-@app.get("/api/jobs/{job_id}", response_model=JobPublic)
-async def get_job(job_id: str) -> JobPublic:
-    job = store.get(job_id)
-    if not job:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在。")
-    return job.public()
-
-
-@app.get("/api/jobs/{job_id}/download")
-async def download_job(job_id: str) -> FileResponse:
-    return _download_job_response(job_id)
-
-
-def _download_job_response(job_id: str) -> FileResponse:
-    job = store.get(job_id)
-    if not job:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在。")
-    if job.status == JobStatus.expired:
-        raise HTTPException(status_code=status.HTTP_410_GONE, detail="文件已过期。")
-    if job.status != JobStatus.completed or not job.file_path:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="任务尚未完成。")
-    if not job.file_path.exists():
-        raise HTTPException(status_code=status.HTTP_410_GONE, detail="文件已被清理。")
-    return FileResponse(
-        path=job.file_path,
-        filename=job.filename or job.file_path.name,
-        media_type="application/octet-stream",
-    )
 
 
 static_dir = Path(settings.static_dir)

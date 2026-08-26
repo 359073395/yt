@@ -1,9 +1,6 @@
 services:
   video-parser:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile
-    image: video-parser:local
+    image: ${VIDEO_PARSER_IMAGE:-ghcr.io/359073395/video-parser:latest}
     container_name: video-parser
     restart: unless-stopped
     env_file:
@@ -12,6 +9,13 @@ services:
       - "${PUBLIC_PORT:-8080}:8080"
     volumes:
       - video-parser-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m,uid=10001,gid=10001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3).read()"]
       interval: 30s

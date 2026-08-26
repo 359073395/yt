@@ -7,6 +7,8 @@ import {
   CheckCircle2,
   ClipboardCopy,
   Clock3,
+  Captions,
+  Cookie,
   Copy,
   Crown,
   Database,
@@ -20,15 +22,19 @@ import {
   Link2,
   Loader2,
   LogOut,
+  Music2,
   Play,
   RefreshCw,
+  RotateCcw,
   Search,
   Shield,
   Sparkles,
   TerminalSquare,
   Trash2,
+  XCircle,
   UserRound,
   UsersRound,
+  Zap,
 } from 'lucide-react'
 import './styles.css'
 
@@ -39,6 +45,7 @@ type JobStatus =
   | 'merging'
   | 'completed'
   | 'failed'
+  | 'cancelled'
   | 'expired'
 
 type Job = {
@@ -53,12 +60,47 @@ type Job = {
   downloaded_bytes: number
   total_bytes?: number | null
   progress: number
+  speed?: number | null
+  eta?: number | null
+  media_type: 'video' | 'audio'
+  format_id: string
+  audio_format: string
+  subtitle_language?: string | null
   filename?: string | null
   download_url?: string | null
   error?: string | null
   created_at: number
   updated_at: number
   expires_at?: number | null
+  can_cancel: boolean
+  can_retry: boolean
+}
+
+type FormatOption = {
+  format_id: string
+  label: string
+  ext?: string | null
+  resolution?: string | null
+  height?: number | null
+  fps?: number | null
+  filesize?: number | null
+  has_video: boolean
+  has_audio: boolean
+}
+
+type SubtitleOption = { language: string; label: string; automatic: boolean }
+
+type ParsedMedia = {
+  url: string
+  title: string
+  extractor?: string | null
+  platform?: string | null
+  thumbnail?: string | null
+  duration?: number | null
+  uploader?: string | null
+  description?: string | null
+  formats: FormatOption[]
+  subtitles: SubtitleOption[]
 }
 
 type UserRole = 'user' | 'member' | 'admin'
@@ -128,6 +170,12 @@ type ApiKeyCreateResponse = {
   item: ApiKeyItem
 }
 
+type CookieProfile = {
+  name: string
+  size_bytes: number
+  updated_at: number
+}
+
 type PlatformItem = {
   name: string
   extractor?: string | null
@@ -150,6 +198,7 @@ const statusText: Record<JobStatus, string> = {
   merging: '合并中',
   completed: '完成',
   failed: '失败',
+  cancelled: '已取消',
   expired: '已过期',
 }
 
@@ -173,9 +222,16 @@ const demoJob: Job = {
   downloaded_bytes: 0,
   total_bytes: 40265318,
   progress: 0,
+  speed: null,
+  eta: null,
+  media_type: 'video',
+  format_id: 'best',
+  audio_format: 'mp3',
   created_at: Date.now() / 1000,
   updated_at: Date.now() / 1000,
   expires_at: Date.now() / 1000 + 3600,
+  can_cancel: false,
+  can_retry: false,
 }
 
 function formatBytes(value?: number | null) {
@@ -208,7 +264,7 @@ function formatDate(value?: number | null) {
 }
 
 function isActiveStep(jobStatus: JobStatus, step: JobStatus) {
-  if (jobStatus === 'failed' || jobStatus === 'expired') return false
+  if (jobStatus === 'failed' || jobStatus === 'cancelled' || jobStatus === 'expired') return false
   return statusOrder.indexOf(step) <= statusOrder.indexOf(jobStatus)
 }
 
@@ -236,7 +292,7 @@ async function readError(response: Response) {
   return '请求失败'
 }
 
-function App() {
+function LegacyApp() {
   const [url, setUrl] = React.useState('')
   const [job, setJob] = React.useState<Job | null>(null)
   const [history, setHistory] = React.useState<Job[]>(() => {
@@ -438,6 +494,301 @@ function App() {
   )
 }
 
+function App() {
+  const [url, setUrl] = React.useState('')
+  const [parsed, setParsed] = React.useState<ParsedMedia | null>(null)
+  const [mediaType, setMediaType] = React.useState<'video' | 'audio'>('video')
+  const [formatId, setFormatId] = React.useState('best')
+  const [audioFormat, setAudioFormat] = React.useState('mp3')
+  const [subtitle, setSubtitle] = React.useState('')
+  const [history, setHistory] = React.useState<Job[]>([])
+  const [job, setJob] = React.useState<Job | null>(null)
+  const [isParsing, setIsParsing] = React.useState(false)
+  const [isCreating, setIsCreating] = React.useState(false)
+  const [message, setMessage] = React.useState<string | null>(null)
+  const [token, setToken] = React.useState(() => window.localStorage.getItem('video-parser-token') || '')
+  const [user, setUser] = React.useState<User | null>(null)
+  const [quota, setQuota] = React.useState<Quota | null>(null)
+
+  async function apiFetch(path: string, options: RequestInit = {}, authToken = token) {
+    const headers = new Headers(options.headers)
+    if (authToken) headers.set('Authorization', `Bearer ${authToken}`)
+    return fetch(path, { ...options, headers })
+  }
+
+  async function adminRequest<T>(path: string, options: RequestInit = {}) {
+    const response = await apiFetch(path, options)
+    if (!response.ok) throw new Error(await readError(response))
+    if (response.status === 204) return undefined as T
+    return (await response.json()) as T
+  }
+
+  async function refreshMe(authToken = token) {
+    try {
+      const response = await apiFetch('/api/me', {}, authToken)
+      if (!response.ok) throw new Error(await readError(response))
+      const body = (await response.json()) as MeResponse
+      setUser(body.user)
+      setQuota(body.quota)
+    } catch {
+      if (authToken) window.localStorage.removeItem('video-parser-token')
+      setUser(null)
+      setQuota(null)
+    }
+  }
+
+  async function refreshHistory(authToken = token) {
+    try {
+      const response = await apiFetch('/api/jobs', {}, authToken)
+      if (response.ok) setHistory((await response.json()) as Job[])
+    } catch {
+      // History is supplementary; the active task keeps streaming independently.
+    }
+  }
+
+  React.useEffect(() => {
+    void refreshMe(token)
+    void refreshHistory(token)
+  }, [token])
+
+  React.useEffect(() => {
+    if (!job || ['completed', 'failed', 'cancelled', 'expired'].includes(job.status)) return
+    const source = new EventSource(`/api/jobs/${job.job_id}/events`)
+    source.onmessage = (event) => {
+      const next = JSON.parse(event.data) as Job
+      setJob(next)
+      setHistory((items) => [next, ...items.filter((item) => item.job_id !== next.job_id)])
+      if (['completed', 'failed', 'cancelled', 'expired'].includes(next.status)) {
+        source.close()
+        void refreshMe()
+        void refreshHistory()
+      }
+    }
+    source.onerror = () => source.close()
+    return () => source.close()
+  }, [job?.job_id, job?.status])
+
+  async function parseUrl(event: React.FormEvent) {
+    event.preventDefault()
+    const value = url.trim()
+    setMessage(null)
+    if (!/^https?:\/\//i.test(value)) {
+      setMessage('请输入有效的 http/https 视频链接。')
+      return
+    }
+    setIsParsing(true)
+    setParsed(null)
+    try {
+      const response = await apiFetch('/api/parse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: value }),
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      const body = (await response.json()) as ParsedMedia
+      setParsed(body)
+      setFormatId('best')
+      setMediaType('video')
+      setSubtitle('')
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '解析失败')
+    } finally {
+      setIsParsing(false)
+    }
+  }
+
+  async function createJob() {
+    if (!parsed) return
+    setMessage(null)
+    setIsCreating(true)
+    const selected = parsed.formats.find((item) => item.format_id === formatId)
+    try {
+      const response = await apiFetch('/api/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: parsed.url,
+          media_type: mediaType,
+          format_id: formatId,
+          format_has_audio: selected?.has_audio ?? false,
+          audio_format: audioFormat,
+          subtitle_language: mediaType === 'video' && subtitle ? subtitle : null,
+        }),
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      const body = (await response.json()) as { job_id: string }
+      const nextResponse = await apiFetch(`/api/jobs/${body.job_id}`)
+      if (!nextResponse.ok) throw new Error(await readError(nextResponse))
+      const next = (await nextResponse.json()) as Job
+      setJob(next)
+      setHistory((items) => [next, ...items.filter((item) => item.job_id !== next.job_id)])
+      void refreshMe()
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '任务创建失败')
+    } finally {
+      setIsCreating(false)
+    }
+  }
+
+  async function jobAction(action: 'cancel' | 'retry', target = job) {
+    if (!target) return
+    setMessage(null)
+    try {
+      const response = await apiFetch(`/api/jobs/${target.job_id}/${action}`, { method: 'POST' })
+      if (!response.ok) throw new Error(await readError(response))
+      const next = (await response.json()) as Job
+      setJob(next)
+      setHistory((items) => [next, ...items.filter((item) => item.job_id !== next.job_id)])
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '操作失败')
+    }
+  }
+
+  async function handleAuth(mode: 'login' | 'register', username: string, password: string) {
+    const response = await fetch(`/api/auth/${mode}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    })
+    if (!response.ok) throw new Error(await readError(response))
+    const body = (await response.json()) as AuthResponse
+    window.localStorage.setItem('video-parser-token', body.token)
+    setToken(body.token)
+    setUser(body.user)
+    setQuota(body.quota)
+  }
+
+  function logout() {
+    window.localStorage.removeItem('video-parser-token')
+    setToken('')
+    setUser(null)
+  }
+
+  async function copyDownloadLink(downloadUrl?: string | null) {
+    if (!downloadUrl) return
+    await navigator.clipboard.writeText(new URL(downloadUrl, window.location.origin).toString())
+    setMessage('15 分钟有效的下载链接已复制。')
+  }
+
+  return (
+    <main className="app-shell app-v2">
+      <header className="top-nav">
+        <a className="brand" href="#top"><span className="brand-mark"><Play size={15} fill="currentColor" /></span>影链工坊 <em>2.0</em></a>
+        <nav><a href="#workspace">下载工作台</a><a href="#platforms">支持平台</a><a href="#notice">使用说明</a></nav>
+        <HeaderAccount quota={quota} user={user} onAuth={handleAuth} adminRequest={adminRequest} onLogout={logout} />
+      </header>
+
+      <section className="v2-intro" id="top">
+        <span className="version-pill"><Zap size={14} />Powered by yt-dlp · Web 下载中心</span>
+        <h1>粘贴链接，选择你真正需要的格式。</h1>
+        <p>画质、音频、字幕、进度和历史记录，一处完成。文件仅临时保存在你的服务器。</p>
+      </section>
+
+      <section className="workbench" id="workspace">
+        <div className="parser-workspace">
+          <form className="parser-form parser-form-v2" onSubmit={parseUrl}>
+            <label htmlFor="video-url">视频链接</label>
+            <div className="input-row">
+              <Link2 size={20} />
+              <input id="video-url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="粘贴 YouTube / 抖音 / Bilibili / TikTok 等链接" autoComplete="off" />
+              <button type="submit" disabled={isParsing}>
+                {isParsing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}{isParsing ? '正在解析' : '解析链接'}
+              </button>
+            </div>
+          </form>
+
+          {message && <div className="inline-alert" role="status"><AlertTriangle size={16} />{message}</div>}
+
+          {!parsed && !isParsing && (
+            <div className="empty-parser">
+              <div><Link2 size={28} /></div>
+              <h2>从一个公开链接开始</h2>
+              <p>先读取视频信息和可用格式，不会立即消耗下载额度。</p>
+            </div>
+          )}
+          {isParsing && <div className="empty-parser parsing"><Loader2 className="spin" size={30} /><h2>正在连接解析引擎</h2><p>部分平台可能需要几秒钟完成格式探测。</p></div>}
+          {parsed && (
+            <article className="media-config">
+              <div className="media-preview">
+                <div className="preview-image">{parsed.thumbnail ? <img src={parsed.thumbnail} alt="" /> : <FileVideo size={32} />}</div>
+                <div><span>{parsed.platform || '自动识别'} · {formatDuration(parsed.duration)}</span><h2>{parsed.title}</h2><p>{parsed.uploader || '公开内容'}</p></div>
+              </div>
+              <div className="media-tabs">
+                <button className={mediaType === 'video' ? 'active' : ''} type="button" onClick={() => setMediaType('video')}><FileVideo size={17} />视频</button>
+                <button className={mediaType === 'audio' ? 'active' : ''} type="button" onClick={() => setMediaType('audio')}><Music2 size={17} />仅音频</button>
+              </div>
+              <div className="option-grid">
+                {mediaType === 'video' ? (
+                  <>
+                    <label><span>画质与格式</span><select value={formatId} onChange={(event) => setFormatId(event.target.value)}>{parsed.formats.map((item) => <option value={item.format_id} key={item.format_id}>{item.label}{item.filesize ? ` · ${formatBytes(item.filesize)}` : ''}</option>)}</select></label>
+                    <label><span><Captions size={14} />字幕</span><select value={subtitle} onChange={(event) => setSubtitle(event.target.value)}><option value="">不下载字幕</option>{parsed.subtitles.map((item) => <option value={item.language} key={item.language}>{item.label}{item.automatic ? '（自动）' : ''}</option>)}</select></label>
+                  </>
+                ) : (
+                  <label><span>音频格式</span><select value={audioFormat} onChange={(event) => setAudioFormat(event.target.value)}><option value="mp3">MP3 · 通用兼容</option><option value="m4a">M4A · 保留质量</option><option value="opus">OPUS · 高压缩率</option><option value="flac">FLAC · 无损</option><option value="wav">WAV · 未压缩</option></select></label>
+                )}
+              </div>
+              <button className="primary-download" type="button" onClick={createJob} disabled={isCreating}>
+                {isCreating ? <Loader2 className="spin" size={18} /> : <Download size={18} />}{isCreating ? '正在创建任务' : `加入下载队列 · ${quotaText(quota)}`}
+              </button>
+            </article>
+          )}
+        </div>
+
+        <QueuePanel job={job} history={history} onSelect={setJob} onAction={jobAction} onCopy={copyDownloadLink} />
+      </section>
+
+      <section className="lower-grid"><HistoryPanel history={history} /><InfoPanel /></section>
+      <FooterInfo quota={quota} />
+    </main>
+  )
+}
+
+function QueuePanel({
+  job,
+  history,
+  onSelect,
+  onAction,
+  onCopy,
+}: {
+  job: Job | null
+  history: Job[]
+  onSelect: (job: Job) => void
+  onAction: (action: 'cancel' | 'retry', job?: Job | null) => void
+  onCopy: (url?: string | null) => void
+}) {
+  const current = job || history[0] || null
+  const queue = history.filter((item) => ['queued', 'parsing', 'downloading', 'merging'].includes(item.status))
+  return (
+    <aside className="queue-panel">
+      <div className="queue-header"><div><span className="caption">Download queue</span><h2>下载队列</h2></div><span>{queue.length} 个进行中</span></div>
+      {current ? (
+        <div className="current-download">
+          <div className="current-title"><div className="mini-thumb">{current.thumbnail ? <img src={current.thumbnail} alt="" /> : <FileVideo size={22} />}</div><div><h3>{current.title || '正在读取视频信息'}</h3><p>{current.platform || '解析中'} · {current.media_type === 'audio' ? current.audio_format.toUpperCase() : current.format_id}</p></div></div>
+          <div className="current-state"><StatusBadge status={current.status} /><strong>{Math.round(current.progress)}%</strong></div>
+          <div className="progress-track"><div style={{ width: `${Math.max(0, Math.min(current.progress, 100))}%` }} /></div>
+          <div className="transfer-meta"><span>{formatBytes(current.downloaded_bytes)} / {formatBytes(current.total_bytes)}</span><span>{current.speed ? `${formatBytes(current.speed)}/s` : '等待数据'}{current.eta ? ` · ${current.eta}s` : ''}</span></div>
+          {current.error && <p className="error-text">{current.error}</p>}
+          <div className="action-row">
+            {current.download_url && <a className="download-button" href={current.download_url}><Download size={17} />下载文件</a>}
+            {current.download_url && <button className="secondary-button" type="button" onClick={() => onCopy(current.download_url)}><Copy size={16} />复制链接</button>}
+            {current.can_cancel && <button className="secondary-button danger-soft" type="button" onClick={() => onAction('cancel', current)}><XCircle size={16} />取消</button>}
+            {current.can_retry && <button className="secondary-button" type="button" onClick={() => onAction('retry', current)}><RotateCcw size={16} />重试</button>}
+          </div>
+        </div>
+      ) : (
+        <div className="queue-empty"><Clock3 size={26} /><h3>队列还是空的</h3><p>解析链接并选择格式后，任务会出现在这里。</p></div>
+      )}
+      <div className="queue-list">
+        {history.slice(0, 8).map((item) => (
+          <button className={current?.job_id === item.job_id ? 'active' : ''} type="button" key={item.job_id} onClick={() => onSelect(item)}>
+            <div><strong>{item.title || '等待解析'}</strong><span>{formatDate(item.created_at)} · {item.media_type === 'audio' ? '音频' : '视频'}</span></div><StatusBadge status={item.status} />
+          </button>
+        ))}
+      </div>
+    </aside>
+  )
+}
+
 function HeaderAccount({
   quota,
   user,
@@ -454,8 +805,8 @@ function HeaderAccount({
   const [open, setOpen] = React.useState(false)
   const [adminOpen, setAdminOpen] = React.useState(false)
   const [mode, setMode] = React.useState<'login' | 'register'>('login')
-  const [username, setUsername] = React.useState('admin')
-  const [password, setPassword] = React.useState('lhw111111')
+  const [username, setUsername] = React.useState('')
+  const [password, setPassword] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
 
@@ -620,6 +971,7 @@ function HistoryPanel({ history }: { history: Job[] }) {
             <StatusBadge status={item.status} />
           </div>
         ))}
+        {!history.length && <p className="history-empty">完成或失败的任务会持久保存在这里。</p>}
       </div>
     </section>
   )
@@ -647,7 +999,7 @@ function InfoPanel() {
       <div className="info-block">
         <span className="caption">Platforms</span>
         <h2>支持平台</h2>
-        <p>项目优先适配以下常用平台，其他公开视频链接会自动尝试解析。快手、Shopee 与 TikTok Shop 第一版暂不保证。</p>
+        <p>能力跟随当前 yt-dlp、服务器区域、平台风控和 Cookie 状态。快手、Shopee 与 TikTok Shop 属于实验性解析。</p>
       </div>
       <span className="platform-group-title">国内平台</span>
       <div className="platform-list" aria-label="支持平台列表">
@@ -700,6 +1052,9 @@ function AdminDashboard({ adminRequest, onClose }: { adminRequest: AdminRequest;
   const [users, setUsers] = React.useState<User[]>([])
   const [jobs, setJobs] = React.useState<Job[]>([])
   const [apiKeys, setApiKeys] = React.useState<ApiKeyItem[]>([])
+  const [cookieProfiles, setCookieProfiles] = React.useState<CookieProfile[]>([])
+  const [cookieName, setCookieName] = React.useState('default')
+  const [cookieFile, setCookieFile] = React.useState<File | null>(null)
   const [platforms, setPlatforms] = React.useState<PlatformsResponse | null>(null)
   const [query, setQuery] = React.useState('')
   const [roleFilter, setRoleFilter] = React.useState<'all' | UserRole>('all')
@@ -718,6 +1073,7 @@ function AdminDashboard({ adminRequest, onClose }: { adminRequest: AdminRequest;
     ['overview', '总览', LayoutDashboard],
     ['users', '用户会员', UsersRound],
     ['api', 'API Key', KeyRound],
+    ['cookies', 'Cookie 配置', Cookie],
     ['jobs', '任务缓存', Database],
     ['platforms', '支持平台', Filter],
     ['docs', 'API 对接', TerminalSquare],
@@ -737,18 +1093,20 @@ function AdminDashboard({ adminRequest, onClose }: { adminRequest: AdminRequest;
     setBusy(true)
     setError(null)
     try {
-      const [overviewBody, usersBody, keysBody, jobsBody, platformsBody] = await Promise.all([
+      const [overviewBody, usersBody, keysBody, jobsBody, platformsBody, cookiesBody] = await Promise.all([
         adminRequest<AdminOverview>('/api/admin/overview'),
         adminRequest<User[]>('/api/admin/users'),
         adminRequest<ApiKeyItem[]>('/api/admin/api-keys'),
         adminRequest<Job[]>('/api/admin/jobs'),
         adminRequest<PlatformsResponse>('/api/v1/platforms'),
+        adminRequest<CookieProfile[]>('/api/admin/cookies'),
       ])
       setOverview(overviewBody)
       setUsers(usersBody)
       setApiKeys(keysBody)
       setJobs(jobsBody)
       setPlatforms(platformsBody)
+      setCookieProfiles(cookiesBody)
     } catch (err) {
       setError(err instanceof Error ? err.message : '后台数据加载失败')
     } finally {
@@ -848,6 +1206,29 @@ function AdminDashboard({ adminRequest, onClose }: { adminRequest: AdminRequest;
   async function cleanupCache() {
     await adminRequest<{ removed: number; storage_bytes: number }>('/api/admin/cleanup', { method: 'POST' })
     await refreshAll()
+  }
+
+  async function uploadCookies(event: React.FormEvent) {
+    event.preventDefault()
+    if (!cookieFile) {
+      setError('请选择导出的 Netscape cookies.txt 文件。')
+      return
+    }
+    setError(null)
+    const form = new FormData()
+    form.append('file', cookieFile)
+    try {
+      const created = await adminRequest<CookieProfile>(`/api/admin/cookies/${encodeURIComponent(cookieName.trim())}`, { method: 'PUT', body: form })
+      setCookieProfiles((items) => [created, ...items.filter((item) => item.name !== created.name)])
+      setCookieFile(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Cookie 上传失败')
+    }
+  }
+
+  async function deleteCookies(name: string) {
+    await adminRequest<void>(`/api/admin/cookies/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    setCookieProfiles((items) => items.filter((item) => item.name !== name))
   }
 
   return (
@@ -1002,7 +1383,7 @@ function AdminDashboard({ adminRequest, onClose }: { adminRequest: AdminRequest;
           {tab === 'jobs' && (
             <div className="admin-section">
               <div className="admin-toolbar">
-                <p>当前显示运行时任务；重启服务后历史任务不会保留。</p>
+                <p>任务历史已持久化；完成文件到期后自动清理，失败记录保留 30 天。</p>
                 <button className="secondary-button" type="button" onClick={cleanupCache}><Trash2 size={16} />清理缓存</button>
               </div>
               <div className="admin-table jobs-table">
@@ -1015,6 +1396,27 @@ function AdminDashboard({ adminRequest, onClose }: { adminRequest: AdminRequest;
                   </div>
                 ))}
                 {!jobs.length && <p className="empty-admin">暂无任务。</p>}
+              </div>
+            </div>
+          )}
+
+          {tab === 'cookies' && (
+            <div className="admin-section">
+              <div className="cookie-notice"><Cookie size={18} /><div><strong>加密 Cookie 配置</strong><p>上传浏览器导出的 Netscape cookies.txt。文件会使用 AUTH_SECRET 加密保存，不会写入日志；命名为 default 时所有平台自动使用。</p></div></div>
+              <form className="cookie-upload" onSubmit={uploadCookies}>
+                <input value={cookieName} onChange={(event) => setCookieName(event.target.value)} placeholder="配置名称，例如 default 或 youtube" pattern="[a-zA-Z0-9_.-]+" required />
+                <input type="file" accept=".txt,text/plain" onChange={(event) => setCookieFile(event.target.files?.[0] || null)} required />
+                <button type="submit"><Cookie size={16} />加密上传</button>
+              </form>
+              <div className="admin-table">
+                {cookieProfiles.map((item) => (
+                  <div className="api-row" key={item.name}>
+                    <div><strong>{item.name}</strong><small>更新于 {formatDate(item.updated_at)}</small></div>
+                    <span>{formatBytes(item.size_bytes)}（加密后）</span><span>仅管理员可管理</span><span />
+                    <button className="danger-button" type="button" onClick={() => deleteCookies(item.name)}><Trash2 size={15} />删除</button>
+                  </div>
+                ))}
+                {!cookieProfiles.length && <p className="empty-admin">尚未配置 Cookie；公开内容仍可正常尝试解析。</p>}
               </div>
             </div>
           )}
@@ -1068,7 +1470,7 @@ function Metric({ title, value, icon }: { title: string; value: React.ReactNode;
 }
 
 function StatusBadge({ status }: { status: JobStatus }) {
-  const icon = status === 'completed' ? <CheckCircle2 size={14} /> : status === 'failed' || status === 'expired' ? <AlertTriangle size={14} /> : <Loader2 size={14} className={status === 'queued' ? '' : 'spin'} />
+  const icon = status === 'completed' ? <CheckCircle2 size={14} /> : status === 'failed' || status === 'cancelled' || status === 'expired' ? <AlertTriangle size={14} /> : <Loader2 size={14} className={status === 'queued' ? '' : 'spin'} />
   return <span className={`status status-${status}`}>{icon}{statusText[status]}</span>
 }
 

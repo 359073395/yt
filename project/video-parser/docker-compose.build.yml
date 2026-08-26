@@ -1,0 +1,6 @@
+services:
+  video-parser:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    image: video-parser:local

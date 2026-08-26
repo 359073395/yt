@@ -1,89 +1,119 @@
-# 影链工坊
+# 影链工坊 2.0
 
-公开视频解析与服务器临时下载工具。前端使用 React + Vite，后端使用 FastAPI + yt-dlp + ffmpeg，生产环境通过 Docker Compose 运行。
+基于官方 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 的自托管 Web 视频下载中心。支持解析后选择画质、仅音频、字幕、实时队列、任务历史、多用户额度、API Key 和加密 Cookie 配置。
 
-## 本地运行
+## 2.0 功能
+
+- 先解析再下载：展示封面、标题、作者、时长、格式和预计大小
+- 视频格式选择：自动最佳画质或指定 yt-dlp 格式
+- 音频提取：MP3、M4A、OPUS、FLAC、WAV
+- 字幕：人工字幕和自动字幕，可随视频嵌入
+- 实时任务：SSE 推送进度、速度、ETA，支持取消和重试
+- 持久化历史：SQLite 保存任务，服务更新或重启后仍可查看
+- 临时文件：到期自动清理，下载地址使用 15 分钟签名
+- 多用户：访客、普通用户、会员、管理员及每日额度
+- API Key：可为智能体或其他服务配置独立额度和权限
+- Cookie：管理员上传 Netscape cookies.txt，加密保存且不写入日志
+- 新版引擎：`yt-dlp[default,curl-cffi]`、`yt-dlp-ejs`、Deno、FFmpeg
+- 安全部署：非 root、只读容器根文件系统、移除 Linux capabilities
+
+## 一键安装或更新
 
 ```bash
-cd project/video-parser
-docker compose up --build
+bash <(curl -fsSL https://raw.githubusercontent.com/359073395/yt/main/project/video-parser/deploy/install.sh) --port 9890
 ```
 
-打开 http://localhost:8080。
-
-## VPS 一键安装
+已安装服务器更新时可以不传端口，脚本会保留现有 `.env`、端口、用户数据库、Cookie 和下载历史：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/359073395/yt/main/project/video-parser/deploy/install.sh)
 ```
 
-如果有域名：
+脚本优先拉取 `ghcr.io/359073395/video-parser:latest`。镜像暂不可用时自动回退到源码构建；新容器健康检查失败时自动恢复上一镜像。
 
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/359073395/yt/main/project/video-parser/deploy/install.sh) --domain example.com
+首次安装会随机生成 `AUTH_SECRET` 和管理员密码，并在安装结束时显示一次。配置保存在：
+
+```text
+/opt/video-parser/project/video-parser/.env
 ```
 
-脚本也支持 `--repo <git-url>` 指定其他仓库。
+## 本地构建
+
+```bash
+cd project/video-parser
+cp .env.example .env
+docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+```
+
+打开 http://localhost:8080。
+
+## 从 1.0 升级
+
+2.0 继续使用原来的 `/data/video-parser.sqlite3` 和 Docker volume，不需要迁移账号、会员或 API Key。升级脚本会自动：
+
+1. 保留 `.env` 和数据卷。
+2. 将旧默认管理员密码替换为随机密码。
+3. 拉取 2.0 镜像并启动健康检查。
+4. 失败时回滚上一容器镜像。
+
+不要使用 `docker compose down --volumes` 更新，否则会删除数据库和历史文件。
+
+## Cookie 配置
+
+管理员登录后进入“管理后台 → Cookie 配置”，上传浏览器扩展导出的 Netscape `cookies.txt`。
+
+- 配置名称使用 `default` 时，所有没有指定配置的任务自动使用。
+- Cookie 使用由 `AUTH_SECRET` 派生的密钥加密保存。
+- 更改 `AUTH_SECRET` 后需要重新上传 Cookie。
+- 只应使用专用的低权限平台账号，不要上传主账号 Cookie。
 
 ## 环境变量
 
-复制 `.env.example` 为 `.env` 后可调整：
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| `PUBLIC_PORT` | `8080` | 对外访问端口 |
+| `VIDEO_PARSER_IMAGE` | `ghcr.io/359073395/video-parser:latest` | 部署镜像 |
+| `MAX_CONCURRENT_DOWNLOADS` | `2` | 全局并发任务数 |
+| `GUEST_DAILY_LIMIT` | `3` | 访客每日下载次数 |
+| `USER_DAILY_LIMIT` | `10` | 普通用户每日下载次数 |
+| `MAX_FILE_SIZE_MB` | `512` | 单文件上限 |
+| `MAX_DURATION_SECONDS` | `1800` | 视频时长上限 |
+| `JOB_TTL_SECONDS` | `3600` | 完成文件保留时间 |
+| `METADATA_TIMEOUT_SECONDS` | `45` | 链接解析超时 |
+| `TRUSTED_PROXY_HEADERS` | `false` | 仅在可信反代后开启 |
 
-- `PUBLIC_PORT`: 对外端口，默认 `8080`
-- `MAX_CONCURRENT_DOWNLOADS`: 全局下载并发，默认 `2`
-- `GUEST_DAILY_LIMIT`: 未登录访客每日下载次数，默认 `3`
-- `USER_DAILY_LIMIT`: 普通用户每日下载次数，默认 `10`
-- `ADMIN_USERNAME`: 默认管理员账号，默认 `admin`
-- `ADMIN_PASSWORD`: 默认管理员密码，默认 `lhw111111`
-- `AUTH_SECRET`: 登录 token 签名密钥，生产环境建议改成随机长字符串
-- `RATE_LIMIT_PER_MINUTE`: 单 IP 每分钟提交任务数，默认 `6`
-- `MAX_FILE_SIZE_MB`: 最大下载文件大小，默认 `512`
-- `MAX_DURATION_SECONDS`: 最大视频时长，默认 `1800`
-- `JOB_TTL_SECONDS`: 文件保留时间，默认 `3600`
+## API
 
-## 说明
+浏览器接口：
 
-本工具只用于处理你有权处理的公开视频链接。不支持绕过 DRM、登录墙、私密内容或平台反爬限制。Shopee 与 TikTok Shop 商品页不在 v1 保证范围内。
+- `POST /api/parse`：解析元数据、格式和字幕
+- `POST /api/jobs`：创建下载任务
+- `GET /api/jobs`：当前用户或访客历史
+- `GET /api/jobs/{jobId}`：任务状态
+- `GET /api/jobs/{jobId}/events`：SSE 实时状态
+- `POST /api/jobs/{jobId}/cancel`：取消任务
+- `POST /api/jobs/{jobId}/retry`：重试任务
 
-第一版支持账号密码登录。未登录访客每天最多下载 3 个视频，普通用户每天最多下载 10 个视频；会员和管理员不限制。启动时会自动创建或更新管理员账号 `admin`，默认密码为 `lhw111111`。
+API Key 接口保持兼容：
 
-批量下载当前未开放。建议在会员与队列策略稳定后再开启，避免公开站点被批量任务打满带宽和并发。
+- `POST /api/v1/jobs`
+- `GET /api/v1/jobs/{jobId}`
+- `GET /api/v1/jobs/{jobId}/download`
+- `GET /api/v1/platforms`
+- `GET /api/v1/quota`
+- `GET /api/v1/openapi.json`
 
-## 管理后台
-
-管理员登录后，右上角账号菜单进入“管理后台”。后台包含：
-
-- 总览：用户、会员、API Key、任务和缓存统计
-- 用户会员：搜索用户、调整普通用户/会员/管理员、重置今日额度、启用或禁用账号
-- API Key：创建给智能体或 Codex 使用的密钥，设置每日额度，启用、禁用或删除
-- 任务缓存：查看当前运行时任务，清理过期缓存
-- 支持平台：查看国内、国际和暂不保证的平台
-- API 对接：查看接口和请求示例
-
-## API 对接
-
-在管理后台创建 API Key 后，智能体或 Codex 可以使用 `X-API-Key` 请求 `/api/v1/*`：
+创建视频任务示例：
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/jobs \
   -H "Content-Type: application/json" \
   -H "X-API-Key: ylg_xxx" \
-  -d '{"url":"https://www.douyin.com/video/..."}'
+  -d '{"url":"https://example.com/video","media_type":"video","format_id":"best"}'
 ```
 
-常用接口：
+## 支持范围
 
-- `POST /api/v1/jobs`: 创建解析下载任务
-- `GET /api/v1/jobs/{jobId}`: 查询任务状态
-- `GET /api/v1/jobs/{jobId}/download`: 下载已完成文件
-- `GET /api/v1/platforms`: 查询支持平台列表
-- `GET /api/v1/quota`: 查询当前 API Key 今日额度
-- `GET /api/v1/openapi.json`: 读取 OpenAPI 结构
+实际平台能力跟随当前 yt-dlp 提取器、服务器区域、平台风控和 Cookie 状态。界面中的平台列表分为“支持”和“实验性”，不承诺绕过 DRM、付费内容、私密内容或登录墙。
 
-## 支持平台
-
-平台能力跟随当前安装的 `yt-dlp` extractor。已列入支持展示的平台包括：
-
-- 国内平台：抖音、小红书、哔哩哔哩、微博、AcFun、优酷、爱奇艺、腾讯视频、百度视频、斗鱼、虎牙、QQ 音乐 MV、网易 MV
-- 国际平台：YouTube、TikTok、Instagram、Facebook、X / Twitter、Vimeo、SoundCloud、Reddit、Twitch、Dailymotion、Rumble
-- 尝试解析，暂不保证：快手、Shopee、TikTok Shop
+请只下载你拥有权利、已获得授权或平台明确允许保存的内容。

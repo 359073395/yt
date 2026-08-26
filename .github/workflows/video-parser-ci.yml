@@ -1,0 +1,104 @@
+name: Video Parser 2.0 CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "project/video-parser/**"
+      - ".github/workflows/video-parser-ci.yml"
+  pull_request:
+    paths:
+      - "project/video-parser/**"
+      - ".github/workflows/video-parser-ci.yml"
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: project/video-parser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: project/video-parser/backend/requirements*.txt
+      - run: pip install -r backend/requirements-dev.txt
+      - run: pytest -q backend/tests
+        env:
+          PYTHONPATH: backend
+          DOWNLOAD_DIR: ${{ runner.temp }}/yinglian-downloads
+          DATABASE_PATH: ${{ runner.temp }}/yinglian.sqlite3
+          COOKIE_DIR: ${{ runner.temp }}/yinglian-cookies
+          AUTH_SECRET: ci-only-secret
+          ADMIN_PASSWORD: ci-only-password
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: project/video-parser/frontend/package-lock.json
+      - run: npm ci --prefix frontend
+      - run: npm run build --prefix frontend
+
+  extractor-smoke:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: project/video-parser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: pip install -r backend/requirements.txt
+      - name: YouTube public test metadata
+        run: python -m yt_dlp --ignore-config --js-runtimes deno --no-playlist --skip-download --print id "https://www.youtube.com/watch?v=MeJVWBSsPAY"
+
+  image:
+    if: >-
+      always() && needs.test.result == 'success' &&
+      (needs.extractor-smoke.result == 'success' || needs.extractor-smoke.result == 'skipped') &&
+      github.event_name != 'pull_request'
+    needs: [test, extractor-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/359073395/video-parser
+          tags: |
+            type=raw,value=latest
+            type=raw,value=2.0.0
+            type=sha
+      - uses: docker/build-push-action@v6
+        with:
+          context: project/video-parser
+          file: project/video-parser/deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true

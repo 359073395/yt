@@ -12,10 +12,11 @@ class Settings(BaseSettings):
     app_port: int = 8080
     download_dir: Path = Path("/data/downloads")
     database_path: Path = Path("/data/video-parser.sqlite3")
+    cookie_dir: Path = Path("/data/cookies")
     static_dir: Path = Path("/app/static")
     auth_secret: str = "change-this-auth-secret"
     admin_username: str = "admin"
-    admin_password: str = "lhw111111"
+    admin_password: str = "change-this-admin-password"
     guest_daily_limit: int = Field(default=3, ge=1, le=1000)
     user_daily_limit: int = Field(default=10, ge=1, le=1000)
     max_concurrent_downloads: int = Field(default=2, ge=1, le=10)
@@ -24,6 +25,9 @@ class Settings(BaseSettings):
     max_duration_seconds: int = Field(default=1800, ge=10, le=86400)
     job_ttl_seconds: int = Field(default=3600, ge=60, le=86400)
     request_timeout_seconds: int = Field(default=20, ge=5, le=120)
+    metadata_timeout_seconds: int = Field(default=45, ge=10, le=180)
+    engine_channel: str = Field(default="stable", pattern=r"^(stable|nightly)$")
+    app_version: str = "2.0.0"
     trusted_proxy_headers: bool = False
 
     @property
