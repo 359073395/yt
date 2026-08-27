@@ -23,6 +23,7 @@
 - 多用户：访客、普通用户、会员、管理员及每日额度
 - API Key：可为智能体或其他服务配置独立额度和权限
 - 用户 Cookie：登录本站后导入各平台 Netscape cookies.txt；按用户隔离、加密保存并自动过滤其他网站条目
+- 扫码登录：抖音与 TikTok 使用平台官方二维码登录；单次等待 5 分钟，成功后按用户加密保存 Cookie
 - 管理员 Cookie：继续支持全站默认配置，为没有私有 Cookie 的任务提供降级
 - 新版引擎：`yt-dlp[default,curl-cffi]`、`yt-dlp-ejs`、Deno、FFmpeg、Chromium
 - 安全部署：非 root、只读容器根文件系统、移除 Linux capabilities
@@ -63,16 +64,18 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 
 1. 保留 `.env` 和数据卷。
 2. 将旧默认管理员密码替换为随机密码。
-3. 拉取 2.2.0 镜像，自动增加任务字段并启动健康检查。
+3. 拉取 2.2.1 镜像，自动增加任务字段并启动健康检查。
 4. 失败时回滚上一容器镜像。
 
 不要使用 `docker compose down --volumes` 更新，否则会删除数据库和历史文件。
 
 ## Cookie 配置
 
-普通用户登录本站后点击右上角账号菜单中的“我的 Cookie”，选择平台并上传浏览器导出的 Netscape `cookies.txt`。系统只保留所选平台及其媒体域名的条目，其他网站 Cookie 会在加密前删除。
+普通用户登录本站后点击右上角账号菜单中的“我的 Cookie”。抖音和 TikTok 默认使用官方二维码扫码登录；其他平台或扫码不可用时仍可上传浏览器导出的 Netscape `cookies.txt`。系统只保留所选平台及其媒体域名的条目，其他网站 Cookie 会在加密前删除。
 
 - 每个用户只能读取和删除自己的 Cookie。
+- 每个扫码会话使用独立浏览器上下文，最多等待 5 分钟；成功、取消或超时后立即关闭。
+- 登录成功后的 Cookie 不受 5 分钟限制，一直保存到平台失效、用户退出或主动删除。
 - 解析时会按链接平台自动选择当前用户的 Cookie，无需每次手工指定。
 - 不接收平台账号和密码；建议使用专用低权限账号。
 - Cookie 过期后重新导出并覆盖即可。
@@ -109,6 +112,8 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 | `JOB_TTL_SECONDS` | `3600` | 完成文件保留时间 |
 | `METADATA_TIMEOUT_SECONDS` | `45` | 链接解析超时 |
 | `CHROMIUM_PATH` | 自动探测 | 抖音主页与作品页解析使用的 Chromium 路径 |
+| `QR_LOGIN_TIMEOUT_SECONDS` | `300` | 单次扫码登录等待秒数，范围 60–900 |
+| `QR_LOGIN_MAX_SESSIONS` | `3` | 服务器同时运行的扫码浏览器会话上限 |
 | `TRANSCRIPTION_ENABLED` | `true` | 是否允许 AI 语音转写 |
 | `WHISPER_MODEL` | `base` | faster-whisper 模型名称 |
 | `WHISPER_DEVICE` | `cpu` | `cpu`、`cuda` 或 `auto` |

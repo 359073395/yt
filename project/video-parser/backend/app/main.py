@@ -3,7 +3,7 @@ import hashlib
 import hmac
 import json
 import shutil
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from time import time
 
@@ -43,16 +43,24 @@ from .models import (
     ParseResponse,
     PlatformItem,
     PlatformsResponse,
+    QrLoginPublic,
     QuotaPublic,
     UserPublic,
 )
 from .security import RateLimiter, client_ip_from_request, validate_public_url
+from .qr_login import QR_LOGIN_PLATFORMS, QrLoginCapacityError, QrLoginManager
 from .store import JobStore
 
 settings = get_settings()
 store = JobStore(settings.download_dir, settings.job_ttl_seconds, settings.database_path)
 rate_limiter = RateLimiter(settings.rate_limit_per_minute)
 cookie_store = CookieStore(settings.cookie_dir, settings.auth_secret)
+qr_login_manager = QrLoginManager(
+    cookie_store,
+    chromium_path=settings.chromium_path,
+    timeout_seconds=settings.qr_login_timeout_seconds,
+    max_sessions=settings.qr_login_max_sessions,
+)
 downloader = Downloader(settings, store, cookie_store)
 auth_store = AuthStore(
     database_path=settings.database_path,
@@ -97,6 +105,7 @@ async def cleanup_loop() -> None:
     while True:
         await asyncio.sleep(60)
         store.cleanup()
+        await qr_login_manager.cleanup()
 
 
 @asynccontextmanager
@@ -105,8 +114,13 @@ async def lifespan(_: FastAPI):
     settings.cookie_dir.mkdir(parents=True, exist_ok=True)
     settings.whisper_cache_dir.mkdir(parents=True, exist_ok=True)
     cleanup_task = asyncio.create_task(cleanup_loop())
-    yield
-    cleanup_task.cancel()
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cleanup_task
+        await qr_login_manager.close()
 
 
 app = FastAPI(title="影链工坊 2.2", version=settings.app_version, lifespan=lifespan)
@@ -187,6 +201,7 @@ async def health() -> dict[str, object]:
             "deno": "available" if shutil.which("deno") else "missing",
             "ffmpeg": "available" if shutil.which("ffmpeg") else "missing",
             "chromium": "available" if chromium and Path(chromium).is_file() else "missing",
+            "qr_login": "available" if chromium and Path(chromium).is_file() else "missing",
             "transcription": "available" if downloader.transcriber.available else "disabled",
         },
     }
@@ -210,6 +225,7 @@ async def diagnostics() -> dict[str, object]:
             "deno": deno,
             "ffmpeg": ffmpeg,
             "chromium": chromium,
+            "qr_login": "available" if chromium != "missing" else "missing",
             "transcription": f"faster-whisper/{settings.whisper_model}" if downloader.transcriber.available else "disabled",
         },
     }
@@ -437,6 +453,7 @@ async def update_user(user_id: int, payload: AdminUserUpdate, request: Request) 
 @app.delete("/api/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user(user_id: int, request: Request) -> None:
     admin = auth_store.require_admin(request)
+    await qr_login_manager.cancel_user(user_id)
     auth_store.delete_user(user_id, admin.id)
     cookie_store.delete_owner(user_id)
 
@@ -455,6 +472,7 @@ async def upload_my_cookie_profile(platform: str, request: Request, file: Upload
         raise HTTPException(status_code=400, detail="暂不支持该平台的用户 Cookie。")
     content = await file.read(MAX_COOKIE_BYTES + 1)
     try:
+        await qr_login_manager.cancel_platform(user.id, platform)
         return cookie_store.save(platform, content, owner_id=user.id, platform=platform)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -466,7 +484,56 @@ async def delete_my_cookie_profile(platform: str, request: Request) -> None:
     platform = platform.lower()
     if platform not in PLATFORM_DOMAINS:
         raise HTTPException(status_code=400, detail="Cookie 平台名称无效。")
+    await qr_login_manager.cancel_platform(user.id, platform)
     cookie_store.delete(platform, user.id)
+
+
+@app.post("/api/cookie-login/{platform}", response_model=QrLoginPublic, status_code=status.HTTP_201_CREATED)
+async def start_cookie_qr_login(platform: str, request: Request) -> QrLoginPublic:
+    user = auth_store.require_user(request)
+    platform = platform.lower()
+    if platform not in QR_LOGIN_PLATFORMS:
+        raise HTTPException(status_code=400, detail="该平台暂不支持扫码登录。")
+    try:
+        return await qr_login_manager.start(user.id, platform)
+    except QrLoginCapacityError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/cookie-login/session/{session_id}", response_model=QrLoginPublic)
+async def get_cookie_qr_login(session_id: str, request: Request) -> QrLoginPublic:
+    user = auth_store.require_user(request)
+    try:
+        return qr_login_manager.get(session_id, user.id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="扫码登录会话不存在。") from exc
+
+
+@app.get("/api/cookie-login/session/{session_id}/qrcode")
+async def get_cookie_qr_code(session_id: str, request: Request) -> Response:
+    user = auth_store.require_user(request)
+    try:
+        image, revision = qr_login_manager.qr_code(session_id, user.id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="扫码登录会话不存在。") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=425, detail=str(exc)) from exc
+    return Response(
+        image,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store, private", "ETag": f'"{revision}"'},
+    )
+
+
+@app.delete("/api/cookie-login/session/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def cancel_cookie_qr_login(session_id: str, request: Request) -> None:
+    user = auth_store.require_user(request)
+    try:
+        await qr_login_manager.cancel(session_id, user.id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="扫码登录会话不存在。") from exc
 
 
 @app.get("/api/admin/overview", response_model=AdminOverview)

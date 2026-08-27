@@ -25,6 +25,7 @@ import {
   Music2,
   FileText,
   Play,
+  QrCode,
   RefreshCw,
   RotateCcw,
   Search,
@@ -224,6 +225,18 @@ type CookieProfile = {
   scope: 'user' | 'global'
 }
 
+type QrLoginSession = {
+  session_id: string
+  platform: 'douyin' | 'tiktok'
+  status: 'starting' | 'waiting' | 'scanned' | 'completed' | 'failed' | 'expired' | 'cancelled'
+  created_at: number
+  expires_at: number
+  message: string
+  qr_ready: boolean
+  qr_revision?: string | null
+  profile?: CookieProfile | null
+}
+
 type PlatformItem = {
   name: string
   extractor?: string | null
@@ -238,6 +251,7 @@ type PlatformsResponse = {
 }
 
 type AdminRequest = <T>(path: string, options?: RequestInit) => Promise<T>
+type AuthenticatedFetch = (path: string, options?: RequestInit) => Promise<Response>
 
 const statusText: Record<JobStatus, string> = {
   queued: '排队中',
@@ -887,7 +901,7 @@ function App() {
           {user && (
             <div className="cookie-status-bar">
               <span><Cookie size={15} />{cookieProfiles.length ? `已接入 ${cookieProfiles.length} 个平台登录状态` : '当前使用公开解析'}</span>
-              <button type="button" onClick={() => setCookieManagerOpen(true)}>{cookieProfiles.length ? '管理我的 Cookie' : '添加平台 Cookie'}</button>
+              <button type="button" onClick={() => setCookieManagerOpen(true)}>{cookieProfiles.length ? '管理平台登录' : '扫码登录 / Cookie'}</button>
             </div>
           )}
 
@@ -1011,7 +1025,7 @@ function App() {
 
       <section className="lower-grid"><HistoryPanel history={history} /><InfoPanel /></section>
       <FooterInfo quota={quota} />
-      {cookieManagerOpen && user && <CookieManager request={adminRequest} profiles={cookieProfiles} onChanged={() => refreshCookies()} onClose={() => setCookieManagerOpen(false)} />}
+      {cookieManagerOpen && user && <CookieManager request={adminRequest} fetchResponse={apiFetch} profiles={cookieProfiles} onChanged={() => refreshCookies()} onClose={() => setCookieManagerOpen(false)} />}
     </main>
   )
 }
@@ -1178,11 +1192,13 @@ function HeaderAccount({
 
 function CookieManager({
   request,
+  fetchResponse,
   profiles,
   onChanged,
   onClose,
 }: {
   request: AdminRequest
+  fetchResponse: AuthenticatedFetch
   profiles: CookieProfile[]
   onChanged: () => Promise<unknown>
   onClose: () => void
@@ -1201,6 +1217,110 @@ function CookieManager({
   const [busy, setBusy] = React.useState(false)
   const [message, setMessage] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  const [qrSession, setQrSession] = React.useState<QrLoginSession | null>(null)
+  const [qrImageUrl, setQrImageUrl] = React.useState<string | null>(null)
+  const [clock, setClock] = React.useState(() => Date.now())
+  const completedSession = React.useRef<string | null>(null)
+  const scanPlatforms = ['douyin', 'tiktok'] as const
+  const canScan = scanPlatforms.includes(platform as (typeof scanPlatforms)[number])
+  const qrActive = Boolean(qrSession && ['starting', 'waiting', 'scanned'].includes(qrSession.status))
+
+  React.useEffect(() => {
+    if (!qrActive) return
+    const timer = window.setInterval(() => setClock(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [qrActive])
+
+  React.useEffect(() => {
+    if (!qrSession || !['starting', 'waiting', 'scanned'].includes(qrSession.status)) return
+    let stopped = false
+    const poll = async () => {
+      try {
+        const next = await request<QrLoginSession>(`/api/cookie-login/session/${qrSession.session_id}`)
+        if (stopped) return
+        setQrSession(next)
+        if (next.status === 'completed' && completedSession.current !== next.session_id) {
+          completedSession.current = next.session_id
+          await onChanged()
+          setMessage(`${platforms.find(([id]) => id === next.platform)?.[1] || next.platform} 扫码登录成功，Cookie 已加密保存并启用。`)
+        }
+        if (next.status === 'failed' || next.status === 'expired') setError(next.message)
+      } catch (err) {
+        if (!stopped) setError(err instanceof Error ? err.message : '无法读取扫码状态')
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 2000)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+    }
+  }, [qrSession?.session_id, qrSession?.status])
+
+  React.useEffect(() => {
+    if (!qrSession?.qr_ready || !qrSession.qr_revision) {
+      setQrImageUrl(null)
+      return
+    }
+    let stopped = false
+    let objectUrl: string | null = null
+    const load = async () => {
+      const response = await fetchResponse(`/api/cookie-login/session/${qrSession.session_id}/qrcode?revision=${encodeURIComponent(qrSession.qr_revision || '')}`)
+      if (!response.ok) throw new Error(await readError(response))
+      const blob = await response.blob()
+      if (stopped) return
+      objectUrl = URL.createObjectURL(blob)
+      setQrImageUrl(objectUrl)
+    }
+    void load().catch((err) => {
+      if (!stopped) setError(err instanceof Error ? err.message : '二维码加载失败')
+    })
+    return () => {
+      stopped = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [qrSession?.session_id, qrSession?.qr_revision, qrSession?.qr_ready])
+
+  async function startQrLogin() {
+    if (!canScan) return
+    setBusy(true)
+    setError(null)
+    setMessage(null)
+    completedSession.current = null
+    try {
+      const session = await request<QrLoginSession>(`/api/cookie-login/${platform}`, { method: 'POST' })
+      setQrSession(session)
+      setClock(Date.now())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '扫码登录启动失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function cancelQrLogin() {
+    const session = qrSession
+    setQrSession(null)
+    if (!session || !['starting', 'waiting', 'scanned'].includes(session.status)) return
+    try {
+      await request<void>(`/api/cookie-login/session/${session.session_id}`, { method: 'DELETE' })
+    } catch {
+      // Closing the dialog should not be blocked by a failed cancellation request.
+    }
+  }
+
+  async function closeManager() {
+    await cancelQrLogin()
+    onClose()
+  }
+
+  async function changePlatform(next: typeof platform) {
+    if (next === platform) return
+    await cancelQrLogin()
+    setPlatform(next)
+    setError(null)
+    setMessage(null)
+  }
 
   async function upload(event: React.FormEvent) {
     event.preventDefault()
@@ -1213,6 +1333,7 @@ function CookieManager({
     try {
       const item = await request<CookieProfile>(`/api/cookies/${platform}`, { method: 'PUT', body: form })
       await onChanged()
+      setQrSession(null)
       setFile(null)
       setMessage(`${platforms.find(([id]) => id === item.name)?.[1] || item.name} Cookie 已加密保存并启用。`)
     } catch (err) {
@@ -1230,18 +1351,37 @@ function CookieManager({
 
   return (
     <section className="admin-overlay cookie-center" aria-label="我的 Cookie">
-      <div className="admin-backdrop" onClick={onClose} />
+      <div className="admin-backdrop" onClick={() => void closeManager()} />
       <div className="admin-dialog cookie-dialog">
         <header className="admin-dialog-header">
-          <div><span className="caption">Private login state</span><h2>我的平台 Cookie</h2><p>仅导入 Cookie，不接收平台账号和密码。每位用户独立加密保存，上传时会删除其他网站的 Cookie。</p></div>
-          <button className="secondary-button" type="button" onClick={onClose}>关闭</button>
+          <div><span className="caption">Private login state</span><h2>我的平台登录</h2><p>抖音与 TikTok 可直接扫码；系统不接收账号和密码，每位用户的 Cookie 独立加密保存。</p></div>
+          <button className="secondary-button" type="button" onClick={() => void closeManager()}>关闭</button>
         </header>
-        <div className="cookie-security"><Shield size={18} /><div><strong>建议使用专用低权限账号</strong><p>从浏览器导出 Netscape cookies.txt，退出平台或删除这里的配置都可以使登录状态失效。不要上传包含全部网站的未筛选文件到其他服务。</p></div></div>
-        <form className="cookie-user-upload" onSubmit={upload}>
-          <label><span>平台</span><select value={platform} onChange={(event) => setPlatform(event.target.value as typeof platform)}>{platforms.map(([id, label]) => <option value={id} key={id}>{label}</option>)}</select></label>
-          <label><span>cookies.txt</span><input type="file" accept=".txt,text/plain" onChange={(event) => setFile(event.target.files?.[0] || null)} /></label>
-          <button type="submit" disabled={!file || busy}>{busy ? <Loader2 className="spin" size={16} /> : <Cookie size={16} />}{busy ? '正在加密' : '导入并启用'}</button>
-        </form>
+        <div className="cookie-security"><Shield size={18} /><div><strong>扫码发生在平台官方页面</strong><p>二维码会话最多等待 5 分钟；登录成功后只保留所选平台域名的 Cookie，直到平台失效、退出登录或你主动删除。</p></div></div>
+        <div className="cookie-platform-tabs" role="tablist" aria-label="选择登录平台">
+          {platforms.map(([id, label]) => <button type="button" role="tab" aria-selected={platform === id} className={platform === id ? 'active' : ''} onClick={() => void changePlatform(id)} key={id}>{label}</button>)}
+        </div>
+        {canScan && (
+          <div className="qr-login-card">
+            <div className="qr-login-heading"><div><QrCode size={20} /><span><strong>{platform === 'douyin' ? '抖音' : 'TikTok'} 扫码登录</strong><small>打开平台 App 扫描并在手机上确认</small></span></div>{qrActive && <span className="qr-countdown">{Math.max(0, Math.ceil(((qrSession?.expires_at || 0) * 1000 - clock) / 1000))} 秒</span>}</div>
+            {!qrSession && <button className="qr-start-button" type="button" onClick={() => void startQrLogin()} disabled={busy}>{busy ? <Loader2 className="spin" size={17} /> : <QrCode size={17} />}{busy ? '正在连接官方页面' : '生成登录二维码'}</button>}
+            {qrSession && qrActive && (
+              <div className="qr-login-body">
+                <div className="qr-image-frame">{qrImageUrl ? <img src={qrImageUrl} alt={`${platform === 'douyin' ? '抖音' : 'TikTok'} 登录二维码`} /> : <div><Loader2 className="spin" size={28} /><span>正在生成二维码</span></div>}</div>
+                <div className="qr-login-status"><span className={`qr-status-dot ${qrSession.status}`} /> <strong>{qrSession.status === 'scanned' ? '等待手机确认' : qrSession.status === 'starting' ? '正在连接' : '等待扫码'}</strong><p>{qrSession.message}</p><button className="secondary-button" type="button" onClick={() => void cancelQrLogin()}>取消本次扫码</button></div>
+              </div>
+            )}
+            {qrSession && ['failed', 'expired', 'cancelled'].includes(qrSession.status) && <button className="qr-start-button" type="button" onClick={() => { setQrSession(null); void startQrLogin() }}><RefreshCw size={17} />重新生成二维码</button>}
+            {qrSession?.status === 'completed' && <div className="qr-completed"><CheckCircle2 size={18} />扫码登录成功，登录状态已加密保存。</div>}
+          </div>
+        )}
+        <details className="cookie-file-fallback" open={!canScan}>
+          <summary>{canScan ? '扫码不可用？改用 cookies.txt' : '导入 cookies.txt'}</summary>
+          <form className="cookie-user-upload" onSubmit={upload}>
+            <label><span>{platforms.find(([id]) => id === platform)?.[1]} cookies.txt</span><input type="file" accept=".txt,text/plain" onChange={(event) => setFile(event.target.files?.[0] || null)} /></label>
+            <button type="submit" disabled={!file || busy}>{busy ? <Loader2 className="spin" size={16} /> : <Cookie size={16} />}{busy ? '正在加密' : '导入并启用'}</button>
+          </form>
+        </details>
         {message && <div className="cookie-success"><CheckCircle2 size={16} />{message}</div>}
         {error && <div className="inline-alert"><AlertTriangle size={16} />{error}</div>}
         <div className="cookie-profile-list">

@@ -17,6 +17,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     XDG_CACHE_HOME=/data/cache \
     DENO_DIR=/data/cache/deno \
     CHROMIUM_PATH=/usr/bin/chromium \
+    QR_LOGIN_TIMEOUT_SECONDS=300 \
+    QR_LOGIN_MAX_SESSIONS=3 \
     WHISPER_CACHE_DIR=/data/cache/whisper \
     HOME=/tmp/yinglian
 

@@ -47,3 +47,31 @@ def test_user_profile_automatically_selected_by_platform(tmp_path):
     with store.materialize(None, tmp_path / "work-auto", owner_id=3, platform="tiktok") as cookie_file:
         assert cookie_file is not None
         assert b"user-secret" in cookie_file.read_bytes()
+
+
+def test_browser_cookies_are_converted_to_netscape_and_sanitized():
+    content = CookieStore.browser_cookies_to_netscape([
+        {
+            "name": "sessionid",
+            "value": "secret-value",
+            "domain": ".douyin.com",
+            "path": "/",
+            "expires": -1,
+            "httpOnly": True,
+            "secure": True,
+        },
+        {
+            "name": "unsafe\tname",
+            "value": "line\nbreak",
+            "domain": "www.douyin.com",
+            "path": "/",
+            "expires": 4102444800,
+            "httpOnly": False,
+            "secure": False,
+        },
+    ])
+
+    text = content.decode()
+    assert text.startswith("# Netscape HTTP Cookie File\n")
+    assert "#HttpOnly_.douyin.com\tTRUE\t/\tTRUE\t0\tsessionid\tsecret-value" in text
+    assert "www.douyin.com\tFALSE\t/\tFALSE\t4102444800\tunsafename\tlinebreak" in text

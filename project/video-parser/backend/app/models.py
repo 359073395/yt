@@ -39,6 +39,16 @@ class TranscriptFormat(StrEnum):
     vtt = "vtt"
 
 
+class QrLoginStatus(StrEnum):
+    starting = "starting"
+    waiting = "waiting"
+    scanned = "scanned"
+    completed = "completed"
+    failed = "failed"
+    expired = "expired"
+    cancelled = "cancelled"
+
+
 class ParseRequest(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
     cookie_profile: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
@@ -293,6 +303,18 @@ class CookieProfilePublic(BaseModel):
     expires_at: float | None = None
     expired: bool = False
     scope: str = "global"
+
+
+class QrLoginPublic(BaseModel):
+    session_id: str
+    platform: str
+    status: QrLoginStatus
+    created_at: float
+    expires_at: float
+    message: str
+    qr_ready: bool = False
+    qr_revision: str | None = None
+    profile: CookieProfilePublic | None = None
 
 
 class JobPublic(BaseModel):

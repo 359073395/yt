@@ -8,7 +8,7 @@ import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from time import time
-from typing import Iterator
+from typing import Any, Iterator
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -125,6 +125,31 @@ class CookieStore:
         if not name:
             return False
         return self._path(name, owner_id).exists() or (owner_id is not None and self._path(name).exists())
+
+    @staticmethod
+    def browser_cookies_to_netscape(cookies: list[dict[str, Any]]) -> bytes:
+        """Convert Playwright cookies without exposing them outside the server."""
+        lines = ["# Netscape HTTP Cookie File"]
+        for cookie in cookies:
+            name = str(cookie.get("name") or "").replace("\t", "").replace("\r", "").replace("\n", "")
+            value = str(cookie.get("value") or "").replace("\t", "").replace("\r", "").replace("\n", "")
+            domain = str(cookie.get("domain") or "").strip().lower()
+            path = str(cookie.get("path") or "/").replace("\t", "").replace("\r", "").replace("\n", "") or "/"
+            if not name or not domain:
+                continue
+            include_subdomains = "TRUE" if domain.startswith(".") else "FALSE"
+            secure = "TRUE" if cookie.get("secure") else "FALSE"
+            try:
+                expires = int(float(cookie.get("expires") or 0))
+            except (TypeError, ValueError):
+                expires = 0
+            if expires < 0:
+                expires = 0
+            stored_domain = f"#HttpOnly_{domain}" if cookie.get("httpOnly") else domain
+            lines.append(
+                "\t".join((stored_domain, include_subdomains, path, secure, str(expires), name, value))
+            )
+        return ("\n".join(lines) + "\n").encode("utf-8")
 
     @contextmanager
     def materialize(
