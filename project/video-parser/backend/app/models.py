@@ -212,6 +212,11 @@ class AuthResponse(BaseModel):
     quota: QuotaPublic
 
 
+class BrowserSessionResponse(BaseModel):
+    token: str
+    quota: QuotaPublic
+
+
 class MeResponse(BaseModel):
     user: UserPublic | None
     quota: QuotaPublic

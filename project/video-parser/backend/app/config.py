@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     whisper_cpu_threads: int = Field(default=2, ge=1, le=32)
     whisper_cache_dir: Path = Path("/data/cache/whisper")
     engine_channel: str = Field(default="stable", pattern=r"^(stable|nightly)$")
-    app_version: str = "2.2.1"
+    app_version: str = "2.2.2"
     trusted_proxy_headers: bool = False
 
     @property

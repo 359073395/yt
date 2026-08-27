@@ -382,7 +382,7 @@ class Downloader:
                     pass
 
         if not items:
-            cookie_hint = "请登录本站后在右上角“我的 Cookie”中导入抖音 cookies.txt。" if not cookie_file else "当前抖音 Cookie 已失效，请重新导出并覆盖。"
+            cookie_hint = "请在页面右上角“平台登录”中扫码，或导入抖音 cookies.txt。" if not cookie_file else "当前抖音 Cookie 已失效，请重新扫码或导出并覆盖。"
             raise DownloadRejected(f"抖音主页没有返回公开视频；{cookie_hint}")
         return CollectionInspectResponse(
             source_url=source_url,
@@ -519,7 +519,7 @@ class Downloader:
                         timeout=self.settings.metadata_timeout_seconds + 15,
                     )
             except TimeoutError:
-                last_error = DownloadRejected("抖音作品页加载超时，请在“我的 Cookie”中更新抖音 Cookie 后重试。")
+                last_error = DownloadRejected("抖音作品页加载超时，请在“平台登录”中更新抖音 Cookie 后重试。")
                 if attempt:
                     raise last_error
             except DownloadRejected as exc:
@@ -645,7 +645,7 @@ class Downloader:
                     pass
 
         if not media_url:
-            cookie_hint = "请登录本站后在右上角“我的 Cookie”中导入抖音 cookies.txt。" if not cookie_file else "当前抖音 Cookie 已失效，请重新导出并覆盖。"
+            cookie_hint = "请在页面右上角“平台登录”中扫码，或导入抖音 cookies.txt。" if not cookie_file else "当前抖音 Cookie 已失效，请重新扫码或导出并覆盖。"
             raise DownloadRejected(f"抖音作品页没有返回可下载的视频；{cookie_hint}")
 
         width = self._as_int(video_meta.get("width"))
@@ -1959,12 +1959,12 @@ class Downloader:
         if "unsupported url" in lower:
             return "yt-dlp 暂不支持该链接或平台。"
         if "sign in" in lower or "cookies" in lower or "login" in lower:
-            return "平台要求登录验证，请登录本站后在“我的 Cookie”中更新对应平台 Cookie。"
+            return "平台要求登录验证，请在页面右上角“平台登录”中扫码或更新对应平台 Cookie。"
         if "larger than max-filesize" in lower:
             return "文件超过站点下载大小上限。"
         if "requested format is not available" in lower:
             return "所选清晰度已经失效，请重新解析并选择格式。"
         if "universal data for rehydration" in lower:
-            return "TikTok 未返回视频数据，请确认链接可公开播放，或在“我的 Cookie”中更新 TikTok Cookie。"
+            return "TikTok 未返回视频数据，请确认链接可公开播放，或在“平台登录”中更新 TikTok Cookie。"
         cleaned = re.sub(r"/[^\s]*/\.cookies\.txt", "[cookie]", message)
         return cleaned[-800:] or "任务失败，请稍后重试。"

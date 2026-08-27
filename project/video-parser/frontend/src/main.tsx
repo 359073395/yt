@@ -3,14 +3,12 @@ import ReactDOM from 'react-dom/client'
 import {
   AlertTriangle,
   Activity,
-  Ban,
   CheckCircle2,
   ClipboardCopy,
   Clock3,
   Captions,
   Cookie,
   Copy,
-  Crown,
   Database,
   Download,
   FileVideo,
@@ -175,6 +173,11 @@ type AuthResponse = {
   quota: Quota
 }
 
+type BrowserSessionResponse = {
+  token: string
+  quota: Quota
+}
+
 type MeResponse = {
   user: User | null
   quota: Quota
@@ -265,41 +268,7 @@ const statusText: Record<JobStatus, string> = {
   expired: '已过期',
 }
 
-const roleText: Record<UserRole, string> = {
-  user: '普通用户',
-  member: '会员',
-  admin: '管理员',
-}
-
 const statusOrder: JobStatus[] = ['queued', 'parsing', 'downloading', 'transcribing', 'merging', 'completed']
-
-const demoJob: Job = {
-  job_id: 'preview',
-  url: 'https://www.tiktok.com/@creator/video/0000000000000',
-  status: 'queued',
-  title: 'Sample creator video',
-  platform: 'TikTok',
-  thumbnail: null,
-  duration: 42,
-  size_bytes: 40265318,
-  downloaded_bytes: 0,
-  total_bytes: 40265318,
-  progress: 0,
-  speed: null,
-  eta: null,
-  media_type: 'video',
-  format_id: 'best',
-  audio_format: 'mp3',
-  transcript_mode: 'none',
-  transcript_format: 'srt',
-  include_description: false,
-  include_thumbnail: false,
-  created_at: Date.now() / 1000,
-  updated_at: Date.now() / 1000,
-  expires_at: Date.now() / 1000 + 3600,
-  can_cancel: false,
-  can_retry: false,
-}
 
 function formatBytes(value?: number | null) {
   if (value === null || value === undefined) return '未知'
@@ -342,12 +311,6 @@ function isActiveStep(jobStatus: JobStatus, step: JobStatus) {
   return statusOrder.indexOf(step) <= statusOrder.indexOf(jobStatus)
 }
 
-function quotaText(quota: Quota | null) {
-  if (!quota) return '读取额度中'
-  if (quota.unlimited) return '无限下载'
-  return `今日剩余 ${quota.remaining ?? 0}/${quota.limit ?? 5}`
-}
-
 async function readError(response: Response) {
   const body = await response.json().catch(() => null)
   const detail = body?.detail
@@ -364,209 +327,6 @@ async function readError(response: Response) {
   }
   if (detail && typeof detail === 'object') return JSON.stringify(detail)
   return '请求失败'
-}
-
-function LegacyApp() {
-  const [url, setUrl] = React.useState('')
-  const [job, setJob] = React.useState<Job | null>(null)
-  const [history, setHistory] = React.useState<Job[]>(() => {
-    const raw = window.sessionStorage.getItem('video-parser-history')
-    return raw ? (JSON.parse(raw) as Job[]) : []
-  })
-  const [isSubmitting, setIsSubmitting] = React.useState(false)
-  const [message, setMessage] = React.useState<string | null>(null)
-  const [token, setToken] = React.useState(() => window.localStorage.getItem('video-parser-token') || '')
-  const [user, setUser] = React.useState<User | null>(null)
-  const [quota, setQuota] = React.useState<Quota | null>(null)
-
-  React.useEffect(() => {
-    window.sessionStorage.setItem('video-parser-history', JSON.stringify(history.slice(0, 8)))
-  }, [history])
-
-  React.useEffect(() => {
-    void refreshMe(token)
-  }, [token])
-
-  React.useEffect(() => {
-    if (!job || ['completed', 'failed', 'expired'].includes(job.status)) return
-    const timer = window.setInterval(async () => {
-      const next = await fetchJob(job.job_id)
-      if (next) {
-        setJob(next)
-        setHistory((items) => [next, ...items.filter((item) => item.job_id !== next.job_id)].slice(0, 8))
-      }
-    }, 1500)
-    return () => window.clearInterval(timer)
-  }, [job])
-
-  async function apiFetch(path: string, options: RequestInit = {}, authToken = token) {
-    const headers = new Headers(options.headers)
-    if (authToken) headers.set('Authorization', `Bearer ${authToken}`)
-    return fetch(path, { ...options, headers })
-  }
-
-  async function adminRequest<T>(path: string, options: RequestInit = {}) {
-    const response = await apiFetch(path, options)
-    if (!response.ok) throw new Error(await readError(response))
-    if (response.status === 204) return undefined as T
-    return (await response.json()) as T
-  }
-
-  async function refreshMe(authToken = token) {
-    try {
-      const response = await apiFetch('/api/me', {}, authToken)
-      if (!response.ok) throw new Error(await readError(response))
-      const body = (await response.json()) as MeResponse
-      setUser(body.user)
-      setQuota(body.quota)
-    } catch {
-      if (authToken) {
-        window.localStorage.removeItem('video-parser-token')
-        setToken('')
-      }
-      setUser(null)
-      setQuota(null)
-    }
-  }
-
-  async function fetchJob(jobId: string) {
-    try {
-      const response = await apiFetch(`/api/jobs/${jobId}`)
-      if (!response.ok) throw new Error(await readError(response))
-      return (await response.json()) as Job
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : '任务查询失败')
-      return null
-    }
-  }
-
-  async function submit(event: React.FormEvent) {
-    event.preventDefault()
-    setMessage(null)
-    const value = url.trim()
-    if (!value || !/^https?:\/\//i.test(value)) {
-      setMessage('请输入有效的 http/https 视频链接。')
-      return
-    }
-    setIsSubmitting(true)
-    try {
-      const response = await apiFetch('/api/jobs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: value }),
-      })
-      if (!response.ok) throw new Error(await readError(response))
-      const body = (await response.json()) as { job_id: string }
-      void refreshMe()
-      const next = await fetchJob(body.job_id)
-      if (next) {
-        setJob(next)
-        setHistory((items) => [next, ...items].slice(0, 8))
-      }
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : '提交失败')
-    } finally {
-      setIsSubmitting(false)
-    }
-  }
-
-  async function handleAuth(mode: 'login' | 'register', username: string, password: string) {
-    setMessage(null)
-    const response = await fetch(`/api/auth/${mode}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
-    })
-    if (!response.ok) throw new Error(await readError(response))
-    const body = (await response.json()) as AuthResponse
-    window.localStorage.setItem('video-parser-token', body.token)
-    setToken(body.token)
-    setUser(body.user)
-    setQuota(body.quota)
-  }
-
-  function logout() {
-    window.localStorage.removeItem('video-parser-token')
-    setToken('')
-    setUser(null)
-    void refreshMe('')
-  }
-
-  async function copyDownloadLink(downloadUrl?: string | null) {
-    if (!downloadUrl) return
-    await navigator.clipboard.writeText(new URL(downloadUrl, window.location.origin).toString())
-    setMessage('下载链接已复制。')
-  }
-
-  const visibleJob = job ?? demoJob
-
-  return (
-    <main className="app-shell">
-      <header className="top-nav">
-        <a className="brand" href="#">
-          <span className="brand-mark"><Play size={15} fill="currentColor" /></span>
-          影链工坊
-        </a>
-        <nav>
-          <a href="#platforms">支持平台</a>
-          <a href="#limits">安全限制</a>
-          <a href="#notice">免责声明</a>
-        </nav>
-        <HeaderAccount
-          quota={quota}
-          user={user}
-          onAuth={handleAuth}
-          adminRequest={adminRequest}
-          onLogout={logout}
-          onCookies={() => undefined}
-        />
-      </header>
-
-      <section className="hero-grid">
-        <div className="hero-copy">
-          <h1>影链工坊</h1>
-          <p>输入链接，自动完成平台识别、视频下载与音视频合并。</p>
-
-          <form className="parser-form" onSubmit={submit}>
-            <label htmlFor="video-url">视频链接</label>
-            <div className="input-row">
-              <Link2 size={20} />
-              <input
-                id="video-url"
-                value={url}
-                onChange={(event) => setUrl(event.target.value)}
-                placeholder="粘贴 YouTube / TikTok / Instagram / Bilibili 链接"
-                autoComplete="off"
-              />
-              <button type="submit" disabled={isSubmitting}>
-                {isSubmitting ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
-                开始解析
-              </button>
-            </div>
-          </form>
-
-          {message && (
-            <div className="inline-alert" role="status">
-              <AlertTriangle size={16} />
-              {message}
-            </div>
-          )}
-
-          <p className="quota-line">{quotaText(quota)}，会员不受每日次数限制。</p>
-
-        </div>
-
-        <TaskPanel job={visibleJob} onCopy={copyDownloadLink} />
-      </section>
-
-      <section className="lower-grid">
-        <HistoryPanel history={history.length ? history : [demoJob]} />
-        <InfoPanel />
-      </section>
-
-      <FooterInfo quota={quota} />
-    </main>
-  )
 }
 
 function App() {
@@ -600,38 +360,65 @@ function App() {
   const [isCollectionParsing, setIsCollectionParsing] = React.useState(false)
   const [isBatchCreating, setIsBatchCreating] = React.useState(false)
   const [message, setMessage] = React.useState<string | null>(null)
-  const [token, setToken] = React.useState(() => window.localStorage.getItem('video-parser-token') || '')
-  const [user, setUser] = React.useState<User | null>(null)
-  const [quota, setQuota] = React.useState<Quota | null>(null)
+  const [clientToken, setClientToken] = React.useState('')
+  const [adminToken, setAdminToken] = React.useState(() => window.localStorage.getItem('video-parser-admin-token') || '')
+  const [admin, setAdmin] = React.useState<User | null>(null)
+  const [sessionReady, setSessionReady] = React.useState(false)
 
-  async function apiFetch(path: string, options: RequestInit = {}, authToken = token) {
+  async function apiFetch(path: string, options: RequestInit = {}, authToken = clientToken) {
     const headers = new Headers(options.headers)
     if (authToken) headers.set('Authorization', `Bearer ${authToken}`)
     return fetch(path, { ...options, headers })
   }
 
   async function adminRequest<T>(path: string, options: RequestInit = {}) {
+    const response = await apiFetch(path, options, adminToken)
+    if (!response.ok) throw new Error(await readError(response))
+    if (response.status === 204) return undefined as T
+    return (await response.json()) as T
+  }
+
+  async function clientRequest<T>(path: string, options: RequestInit = {}) {
     const response = await apiFetch(path, options)
     if (!response.ok) throw new Error(await readError(response))
     if (response.status === 204) return undefined as T
     return (await response.json()) as T
   }
 
-  async function refreshMe(authToken = token) {
+  async function initializeBrowserSession() {
+    const savedToken = window.localStorage.getItem('video-parser-browser-token') || ''
+    try {
+      const response = await apiFetch('/api/browser-session', { method: 'POST' }, savedToken)
+      if (!response.ok) throw new Error(await readError(response))
+      const body = (await response.json()) as BrowserSessionResponse
+      window.localStorage.setItem('video-parser-browser-token', body.token)
+      setClientToken(body.token)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '浏览器私有会话初始化失败，请刷新页面。')
+    } finally {
+      setSessionReady(true)
+    }
+  }
+
+  async function refreshAdmin(authToken = adminToken) {
+    if (!authToken) {
+      setAdmin(null)
+      return
+    }
     try {
       const response = await apiFetch('/api/me', {}, authToken)
       if (!response.ok) throw new Error(await readError(response))
       const body = (await response.json()) as MeResponse
-      setUser(body.user)
-      setQuota(body.quota)
+      if (body.user?.role !== 'admin') throw new Error('需要管理员权限。')
+      setAdmin(body.user)
     } catch {
-      if (authToken) window.localStorage.removeItem('video-parser-token')
-      setUser(null)
-      setQuota(null)
+      window.localStorage.removeItem('video-parser-admin-token')
+      setAdminToken('')
+      setAdmin(null)
     }
   }
 
-  async function refreshHistory(authToken = token) {
+  async function refreshHistory(authToken = clientToken) {
     try {
       const response = await apiFetch('/api/jobs', {}, authToken)
       if (response.ok) {
@@ -646,7 +433,7 @@ function App() {
     return []
   }
 
-  async function refreshCookies(authToken = token) {
+  async function refreshCookies(authToken = clientToken) {
     if (!authToken) {
       setCookieProfiles([])
       return []
@@ -664,34 +451,22 @@ function App() {
   }
 
   React.useEffect(() => {
-    void refreshMe(token)
-    void refreshHistory(token)
-    void refreshCookies(token)
-  }, [token])
+    void initializeBrowserSession()
+    void refreshAdmin(adminToken)
+  }, [])
 
   React.useEffect(() => {
-    if (!job || ['completed', 'failed', 'cancelled', 'expired'].includes(job.status)) return
-    const source = new EventSource(`/api/jobs/${job.job_id}/events`)
-    source.onmessage = (event) => {
-      const next = JSON.parse(event.data) as Job
-      setJob(next)
-      setHistory((items) => [next, ...items.filter((item) => item.job_id !== next.job_id)])
-      if (['completed', 'failed', 'cancelled', 'expired'].includes(next.status)) {
-        source.close()
-        void refreshMe()
-        void refreshHistory()
-      }
-    }
-    source.onerror = () => source.close()
-    return () => source.close()
-  }, [job?.job_id, job?.status])
+    if (!clientToken) return
+    void refreshHistory(clientToken)
+    void refreshCookies(clientToken)
+  }, [clientToken])
 
   const hasActiveHistory = history.some((item) => ['queued', 'parsing', 'downloading', 'transcribing', 'merging'].includes(item.status))
   React.useEffect(() => {
     if (!hasActiveHistory) return
     const timer = window.setInterval(() => void refreshHistory(), 2000)
     return () => window.clearInterval(timer)
-  }, [hasActiveHistory, token])
+  }, [hasActiveHistory, clientToken])
 
   async function parseUrl(event: React.FormEvent) {
     event.preventDefault()
@@ -762,10 +537,6 @@ function App() {
       setMessage('请先扫描一个包含公开视频的主页。')
       return
     }
-    if (quota && !quota.unlimited && (quota.remaining ?? 0) < urls.length) {
-      setMessage(`当前剩余额度不足：需要 ${urls.length} 次，剩余 ${quota.remaining ?? 0} 次。`)
-      return
-    }
     setIsBatchCreating(true)
     try {
       const response = await apiFetch('/api/jobs/batch', {
@@ -784,7 +555,6 @@ function App() {
       })
       if (!response.ok) throw new Error(await readError(response))
       const body = (await response.json()) as BatchJobCreateResponse
-      setQuota(body.quota)
       const items = await refreshHistory()
       const first = items.find((item) => item.job_id === body.jobs[0]?.job_id) || items[0]
       if (first) setJob(first)
@@ -826,7 +596,6 @@ function App() {
       const next = (await nextResponse.json()) as Job
       setJob(next)
       setHistory((items) => [next, ...items.filter((item) => item.job_id !== next.job_id)])
-      void refreshMe()
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '任务创建失败')
     } finally {
@@ -848,25 +617,24 @@ function App() {
     }
   }
 
-  async function handleAuth(mode: 'login' | 'register', username: string, password: string) {
-    const response = await fetch(`/api/auth/${mode}`, {
+  async function handleAdminLogin(username: string, password: string) {
+    const response = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     })
     if (!response.ok) throw new Error(await readError(response))
     const body = (await response.json()) as AuthResponse
-    window.localStorage.setItem('video-parser-token', body.token)
-    setToken(body.token)
-    setUser(body.user)
-    setQuota(body.quota)
+    if (body.user.role !== 'admin') throw new Error('需要管理员权限。')
+    window.localStorage.setItem('video-parser-admin-token', body.token)
+    setAdminToken(body.token)
+    setAdmin(body.user)
   }
 
-  function logout() {
-    window.localStorage.removeItem('video-parser-token')
-    setToken('')
-    setUser(null)
-    setCookieProfiles([])
+  function logoutAdmin() {
+    window.localStorage.removeItem('video-parser-admin-token')
+    setAdminToken('')
+    setAdmin(null)
   }
 
   async function copyDownloadLink(downloadUrl?: string | null) {
@@ -876,20 +644,18 @@ function App() {
   }
 
   const selectedSubtitle = parsed?.subtitles.find((item) => item.language === subtitle)
-  const collectionQuotaEnough = !collection || !quota || quota.unlimited || (quota.remaining ?? 0) >= collection.items.length
-
   return (
     <main className="app-shell app-v2">
       <header className="top-nav">
         <a className="brand" href="#top"><span className="brand-mark"><Play size={15} fill="currentColor" /></span>影链工坊 <em>2.2</em></a>
         <nav><a href="#workspace">下载工作台</a><a href="#platforms">支持平台</a><a href="#notice">使用说明</a></nav>
-        <HeaderAccount quota={quota} user={user} onAuth={handleAuth} adminRequest={adminRequest} onLogout={logout} onCookies={() => setCookieManagerOpen(true)} />
+        <HeaderAccount admin={admin} onAdminLogin={handleAdminLogin} adminRequest={adminRequest} onLogout={logoutAdmin} onCookies={() => setCookieManagerOpen(true)} sessionReady={sessionReady && Boolean(clientToken)} />
       </header>
 
       <section className="v2-intro" id="top">
         <span className="version-pill"><Zap size={14} />Powered by yt-dlp · Web 下载中心</span>
         <h1>粘贴链接，选择你真正需要的格式。</h1>
-        <p>画质、封面、字幕和批量任务，一处完成。文件仅临时保存在你的服务器。</p>
+        <p>无需注册、无需登录、不限下载次数。画质、封面、字幕、文案和主页批量任务，一处完成。</p>
       </section>
 
       <section className="workbench" id="workspace">
@@ -898,12 +664,10 @@ function App() {
             <button className={inputMode === 'single' ? 'active' : ''} type="button" onClick={() => { setInputMode('single'); setMessage(null) }}>单条解析</button>
             <button className={inputMode === 'batch' ? 'active' : ''} type="button" onClick={() => { setInputMode('batch'); setMessage(null) }}>批量下载</button>
           </div>
-          {user && (
-            <div className="cookie-status-bar">
-              <span><Cookie size={15} />{cookieProfiles.length ? `已接入 ${cookieProfiles.length} 个平台登录状态` : '当前使用公开解析'}</span>
-              <button type="button" onClick={() => setCookieManagerOpen(true)}>{cookieProfiles.length ? '管理平台登录' : '扫码登录 / Cookie'}</button>
-            </div>
-          )}
+          <div className="cookie-status-bar">
+            <span><Cookie size={15} />{cookieProfiles.length ? `当前浏览器已接入 ${cookieProfiles.length} 个平台账号` : '无需本站账号，当前使用公开解析'}</span>
+            <button type="button" onClick={() => setCookieManagerOpen(true)} disabled={!sessionReady || !clientToken}>{cookieProfiles.length ? '管理平台账号' : '扫码登录 / Cookie'}</button>
+          </div>
 
           {inputMode === 'single' ? (
             <form className="parser-form parser-form-v2" onSubmit={parseUrl}>
@@ -911,7 +675,7 @@ function App() {
               <div className="input-row">
                 <Link2 size={20} />
                 <input id="video-url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="粘贴 YouTube / 抖音 / Bilibili / TikTok 等链接" autoComplete="off" />
-                <button type="submit" disabled={isParsing}>
+                <button type="submit" disabled={isParsing || !sessionReady || !clientToken}>
                   {isParsing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}{isParsing ? '正在解析' : '解析链接'}
                 </button>
               </div>
@@ -923,9 +687,9 @@ function App() {
                 <div className="collection-link-row">
                   <div className="collection-link-input"><Link2 size={19} /><input id="collection-url" value={collectionUrl} onChange={(event) => { setCollectionUrl(event.target.value); setCollection(null) }} placeholder="可粘贴整段分享文案、主页短链或频道链接" autoComplete="off" /></div>
                   <label className="collection-limit"><span>扫描数量</span><select value={collectionLimit} onChange={(event) => { setCollectionLimit(Number(event.target.value)); setCollection(null) }}><option value={10}>最近 10 个</option><option value={20}>最近 20 个</option><option value={50}>最近 50 个</option></select></label>
-                  <button className="scan-button" type="submit" disabled={isCollectionParsing || !collectionUrl.trim()}>{isCollectionParsing ? <Loader2 className="spin" size={17} /> : <Search size={17} />}{isCollectionParsing ? '正在扫描' : '扫描主页'}</button>
+                  <button className="scan-button" type="submit" disabled={isCollectionParsing || !collectionUrl.trim() || !sessionReady || !clientToken}>{isCollectionParsing ? <Loader2 className="spin" size={17} /> : <Search size={17} />}{isCollectionParsing ? '正在扫描' : '扫描主页'}</button>
                 </div>
-                <p className="batch-note">支持抖音短链及 YouTube、TikTok、Bilibili 等主页。扫描不消耗下载额度；登录后可在“我的 Cookie”中接入各平台登录状态。</p>
+                <p className="batch-note">支持抖音短链及 YouTube、TikTok、Bilibili 等主页。无需本站账号；遇到登录内容时，可用当前浏览器的扫码登录或 Cookie。</p>
               </form>
 
               {isCollectionParsing && <div className="collection-loading"><Loader2 className="spin" size={26} /><div><strong>正在读取主页视频列表</strong><span>主页内容较多时可能需要几十秒。</span></div></div>}
@@ -954,11 +718,10 @@ function App() {
                     <label><input type="checkbox" checked={batchIncludeDescription} onChange={(event) => setBatchIncludeDescription(event.target.checked)} />附带作品标题、描述与话题文案</label>
                     <label><input type="checkbox" checked={batchIncludeThumbnail} onChange={(event) => setBatchIncludeThumbnail(event.target.checked)} />附带原始封面</label>
                   </div>
-                  {!collectionQuotaEnough && <p className="collection-warning"><AlertTriangle size={14} />下载额度不足：需要 {collection.items.length} 次，当前剩余 {quota?.remaining ?? 0} 次。</p>}
-                  <button className="primary-download" type="button" onClick={createBatch} disabled={isBatchCreating || !collectionQuotaEnough}>
+                  <button className="primary-download" type="button" onClick={createBatch} disabled={isBatchCreating || !sessionReady || !clientToken}>
                     {isBatchCreating ? <Loader2 className="spin" size={18} /> : <ClipboardCopy size={18} />}{isBatchCreating ? '正在加入下载队列' : `全部下载这 ${collection.items.length} 个视频`}
                   </button>
-                  <p className="batch-note">确认后每个视频计一次额度，并按服务器并发上限自动排队，不会同时挤占全部带宽。</p>
+                  <p className="batch-note">下载次数不限，任务会按服务器并发能力自动排队，避免同时挤占全部带宽。</p>
                 </section>
               )}
             </div>
@@ -970,7 +733,7 @@ function App() {
             <div className="empty-parser">
               <div><Link2 size={28} /></div>
               <h2>从一个公开链接开始</h2>
-              <p>先读取视频信息和可用格式，不会立即消耗下载额度。</p>
+              <p>先读取视频信息和可用格式，确认后再加入下载队列。</p>
             </div>
           )}
           {inputMode === 'single' && isParsing && <div className="empty-parser parsing"><Loader2 className="spin" size={30} /><h2>正在连接解析引擎</h2><p>部分平台可能需要几秒钟完成格式探测。</p></div>}
@@ -1013,8 +776,8 @@ function App() {
                 <label><input type="checkbox" checked={includeThumbnail} onChange={(event) => setIncludeThumbnail(event.target.checked)} />附带原始封面</label>
                 {(includeDescription || includeThumbnail || (mediaType !== 'transcript' && transcriptMode !== 'none')) && <small>多个文件会自动打包为 ZIP。</small>}
               </div>
-              <button className="primary-download" type="button" onClick={createJob} disabled={isCreating}>
-                {isCreating ? <Loader2 className="spin" size={18} /> : mediaType === 'transcript' ? <FileText size={18} /> : <Download size={18} />}{isCreating ? '正在创建任务' : `${mediaType === 'transcript' ? '开始提取文案' : '加入下载队列'} · ${quotaText(quota)}`}
+              <button className="primary-download" type="button" onClick={createJob} disabled={isCreating || !sessionReady || !clientToken}>
+                {isCreating ? <Loader2 className="spin" size={18} /> : mediaType === 'transcript' ? <FileText size={18} /> : <Download size={18} />}{isCreating ? '正在创建任务' : `${mediaType === 'transcript' ? '开始提取文案' : '加入下载队列'} · 不限次数`}
               </button>
             </article>
           )}
@@ -1024,8 +787,8 @@ function App() {
       </section>
 
       <section className="lower-grid"><HistoryPanel history={history} /><InfoPanel /></section>
-      <FooterInfo quota={quota} />
-      {cookieManagerOpen && user && <CookieManager request={adminRequest} fetchResponse={apiFetch} profiles={cookieProfiles} onChanged={() => refreshCookies()} onClose={() => setCookieManagerOpen(false)} />}
+      <FooterInfo />
+      {cookieManagerOpen && clientToken && <CookieManager request={clientRequest} fetchResponse={apiFetch} profiles={cookieProfiles} onChanged={() => refreshCookies()} onClose={() => setCookieManagerOpen(false)} />}
     </main>
   )
 }
@@ -1078,23 +841,22 @@ function QueuePanel({
 }
 
 function HeaderAccount({
-  quota,
-  user,
-  onAuth,
+  admin,
+  onAdminLogin,
   adminRequest,
   onLogout,
   onCookies,
+  sessionReady,
 }: {
-  quota: Quota | null
-  user: User | null
-  onAuth: (mode: 'login' | 'register', username: string, password: string) => Promise<void>
+  admin: User | null
+  onAdminLogin: (username: string, password: string) => Promise<void>
   adminRequest: AdminRequest
   onLogout: () => void
   onCookies: () => void
+  sessionReady: boolean
 }) {
   const [open, setOpen] = React.useState(false)
   const [adminOpen, setAdminOpen] = React.useState(false)
-  const [mode, setMode] = React.useState<'login' | 'register'>('login')
   const [username, setUsername] = React.useState('')
   const [password, setPassword] = React.useState('')
   const [busy, setBusy] = React.useState(false)
@@ -1105,7 +867,7 @@ function HeaderAccount({
     setBusy(true)
     setError(null)
     try {
-      await onAuth(mode, username.trim(), password)
+      await onAdminLogin(username.trim(), password)
       setOpen(false)
     } catch (err) {
       setError(err instanceof Error ? err.message : '登录失败')
@@ -1114,12 +876,15 @@ function HeaderAccount({
     }
   }
 
-  if (user) {
+  if (admin) {
     return (
       <div className="header-account">
+        <button className="account-chip" type="button" onClick={onCookies} disabled={!sessionReady}>
+          <Cookie size={15} />平台登录
+        </button>
         <button className="account-chip account-trigger" type="button" onClick={() => setOpen((value) => !value)}>
           <UserRound size={15} />
-          {user.username} · {roleText[user.role]} · {quotaText(quota)}
+          {admin.username} · 管理员
         </button>
         <button className="nav-logout" type="button" onClick={onLogout}>
           <LogOut size={16} />
@@ -1128,27 +893,14 @@ function HeaderAccount({
         {open && (
           <section className="auth-popover account-menu">
             <span className="caption">Account</span>
-            <h2>{user.username}</h2>
-            <p>{roleText[user.role]} · {quotaText(quota)}</p>
-            {user.role === 'admin' && (
-              <button
-                className="menu-action"
-                type="button"
-                onClick={() => {
-                  setAdminOpen(true)
-                }}
-              >
-                <UsersRound size={16} />
-                管理后台
-              </button>
-            )}
-            <button className="menu-action" type="button" onClick={() => { setOpen(false); onCookies() }}>
-              <Cookie size={16} />
-              我的 Cookie
+            <h2>{admin.username}</h2>
+            <p>站点管理员</p>
+            <button className="menu-action" type="button" onClick={() => setAdminOpen(true)}>
+              <UsersRound size={16} />管理后台
             </button>
           </section>
         )}
-        {adminOpen && user.role === 'admin' && (
+        {adminOpen && (
           <AdminDashboard
             adminRequest={adminRequest}
             onClose={() => setAdminOpen(false)}
@@ -1160,29 +912,25 @@ function HeaderAccount({
 
   return (
     <div className="header-account auth-popover-wrap">
+      <button className="account-chip" type="button" onClick={onCookies} disabled={!sessionReady}>
+        <Cookie size={15} />平台登录
+      </button>
       <button className="account-chip account-trigger" type="button" onClick={() => setOpen((value) => !value)}>
-        <UserRound size={15} />
-        登录 / 注册
+        <Shield size={15} />管理员
       </button>
       {open && (
         <section className="auth-popover">
-          <div className="auth-tabs">
-            <button className={mode === 'login' ? 'active' : ''} type="button" onClick={() => setMode('login')}>
-              登录
-            </button>
-            <button className={mode === 'register' ? 'active' : ''} type="button" onClick={() => setMode('register')}>
-              注册
-            </button>
-          </div>
+          <span className="caption">Admin only</span>
+          <h2>管理员登录</h2>
           <form className="auth-form" onSubmit={submit}>
-            <input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="用户名" />
-            <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="密码" type="password" />
+            <input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="管理员用户名" autoComplete="username" />
+            <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="管理员密码" type="password" autoComplete="current-password" />
             <button type="submit" disabled={busy}>
-              {busy ? <Loader2 className="spin" size={16} /> : <UserRound size={16} />}
-              {mode === 'login' ? '登录账号' : '创建账号'}
+              {busy ? <Loader2 className="spin" size={16} /> : <Shield size={16} />}
+              进入后台
             </button>
           </form>
-          <p className="quota-note">{quotaText(quota)}。会员可不受每日次数限制。</p>
+          <p className="quota-note">普通访客无需账号，可直接无限下载。</p>
           {error && <p className="auth-error">{error}</p>}
         </section>
       )}
@@ -1354,7 +1102,7 @@ function CookieManager({
       <div className="admin-backdrop" onClick={() => void closeManager()} />
       <div className="admin-dialog cookie-dialog">
         <header className="admin-dialog-header">
-          <div><span className="caption">Private login state</span><h2>我的平台登录</h2><p>抖音与 TikTok 可直接扫码；系统不接收账号和密码，每位用户的 Cookie 独立加密保存。</p></div>
+          <div><span className="caption">Private browser state</span><h2>当前浏览器的平台账号</h2><p>抖音与 TikTok 可直接扫码；无需注册本站账号，Cookie 按当前浏览器私有身份隔离并加密保存。</p></div>
           <button className="secondary-button" type="button" onClick={() => void closeManager()}>关闭</button>
         </header>
         <div className="cookie-security"><Shield size={18} /><div><strong>扫码发生在平台官方页面</strong><p>二维码会话最多等待 5 分钟；登录成功后只保留所选平台域名的 Cookie，直到平台失效、退出登录或你主动删除。</p></div></div>
@@ -1519,7 +1267,7 @@ function InfoPanel() {
   )
 }
 
-function FooterInfo({ quota }: { quota: Quota | null }) {
+function FooterInfo() {
   return (
     <section className="footer-info" aria-label="安全限制与免责声明">
       <article className="footer-card" id="limits">
@@ -1528,10 +1276,9 @@ function FooterInfo({ quota }: { quota: Quota | null }) {
           <h2>安全限制</h2>
         </div>
         <div className="limit-grid">
-          <span><Clock3 size={16} />{quotaText(quota)}</span>
-          <span><UserRound size={16} />访客每日 3 个</span>
-          <span><FileVideo size={16} />普通用户每日 10 个</span>
-          <span><Crown size={16} />会员与管理员无限制</span>
+          <span><Download size={16} />无需注册，无限下载</span>
+          <span><Cookie size={16} />平台账号按浏览器隔离</span>
+          <span><Shield size={16} />Cookie 加密保存</span>
           <span><Gauge size={16} />默认 512 MB 文件上限</span>
           <span><FileText size={16} />原生字幕优先，AI 转写兜底</span>
         </div>
@@ -1551,41 +1298,26 @@ function FooterInfo({ quota }: { quota: Quota | null }) {
 function AdminDashboard({ adminRequest, onClose }: { adminRequest: AdminRequest; onClose: () => void }) {
   const [tab, setTab] = React.useState('overview')
   const [overview, setOverview] = React.useState<AdminOverview | null>(null)
-  const [users, setUsers] = React.useState<User[]>([])
   const [jobs, setJobs] = React.useState<Job[]>([])
   const [apiKeys, setApiKeys] = React.useState<ApiKeyItem[]>([])
   const [cookieProfiles, setCookieProfiles] = React.useState<CookieProfile[]>([])
   const [cookieName, setCookieName] = React.useState('default')
   const [cookieFile, setCookieFile] = React.useState<File | null>(null)
   const [platforms, setPlatforms] = React.useState<PlatformsResponse | null>(null)
-  const [query, setQuery] = React.useState('')
-  const [roleFilter, setRoleFilter] = React.useState<'all' | UserRole>('all')
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const [newApiName, setNewApiName] = React.useState('Codex Agent')
   const [newApiLimit, setNewApiLimit] = React.useState('100')
   const [createdKey, setCreatedKey] = React.useState<string | null>(null)
-  const [newUserName, setNewUserName] = React.useState('')
-  const [newUserPassword, setNewUserPassword] = React.useState('')
-  const [newUserRole, setNewUserRole] = React.useState<UserRole>('member')
-  const [newUserMemberTerm, setNewUserMemberTerm] = React.useState<'forever' | '30d'>('forever')
-  const [newUserLimit, setNewUserLimit] = React.useState('')
 
   const tabs = [
     ['overview', '总览', LayoutDashboard],
-    ['users', '用户会员', UsersRound],
     ['api', 'API Key', KeyRound],
     ['cookies', 'Cookie 配置', Cookie],
     ['jobs', '任务缓存', Database],
     ['platforms', '支持平台', Filter],
     ['docs', 'API 对接', TerminalSquare],
   ] as const
-
-  const filteredUsers = users.filter((item) => {
-    const matchesQuery = item.username.toLowerCase().includes(query.toLowerCase()) || String(item.id).includes(query)
-    const matchesRole = roleFilter === 'all' || item.role === roleFilter
-    return matchesQuery && matchesRole
-  })
 
   React.useEffect(() => {
     void refreshAll()
@@ -1595,16 +1327,14 @@ function AdminDashboard({ adminRequest, onClose }: { adminRequest: AdminRequest;
     setBusy(true)
     setError(null)
     try {
-      const [overviewBody, usersBody, keysBody, jobsBody, platformsBody, cookiesBody] = await Promise.all([
+      const [overviewBody, keysBody, jobsBody, platformsBody, cookiesBody] = await Promise.all([
         adminRequest<AdminOverview>('/api/admin/overview'),
-        adminRequest<User[]>('/api/admin/users'),
         adminRequest<ApiKeyItem[]>('/api/admin/api-keys'),
         adminRequest<Job[]>('/api/admin/jobs'),
         adminRequest<PlatformsResponse>('/api/v1/platforms'),
         adminRequest<CookieProfile[]>('/api/admin/cookies'),
       ])
       setOverview(overviewBody)
-      setUsers(usersBody)
       setApiKeys(keysBody)
       setJobs(jobsBody)
       setPlatforms(platformsBody)
@@ -1613,53 +1343,6 @@ function AdminDashboard({ adminRequest, onClose }: { adminRequest: AdminRequest;
       setError(err instanceof Error ? err.message : '后台数据加载失败')
     } finally {
       setBusy(false)
-    }
-  }
-
-  async function updateUser(userId: number, payload: Record<string, unknown>) {
-    const next = await adminRequest<User>(`/api/admin/users/${userId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-    setUsers((items) => items.map((item) => (item.id === userId ? next : item)))
-    void refreshOverview()
-  }
-
-  async function deleteUser(userId: number) {
-    await adminRequest<void>(`/api/admin/users/${userId}`, { method: 'DELETE' })
-    setUsers((items) => items.filter((item) => item.id !== userId))
-    void refreshOverview()
-  }
-
-  async function createUser(event: React.FormEvent) {
-    event.preventDefault()
-    setError(null)
-    const expires = newUserRole === 'member' && newUserMemberTerm === '30d'
-      ? Math.floor(Date.now() / 1000) + 30 * 86400
-      : null
-    try {
-      const created = await adminRequest<User>('/api/admin/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: newUserName.trim(),
-          password: newUserPassword,
-          role: newUserRole,
-          status: 'active',
-          member_expires_at: expires,
-          daily_limit_override: newUserLimit.trim() ? Number(newUserLimit) : null,
-        }),
-      })
-      setUsers((items) => [created, ...items])
-      setNewUserName('')
-      setNewUserPassword('')
-      setNewUserRole('member')
-      setNewUserMemberTerm('forever')
-      setNewUserLimit('')
-      void refreshOverview()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '用户创建失败')
     }
   }
 
@@ -1769,86 +1452,12 @@ function AdminDashboard({ adminRequest, onClose }: { adminRequest: AdminRequest;
 
           {tab === 'overview' && overview && (
             <div className="admin-metrics">
-              <Metric title="用户总数" value={overview.users_total} icon={<UsersRound size={18} />} />
-              <Metric title="会员" value={overview.users_member} icon={<Crown size={18} />} />
-              <Metric title="今日下载" value={overview.today_downloads} icon={<Download size={18} />} />
+              <Metric title="累计任务" value={overview.jobs_total} icon={<Database size={18} />} />
+              <Metric title="完成任务" value={overview.jobs_completed} icon={<CheckCircle2 size={18} />} />
+              <Metric title="失败任务" value={overview.jobs_failed} icon={<AlertTriangle size={18} />} />
               <Metric title="API Key" value={`${overview.api_keys_active}/${overview.api_keys_total}`} icon={<KeyRound size={18} />} />
               <Metric title="运行任务" value={overview.jobs_running} icon={<Activity size={18} />} />
               <Metric title="缓存占用" value={formatBytes(overview.storage_bytes)} icon={<Database size={18} />} />
-            </div>
-          )}
-
-          {tab === 'users' && (
-            <div className="admin-section">
-              <form className="user-create" onSubmit={createUser}>
-                <input value={newUserName} onChange={(event) => setNewUserName(event.target.value)} placeholder="新用户名" autoComplete="off" />
-                <input value={newUserPassword} onChange={(event) => setNewUserPassword(event.target.value)} placeholder="初始密码，至少 8 位" type="password" autoComplete="new-password" />
-                <select value={newUserRole} onChange={(event) => setNewUserRole(event.target.value as UserRole)}>
-                  <option value="member">会员</option>
-                  <option value="user">普通用户</option>
-                  <option value="admin">管理员</option>
-                </select>
-                <select value={newUserMemberTerm} disabled={newUserRole !== 'member'} onChange={(event) => setNewUserMemberTerm(event.target.value as 'forever' | '30d')}>
-                  <option value="forever">永久会员</option>
-                  <option value="30d">30 天会员</option>
-                </select>
-                <input value={newUserLimit} onChange={(event) => setNewUserLimit(event.target.value)} placeholder="每日额度覆盖，可留空" inputMode="numeric" />
-                <button type="submit"><UserRound size={16} />新开用户</button>
-              </form>
-              <div className="admin-toolbar">
-                <label className="admin-search">
-                  <Search size={15} />
-                  <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索用户名或 ID" />
-                </label>
-                <select value={roleFilter} onChange={(event) => setRoleFilter(event.target.value as 'all' | UserRole)}>
-                  <option value="all">全部身份</option>
-                  <option value="user">普通用户</option>
-                  <option value="member">会员</option>
-                  <option value="admin">管理员</option>
-                </select>
-              </div>
-              <div className="admin-table users-table">
-                <div className="admin-row admin-row-head">
-                  <span>用户</span><span>身份</span><span>今日额度</span><span>会员到期</span><span>状态</span><span>操作</span>
-                </div>
-                {filteredUsers.map((item) => (
-                  <div className="admin-row" key={item.id}>
-                    <div><strong>{item.username}</strong><small>#{item.id} · {formatDate(item.created_at)}</small></div>
-                    <select value={item.role} onChange={(event) => updateUser(item.id, { role: event.target.value })}>
-                      <option value="user">普通用户</option>
-                      <option value="member">会员</option>
-                      <option value="admin">管理员</option>
-                    </select>
-                    <div className="quota-edit">
-                      <span>{item.unlimited ? '无限制' : `${item.daily_used}/${item.daily_limit ?? 10}`}</span>
-                      <button type="button" onClick={() => updateUser(item.id, { daily_used: 0 })}>重置</button>
-                    </div>
-                    <select
-                      value={item.member_expires_at ? '30d' : 'forever'}
-                      disabled={item.role !== 'member'}
-                      onChange={(event) => {
-                        const expires = event.target.value === '30d' ? Math.floor(Date.now() / 1000) + 30 * 86400 : null
-                        void updateUser(item.id, { member_expires_at: expires })
-                      }}
-                    >
-                      <option value="forever">永久</option>
-                      <option value="30d">30 天</option>
-                    </select>
-                    <button
-                      className={`status-toggle ${item.status === 'disabled' ? 'danger' : ''}`}
-                      type="button"
-                      onClick={() => updateUser(item.id, { status: item.status === 'active' ? 'disabled' : 'active' })}
-                    >
-                      {item.status === 'active' ? <CheckCircle2 size={15} /> : <Ban size={15} />}
-                      {item.status === 'active' ? '启用' : '禁用'}
-                    </button>
-                    <button className="danger-button" type="button" onClick={() => deleteUser(item.id)}>
-                      <Trash2 size={15} />
-                      删除
-                    </button>
-                  </div>
-                ))}
-              </div>
             </div>
           )}
 

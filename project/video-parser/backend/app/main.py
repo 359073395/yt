@@ -27,6 +27,7 @@ from .models import (
     ApiKeyUpdateRequest,
     AuthRequest,
     AuthResponse,
+    BrowserSessionResponse,
     BatchJobCreateRequest,
     BatchJobCreateResponse,
     BatchJobItemResponse,
@@ -233,16 +234,28 @@ async def diagnostics() -> dict[str, object]:
 
 @app.post("/api/auth/register", response_model=AuthResponse)
 async def register(payload: AuthRequest, request: Request) -> AuthResponse:
-    client_ip = client_ip_from_request(request, settings.trusted_proxy_headers)
-    user = auth_store.create_user(payload.username, payload.password)
-    return AuthResponse(token=auth_store.create_token(user), user=auth_store.user_public(user), quota=auth_store.quota_for(user, client_ip))
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail="普通用户注册已取消，无需账号即可无限下载。")
 
 
 @app.post("/api/auth/login", response_model=AuthResponse)
 async def login(payload: AuthRequest, request: Request) -> AuthResponse:
     client_ip = client_ip_from_request(request, settings.trusted_proxy_headers)
     user = auth_store.authenticate(payload.username, payload.password)
+    if user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="普通用户登录已取消，请直接使用下载功能。")
     return AuthResponse(token=auth_store.create_token(user), user=auth_store.user_public(user), quota=auth_store.quota_for(user, client_ip))
+
+
+@app.post("/api/browser-session", response_model=BrowserSessionResponse)
+async def browser_session(request: Request) -> BrowserSessionResponse:
+    client_ip = client_ip_from_request(request, settings.trusted_proxy_headers)
+    header = request.headers.get("authorization", "")
+    current_token = header.split(" ", 1)[1].strip() if header.lower().startswith("bearer ") else ""
+    current_user = auth_store.user_from_token(current_token) if current_token else None
+    if current_user and current_user.role == "browser":
+        return BrowserSessionResponse(token=current_token, quota=auth_store.quota_for(current_user, client_ip))
+    token, browser = auth_store.create_browser_token()
+    return BrowserSessionResponse(token=token, quota=auth_store.quota_for(browser, client_ip))
 
 
 @app.get("/api/me", response_model=MeResponse)
@@ -335,17 +348,13 @@ async def job_history(request: Request) -> list[JobPublic]:
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobPublic)
-async def get_job(job_id: str) -> JobPublic:
-    job = store.get(job_id)
-    if not job:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在。")
-    return public_job(job)
+async def get_job(job_id: str, request: Request) -> JobPublic:
+    return public_job(require_owned_job(job_id, request))
 
 
 @app.get("/api/jobs/{job_id}/events")
-async def job_events(job_id: str) -> StreamingResponse:
-    if not store.get(job_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在。")
+async def job_events(job_id: str, request: Request) -> StreamingResponse:
+    require_owned_job(job_id, request)
 
     async def stream():
         previous = ""

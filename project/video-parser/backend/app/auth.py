@@ -51,6 +51,8 @@ class ApiKeyAuth:
 
 
 class AuthStore:
+    BROWSER_ID_BASE = 1 << 62
+
     def __init__(
         self,
         database_path: Path,
@@ -259,6 +261,25 @@ class AuthStore:
         signature = hmac.new(self.secret, payload_b64.encode("utf-8"), hashlib.sha256).digest()
         return f"{payload_b64}.{base64.urlsafe_b64encode(signature).decode().rstrip('=')}"
 
+    def create_browser_token(self) -> tuple[str, AuthUser]:
+        created_at = int(time())
+        browser_id = self.BROWSER_ID_BASE | secrets.randbits(61)
+        user = AuthUser(
+            id=browser_id,
+            username="当前浏览器",
+            role="browser",
+            created_at=float(created_at),
+        )
+        payload = {
+            "browser": browser_id,
+            "iat": created_at,
+            "nonce": secrets.token_urlsafe(8),
+        }
+        payload_b64 = self._b64_json(payload)
+        signature = hmac.new(self.secret, payload_b64.encode("utf-8"), hashlib.sha256).digest()
+        token = f"{payload_b64}.{base64.urlsafe_b64encode(signature).decode().rstrip('=')}"
+        return token, user
+
     def user_from_token(self, token: str) -> AuthUser | None:
         try:
             payload_b64, signature_b64 = token.split(".", 1)
@@ -267,6 +288,16 @@ class AuthStore:
             if not hmac.compare_digest(actual, expected):
                 return None
             payload = json.loads(base64.urlsafe_b64decode(self._pad_b64(payload_b64)).decode("utf-8"))
+            if "browser" in payload:
+                browser_id = int(payload["browser"])
+                if browser_id < self.BROWSER_ID_BASE or browser_id >= (1 << 63):
+                    return None
+                return AuthUser(
+                    id=browser_id,
+                    username="当前浏览器",
+                    role="browser",
+                    created_at=float(payload["iat"]),
+                )
             user = self.get_user_by_id(int(payload["sub"]))
             return user if user and user.status == "active" else None
         except Exception:
@@ -281,7 +312,7 @@ class AuthStore:
     def require_user(self, request: Request) -> AuthUser:
         user = self.user_from_request(request)
         if not user:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录。")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="浏览器会话已失效，请刷新页面。")
         return user
 
     def require_admin(self, request: Request) -> AuthUser:
@@ -584,58 +615,12 @@ class AuthStore:
         }
 
     def quota_for(self, user: AuthUser | None, client_ip: str) -> QuotaPublic:
-        if user and self._is_unlimited(user):
-            return QuotaPublic(limit=None, used=0, remaining=None, unlimited=True)
-        subject_type, subject_key = self._quota_subject(user, client_ip)
-        limit = self._limit_for(user)
-        used = self._usage_count(subject_type, subject_key)
-        return QuotaPublic(
-            limit=limit,
-            used=used,
-            remaining=max(0, limit - used),
-            unlimited=False,
-        )
+        return QuotaPublic(limit=None, used=0, remaining=None, unlimited=True)
 
     def consume_quota(self, user: AuthUser | None, client_ip: str, amount: int = 1) -> QuotaPublic:
         if amount < 1 or amount > 50:
             raise ValueError("单次额度扣除数量必须在 1 到 50 之间。")
-        if user and self._is_unlimited(user):
-            return self.quota_for(user, client_ip)
-        subject_type, subject_key = self._quota_subject(user, client_ip)
-        today = self._today()
-        with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT count FROM daily_usage WHERE usage_date = ? AND subject_type = ? AND subject_key = ?",
-                (today, subject_type, subject_key),
-            ).fetchone()
-            used = int(row["count"]) if row else 0
-            limit = self._limit_for(user)
-            if used + amount > limit:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=(
-                        "今日下载次数已用完，开通会员后可无限下载。"
-                        if amount == 1
-                        else f"今日剩余额度不足，当前批量任务需要 {amount} 次下载额度。"
-                    ),
-                )
-            new_count = used + amount
-            conn.execute(
-                """
-                INSERT INTO daily_usage (usage_date, subject_type, subject_key, count)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(usage_date, subject_type, subject_key)
-                DO UPDATE SET count = excluded.count
-                """,
-                (today, subject_type, subject_key, new_count),
-            )
-        return QuotaPublic(
-            limit=limit,
-            used=new_count,
-            remaining=max(0, limit - new_count),
-            unlimited=False,
-        )
+        return self.quota_for(user, client_ip)
 
     def _usage_count(self, subject_type: str, subject_key: str) -> int:
         with self.connect() as conn:
@@ -658,7 +643,7 @@ class AuthStore:
 
     @staticmethod
     def _is_unlimited(user: AuthUser) -> bool:
-        if user.role == "admin":
+        if user.role in {"admin", "browser"}:
             return True
         if user.role != "member":
             return False

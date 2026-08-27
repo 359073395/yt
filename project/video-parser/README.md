@@ -1,12 +1,12 @@
 # 影链工坊 2.2
 
-基于官方 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 的自托管 Web 视频下载与文案中心。支持单条视频和创作者主页批量下载、用户私有 Cookie、平台原生字幕、faster-whisper AI 语音转写、TXT/SRT/VTT 文案以及封面和描述打包导出。
+基于官方 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 的自托管 Web 视频下载与文案中心。无需注册或登录本站，网页下载不限次数；支持单条视频和创作者主页批量下载、浏览器私有 Cookie、平台原生字幕、faster-whisper AI 语音转写、TXT/SRT/VTT 文案以及封面和描述打包导出。
 
 ## 2.2 功能
 
 - 主页批量下载：粘贴一个创作者主页、频道或播放列表链接，扫描后把其中的视频全部加入队列
 - 抖音主页扫描：可粘贴带中文的整段分享文案或 `v.douyin.com` 短链，自动展开并读取作者公开视频；图文作品不会误计为视频
-- 安全批量队列：单次可扫描最近 10、20 或 50 个视频，统一选择视频或音频，逐项计入额度
+- 安全批量队列：单次可扫描最近 10、20 或 50 个视频，统一选择视频、音频或文案，不限下载次数
 - 先解析再下载：展示封面、标题、作者、时长、真实分辨率、格式和预计大小
 - 视频格式选择：自动最佳画质或指定 yt-dlp 实际返回的格式；只有一个格式时不伪造清晰度选项
 - 封面：站内安全预览并支持下载原始封面
@@ -20,10 +20,10 @@
 - TikTok 分享链接：优先读取官方 Embed v2 并直接流式保存；oEmbed、移动端 API、多浏览器指纹与解析缓存自动降级
 - 持久化历史：SQLite 保存任务，服务更新或重启后仍可查看
 - 临时文件：到期自动清理，下载地址使用 15 分钟签名
-- 多用户：访客、普通用户、会员、管理员及每日额度
+- 免账号使用：取消普通用户注册和登录，浏览器自动获得私有身份，网页下载不限次数
 - API Key：可为智能体或其他服务配置独立额度和权限
-- 用户 Cookie：登录本站后导入各平台 Netscape cookies.txt；按用户隔离、加密保存并自动过滤其他网站条目
-- 扫码登录：抖音与 TikTok 使用平台官方二维码登录；单次等待 5 分钟，成功后按用户加密保存 Cookie
+- 浏览器 Cookie：无需本站账号即可导入各平台 Netscape cookies.txt；按浏览器隔离、加密保存并自动过滤其他网站条目
+- 扫码登录：抖音与 TikTok 使用平台官方二维码登录；单次等待 5 分钟，成功后按浏览器私有身份加密保存 Cookie
 - 管理员 Cookie：继续支持全站默认配置，为没有私有 Cookie 的任务提供降级
 - 新版引擎：`yt-dlp[default,curl-cffi]`、`yt-dlp-ejs`、Deno、FFmpeg、Chromium
 - 安全部署：非 root、只读容器根文件系统、移除 Linux capabilities
@@ -34,7 +34,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/359073395/yt/main/project/video-parser/deploy/install.sh) --port 9890
 ```
 
-已安装服务器更新时可以不传端口，脚本会保留现有 `.env`、端口、用户数据库、Cookie 和下载历史：
+已安装服务器更新时可以不传端口，脚本会保留现有 `.env`、端口、数据库、Cookie 和下载历史：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/359073395/yt/main/project/video-parser/deploy/install.sh)
@@ -60,23 +60,24 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 
 ## 从 1.0 / 2.0 升级
 
-2.2 继续使用原来的 `/data/video-parser.sqlite3` 和 Docker volume，不需要迁移账号、会员、历史任务、Cookie 或 API Key。升级脚本会自动：
+2.2.2 继续使用原来的 `/data/video-parser.sqlite3` 和 Docker volume，不需要迁移历史任务、Cookie 或 API Key。旧用户记录会保留在数据库中，但前台不再提供普通用户登录。升级脚本会自动：
 
 1. 保留 `.env` 和数据卷。
 2. 将旧默认管理员密码替换为随机密码。
-3. 拉取 2.2.1 镜像，自动增加任务字段并启动健康检查。
+3. 拉取 2.2.2 镜像，启动后验证精确版本和服务健康状态。
 4. 失败时回滚上一容器镜像。
 
 不要使用 `docker compose down --volumes` 更新，否则会删除数据库和历史文件。
 
 ## Cookie 配置
 
-普通用户登录本站后点击右上角账号菜单中的“我的 Cookie”。抖音和 TikTok 默认使用官方二维码扫码登录；其他平台或扫码不可用时仍可上传浏览器导出的 Netscape `cookies.txt`。系统只保留所选平台及其媒体域名的条目，其他网站 Cookie 会在加密前删除。
+点击页面右上角“平台登录”即可使用，无需注册或登录本站。抖音和 TikTok 默认使用官方二维码扫码；其他平台或扫码不可用时仍可上传浏览器导出的 Netscape `cookies.txt`。系统只保留所选平台及其媒体域名的条目，其他网站 Cookie 会在加密前删除。
 
-- 每个用户只能读取和删除自己的 Cookie。
+- 系统自动为当前浏览器生成不入用户表的私有身份；不同浏览器只能读取和删除自己的 Cookie。
+- 私有身份保存在浏览器站点数据中；清除站点数据后会生成新身份，之前保存的 Cookie 不会自动暴露给新身份。
 - 每个扫码会话使用独立浏览器上下文，最多等待 5 分钟；成功、取消或超时后立即关闭。
-- 登录成功后的 Cookie 不受 5 分钟限制，一直保存到平台失效、用户退出或主动删除。
-- 解析时会按链接平台自动选择当前用户的 Cookie，无需每次手工指定。
+- 扫码成功后的 Cookie 不受 5 分钟限制，一直保存到平台失效或你主动删除。
+- 解析时会按链接平台自动选择当前浏览器的 Cookie，无需每次手工指定。
 - 不接收平台账号和密码；建议使用专用低权限账号。
 - Cookie 过期后重新导出并覆盖即可。
 
@@ -105,8 +106,6 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 | `PUBLIC_PORT` | `8080` | 对外访问端口 |
 | `VIDEO_PARSER_IMAGE` | `ghcr.io/359073395/video-parser:latest` | 部署镜像 |
 | `MAX_CONCURRENT_DOWNLOADS` | `2` | 全局并发任务数 |
-| `GUEST_DAILY_LIMIT` | `3` | 访客每日下载次数 |
-| `USER_DAILY_LIMIT` | `10` | 普通用户每日下载次数 |
 | `MAX_FILE_SIZE_MB` | `512` | 单文件上限 |
 | `MAX_DURATION_SECONDS` | `1800` | 视频时长上限 |
 | `JOB_TTL_SECONDS` | `3600` | 完成文件保留时间 |
@@ -127,17 +126,18 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 浏览器接口：
 
 - `POST /api/parse`：解析元数据、格式和字幕
+- `POST /api/browser-session`：创建或恢复当前浏览器的私有身份
 - `POST /api/collections/inspect`：扫描主页、频道或播放列表中的视频
 - `POST /api/jobs`：创建下载任务
 - `POST /api/jobs/batch`：把扫描结果批量加入队列
-- `GET /api/jobs`：当前用户或访客历史
+- `GET /api/jobs`：当前浏览器的任务历史
 - `GET /api/jobs/{jobId}`：任务状态
 - `GET /api/jobs/{jobId}/events`：SSE 实时状态
 - `POST /api/jobs/{jobId}/cancel`：取消任务
 - `POST /api/jobs/{jobId}/retry`：重试任务
-- `GET /api/cookies`：当前用户的私有 Cookie 配置
-- `PUT /api/cookies/{platform}`：导入并加密当前用户的平台 Cookie
-- `DELETE /api/cookies/{platform}`：删除当前用户的平台 Cookie
+- `GET /api/cookies`：当前浏览器的私有 Cookie 配置
+- `PUT /api/cookies/{platform}`：导入并加密当前浏览器的平台 Cookie
+- `DELETE /api/cookies/{platform}`：删除当前浏览器的平台 Cookie
 
 API Key 接口保持兼容：
 
