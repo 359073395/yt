@@ -2,24 +2,18 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import {
   AlertTriangle,
-  Activity,
   CheckCircle2,
   ClipboardCopy,
   Clock3,
   Captions,
   Cookie,
   Copy,
-  Database,
   Download,
   FileVideo,
-  Filter,
   Gauge,
   History,
-  KeyRound,
-  LayoutDashboard,
   Link2,
   Loader2,
-  LogOut,
   Music2,
   FileText,
   Play,
@@ -29,11 +23,8 @@ import {
   Search,
   Shield,
   Sparkles,
-  TerminalSquare,
   Trash2,
   XCircle,
-  UserRound,
-  UsersRound,
   Zap,
 } from 'lucide-react'
 import './styles.css'
@@ -145,21 +136,6 @@ type CollectionInspectResponse = {
   truncated: boolean
 }
 
-type UserRole = 'user' | 'member' | 'admin'
-
-type User = {
-  id: number
-  username: string
-  role: UserRole
-  created_at: number
-  status: 'active' | 'disabled'
-  member_expires_at?: number | null
-  daily_limit_override?: number | null
-  daily_used: number
-  daily_limit?: number | null
-  unlimited: boolean
-}
-
 type Quota = {
   limit: number | null
   used: number
@@ -167,54 +143,9 @@ type Quota = {
   unlimited: boolean
 }
 
-type AuthResponse = {
-  token: string
-  user: User
-  quota: Quota
-}
-
 type BrowserSessionResponse = {
   token: string
   quota: Quota
-}
-
-type MeResponse = {
-  user: User | null
-  quota: Quota
-}
-
-type AdminOverview = {
-  users_total: number
-  users_regular: number
-  users_member: number
-  users_admin: number
-  users_disabled: number
-  api_keys_total: number
-  api_keys_active: number
-  today_downloads: number
-  jobs_total: number
-  jobs_running: number
-  jobs_completed: number
-  jobs_failed: number
-  storage_bytes: number
-}
-
-type ApiKeyItem = {
-  id: number
-  name: string
-  prefix: string
-  status: 'active' | 'disabled'
-  scopes: string[]
-  daily_limit?: number | null
-  daily_used: number
-  created_at: number
-  last_used_at?: number | null
-  last_used_ip?: string | null
-}
-
-type ApiKeyCreateResponse = {
-  key: string
-  item: ApiKeyItem
 }
 
 type CookieProfile = {
@@ -230,7 +161,7 @@ type CookieProfile = {
 
 type QrLoginSession = {
   session_id: string
-  platform: 'douyin' | 'tiktok'
+  platform: 'douyin' | 'tiktok' | 'bilibili'
   status: 'starting' | 'waiting' | 'scanned' | 'completed' | 'failed' | 'expired' | 'cancelled'
   created_at: number
   expires_at: number
@@ -240,20 +171,7 @@ type QrLoginSession = {
   profile?: CookieProfile | null
 }
 
-type PlatformItem = {
-  name: string
-  extractor?: string | null
-  region: 'china' | 'international'
-  status: 'supported' | 'experimental'
-  note?: string | null
-}
-
-type PlatformsResponse = {
-  supported: PlatformItem[]
-  experimental: PlatformItem[]
-}
-
-type AdminRequest = <T>(path: string, options?: RequestInit) => Promise<T>
+type AuthenticatedRequest = <T>(path: string, options?: RequestInit) => Promise<T>
 type AuthenticatedFetch = (path: string, options?: RequestInit) => Promise<Response>
 
 const statusText: Record<JobStatus, string> = {
@@ -361,21 +279,12 @@ function App() {
   const [isBatchCreating, setIsBatchCreating] = React.useState(false)
   const [message, setMessage] = React.useState<string | null>(null)
   const [clientToken, setClientToken] = React.useState('')
-  const [adminToken, setAdminToken] = React.useState(() => window.localStorage.getItem('video-parser-admin-token') || '')
-  const [admin, setAdmin] = React.useState<User | null>(null)
   const [sessionReady, setSessionReady] = React.useState(false)
 
   async function apiFetch(path: string, options: RequestInit = {}, authToken = clientToken) {
     const headers = new Headers(options.headers)
     if (authToken) headers.set('Authorization', `Bearer ${authToken}`)
     return fetch(path, { ...options, headers })
-  }
-
-  async function adminRequest<T>(path: string, options: RequestInit = {}) {
-    const response = await apiFetch(path, options, adminToken)
-    if (!response.ok) throw new Error(await readError(response))
-    if (response.status === 204) return undefined as T
-    return (await response.json()) as T
   }
 
   async function clientRequest<T>(path: string, options: RequestInit = {}) {
@@ -397,24 +306,6 @@ function App() {
       setMessage(error instanceof Error ? error.message : '浏览器私有会话初始化失败，请刷新页面。')
     } finally {
       setSessionReady(true)
-    }
-  }
-
-  async function refreshAdmin(authToken = adminToken) {
-    if (!authToken) {
-      setAdmin(null)
-      return
-    }
-    try {
-      const response = await apiFetch('/api/me', {}, authToken)
-      if (!response.ok) throw new Error(await readError(response))
-      const body = (await response.json()) as MeResponse
-      if (body.user?.role !== 'admin') throw new Error('需要管理员权限。')
-      setAdmin(body.user)
-    } catch {
-      window.localStorage.removeItem('video-parser-admin-token')
-      setAdminToken('')
-      setAdmin(null)
     }
   }
 
@@ -452,7 +343,6 @@ function App() {
 
   React.useEffect(() => {
     void initializeBrowserSession()
-    void refreshAdmin(adminToken)
   }, [])
 
   React.useEffect(() => {
@@ -617,26 +507,6 @@ function App() {
     }
   }
 
-  async function handleAdminLogin(username: string, password: string) {
-    const response = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
-    })
-    if (!response.ok) throw new Error(await readError(response))
-    const body = (await response.json()) as AuthResponse
-    if (body.user.role !== 'admin') throw new Error('需要管理员权限。')
-    window.localStorage.setItem('video-parser-admin-token', body.token)
-    setAdminToken(body.token)
-    setAdmin(body.user)
-  }
-
-  function logoutAdmin() {
-    window.localStorage.removeItem('video-parser-admin-token')
-    setAdminToken('')
-    setAdmin(null)
-  }
-
   async function copyDownloadLink(downloadUrl?: string | null) {
     if (!downloadUrl) return
     await navigator.clipboard.writeText(new URL(downloadUrl, window.location.origin).toString())
@@ -647,9 +517,13 @@ function App() {
   return (
     <main className="app-shell app-v2">
       <header className="top-nav">
-        <a className="brand" href="#top"><span className="brand-mark"><Play size={15} fill="currentColor" /></span>影链工坊 <em>2.2</em></a>
+        <a className="brand" href="#top"><span className="brand-mark"><Play size={15} fill="currentColor" /></span>影链工坊 <em>2.3</em></a>
         <nav><a href="#workspace">下载工作台</a><a href="#platforms">支持平台</a><a href="#notice">使用说明</a></nav>
-        <HeaderAccount admin={admin} onAdminLogin={handleAdminLogin} adminRequest={adminRequest} onLogout={logoutAdmin} onCookies={() => setCookieManagerOpen(true)} sessionReady={sessionReady && Boolean(clientToken)} />
+        <div className="header-account">
+          <button className="account-chip" type="button" onClick={() => setCookieManagerOpen(true)} disabled={!sessionReady || !clientToken}>
+            <Cookie size={15} />平台登录
+          </button>
+        </div>
       </header>
 
       <section className="v2-intro" id="top">
@@ -840,104 +714,6 @@ function QueuePanel({
   )
 }
 
-function HeaderAccount({
-  admin,
-  onAdminLogin,
-  adminRequest,
-  onLogout,
-  onCookies,
-  sessionReady,
-}: {
-  admin: User | null
-  onAdminLogin: (username: string, password: string) => Promise<void>
-  adminRequest: AdminRequest
-  onLogout: () => void
-  onCookies: () => void
-  sessionReady: boolean
-}) {
-  const [open, setOpen] = React.useState(false)
-  const [adminOpen, setAdminOpen] = React.useState(false)
-  const [username, setUsername] = React.useState('')
-  const [password, setPassword] = React.useState('')
-  const [busy, setBusy] = React.useState(false)
-  const [error, setError] = React.useState<string | null>(null)
-
-  async function submit(event: React.FormEvent) {
-    event.preventDefault()
-    setBusy(true)
-    setError(null)
-    try {
-      await onAdminLogin(username.trim(), password)
-      setOpen(false)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '登录失败')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  if (admin) {
-    return (
-      <div className="header-account">
-        <button className="account-chip" type="button" onClick={onCookies} disabled={!sessionReady}>
-          <Cookie size={15} />平台登录
-        </button>
-        <button className="account-chip account-trigger" type="button" onClick={() => setOpen((value) => !value)}>
-          <UserRound size={15} />
-          {admin.username} · 管理员
-        </button>
-        <button className="nav-logout" type="button" onClick={onLogout}>
-          <LogOut size={16} />
-          退出
-        </button>
-        {open && (
-          <section className="auth-popover account-menu">
-            <span className="caption">Account</span>
-            <h2>{admin.username}</h2>
-            <p>站点管理员</p>
-            <button className="menu-action" type="button" onClick={() => setAdminOpen(true)}>
-              <UsersRound size={16} />管理后台
-            </button>
-          </section>
-        )}
-        {adminOpen && (
-          <AdminDashboard
-            adminRequest={adminRequest}
-            onClose={() => setAdminOpen(false)}
-          />
-        )}
-      </div>
-    )
-  }
-
-  return (
-    <div className="header-account auth-popover-wrap">
-      <button className="account-chip" type="button" onClick={onCookies} disabled={!sessionReady}>
-        <Cookie size={15} />平台登录
-      </button>
-      <button className="account-chip account-trigger" type="button" onClick={() => setOpen((value) => !value)}>
-        <Shield size={15} />管理员
-      </button>
-      {open && (
-        <section className="auth-popover">
-          <span className="caption">Admin only</span>
-          <h2>管理员登录</h2>
-          <form className="auth-form" onSubmit={submit}>
-            <input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="管理员用户名" autoComplete="username" />
-            <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="管理员密码" type="password" autoComplete="current-password" />
-            <button type="submit" disabled={busy}>
-              {busy ? <Loader2 className="spin" size={16} /> : <Shield size={16} />}
-              进入后台
-            </button>
-          </form>
-          <p className="quota-note">普通访客无需账号，可直接无限下载。</p>
-          {error && <p className="auth-error">{error}</p>}
-        </section>
-      )}
-    </div>
-  )
-}
-
 function CookieManager({
   request,
   fetchResponse,
@@ -945,7 +721,7 @@ function CookieManager({
   onChanged,
   onClose,
 }: {
-  request: AdminRequest
+  request: AuthenticatedRequest
   fetchResponse: AuthenticatedFetch
   profiles: CookieProfile[]
   onChanged: () => Promise<unknown>
@@ -969,8 +745,9 @@ function CookieManager({
   const [qrImageUrl, setQrImageUrl] = React.useState<string | null>(null)
   const [clock, setClock] = React.useState(() => Date.now())
   const completedSession = React.useRef<string | null>(null)
-  const scanPlatforms = ['douyin', 'tiktok'] as const
+  const scanPlatforms = ['douyin', 'tiktok', 'bilibili'] as const
   const canScan = scanPlatforms.includes(platform as (typeof scanPlatforms)[number])
+  const platformLabel = platforms.find(([id]) => id === platform)?.[1] || platform
   const qrActive = Boolean(qrSession && ['starting', 'waiting', 'scanned'].includes(qrSession.status))
 
   React.useEffect(() => {
@@ -1102,7 +879,7 @@ function CookieManager({
       <div className="admin-backdrop" onClick={() => void closeManager()} />
       <div className="admin-dialog cookie-dialog">
         <header className="admin-dialog-header">
-          <div><span className="caption">Private browser state</span><h2>当前浏览器的平台账号</h2><p>抖音与 TikTok 可直接扫码；无需注册本站账号，Cookie 按当前浏览器私有身份隔离并加密保存。</p></div>
+          <div><span className="caption">Private browser state</span><h2>当前浏览器的平台账号</h2><p>抖音、TikTok 与哔哩哔哩可直接扫码；无需注册本站账号，Cookie 按当前浏览器私有身份隔离并加密保存。</p></div>
           <button className="secondary-button" type="button" onClick={() => void closeManager()}>关闭</button>
         </header>
         <div className="cookie-security"><Shield size={18} /><div><strong>扫码发生在平台官方页面</strong><p>二维码会话最多等待 5 分钟；登录成功后只保留所选平台域名的 Cookie，直到平台失效、退出登录或你主动删除。</p></div></div>
@@ -1111,11 +888,11 @@ function CookieManager({
         </div>
         {canScan && (
           <div className="qr-login-card">
-            <div className="qr-login-heading"><div><QrCode size={20} /><span><strong>{platform === 'douyin' ? '抖音' : 'TikTok'} 扫码登录</strong><small>打开平台 App 扫描并在手机上确认</small></span></div>{qrActive && <span className="qr-countdown">{Math.max(0, Math.ceil(((qrSession?.expires_at || 0) * 1000 - clock) / 1000))} 秒</span>}</div>
+            <div className="qr-login-heading"><div><QrCode size={20} /><span><strong>{platformLabel} 扫码登录</strong><small>打开平台 App 扫描并在手机上确认</small></span></div>{qrActive && <span className="qr-countdown">{Math.max(0, Math.ceil(((qrSession?.expires_at || 0) * 1000 - clock) / 1000))} 秒</span>}</div>
             {!qrSession && <button className="qr-start-button" type="button" onClick={() => void startQrLogin()} disabled={busy}>{busy ? <Loader2 className="spin" size={17} /> : <QrCode size={17} />}{busy ? '正在连接官方页面' : '生成登录二维码'}</button>}
             {qrSession && qrActive && (
               <div className="qr-login-body">
-                <div className="qr-image-frame">{qrImageUrl ? <img src={qrImageUrl} alt={`${platform === 'douyin' ? '抖音' : 'TikTok'} 登录二维码`} /> : <div><Loader2 className="spin" size={28} /><span>正在生成二维码</span></div>}</div>
+                <div className="qr-image-frame">{qrImageUrl ? <img src={qrImageUrl} alt={`${platformLabel} 登录二维码`} /> : <div><Loader2 className="spin" size={28} /><span>正在生成二维码</span></div>}</div>
                 <div className="qr-login-status"><span className={`qr-status-dot ${qrSession.status}`} /> <strong>{qrSession.status === 'scanned' ? '等待手机确认' : qrSession.status === 'starting' ? '正在连接' : '等待扫码'}</strong><p>{qrSession.message}</p><button className="secondary-button" type="button" onClick={() => void cancelQrLogin()}>取消本次扫码</button></div>
               </div>
             )}
@@ -1292,291 +1069,6 @@ function FooterInfo() {
         <p className="notice">请只处理你拥有权利或已获授权的视频内容。本工具不承诺绕过登录、DRM、私密内容或平台反爬限制。</p>
       </article>
     </section>
-  )
-}
-
-function AdminDashboard({ adminRequest, onClose }: { adminRequest: AdminRequest; onClose: () => void }) {
-  const [tab, setTab] = React.useState('overview')
-  const [overview, setOverview] = React.useState<AdminOverview | null>(null)
-  const [jobs, setJobs] = React.useState<Job[]>([])
-  const [apiKeys, setApiKeys] = React.useState<ApiKeyItem[]>([])
-  const [cookieProfiles, setCookieProfiles] = React.useState<CookieProfile[]>([])
-  const [cookieName, setCookieName] = React.useState('default')
-  const [cookieFile, setCookieFile] = React.useState<File | null>(null)
-  const [platforms, setPlatforms] = React.useState<PlatformsResponse | null>(null)
-  const [busy, setBusy] = React.useState(false)
-  const [error, setError] = React.useState<string | null>(null)
-  const [newApiName, setNewApiName] = React.useState('Codex Agent')
-  const [newApiLimit, setNewApiLimit] = React.useState('100')
-  const [createdKey, setCreatedKey] = React.useState<string | null>(null)
-
-  const tabs = [
-    ['overview', '总览', LayoutDashboard],
-    ['api', 'API Key', KeyRound],
-    ['cookies', 'Cookie 配置', Cookie],
-    ['jobs', '任务缓存', Database],
-    ['platforms', '支持平台', Filter],
-    ['docs', 'API 对接', TerminalSquare],
-  ] as const
-
-  React.useEffect(() => {
-    void refreshAll()
-  }, [])
-
-  async function refreshAll() {
-    setBusy(true)
-    setError(null)
-    try {
-      const [overviewBody, keysBody, jobsBody, platformsBody, cookiesBody] = await Promise.all([
-        adminRequest<AdminOverview>('/api/admin/overview'),
-        adminRequest<ApiKeyItem[]>('/api/admin/api-keys'),
-        adminRequest<Job[]>('/api/admin/jobs'),
-        adminRequest<PlatformsResponse>('/api/v1/platforms'),
-        adminRequest<CookieProfile[]>('/api/admin/cookies'),
-      ])
-      setOverview(overviewBody)
-      setApiKeys(keysBody)
-      setJobs(jobsBody)
-      setPlatforms(platformsBody)
-      setCookieProfiles(cookiesBody)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '后台数据加载失败')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function refreshOverview() {
-    setOverview(await adminRequest<AdminOverview>('/api/admin/overview'))
-  }
-
-  async function createApiKey(event: React.FormEvent) {
-    event.preventDefault()
-    setError(null)
-    const body = {
-      name: newApiName.trim(),
-      daily_limit: newApiLimit.trim() ? Number(newApiLimit) : null,
-      scopes: ['jobs:create', 'jobs:read', 'files:download'],
-    }
-    try {
-      const created = await adminRequest<ApiKeyCreateResponse>('/api/admin/api-keys', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      setCreatedKey(created.key)
-      setApiKeys((items) => [created.item, ...items])
-      void refreshOverview()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'API Key 创建失败')
-    }
-  }
-
-  async function updateApiKey(id: number, payload: Record<string, unknown>) {
-    const next = await adminRequest<ApiKeyItem>(`/api/admin/api-keys/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-    setApiKeys((items) => items.map((item) => (item.id === id ? next : item)))
-    void refreshOverview()
-  }
-
-  async function deleteApiKey(id: number) {
-    await adminRequest<void>(`/api/admin/api-keys/${id}`, { method: 'DELETE' })
-    setApiKeys((items) => items.filter((item) => item.id !== id))
-    void refreshOverview()
-  }
-
-  async function cleanupCache() {
-    await adminRequest<{ removed: number; storage_bytes: number }>('/api/admin/cleanup', { method: 'POST' })
-    await refreshAll()
-  }
-
-  async function uploadCookies(event: React.FormEvent) {
-    event.preventDefault()
-    if (!cookieFile) {
-      setError('请选择导出的 Netscape cookies.txt 文件。')
-      return
-    }
-    setError(null)
-    const form = new FormData()
-    form.append('file', cookieFile)
-    try {
-      const created = await adminRequest<CookieProfile>(`/api/admin/cookies/${encodeURIComponent(cookieName.trim())}`, { method: 'PUT', body: form })
-      setCookieProfiles((items) => [created, ...items.filter((item) => item.name !== created.name)])
-      setCookieFile(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Cookie 上传失败')
-    }
-  }
-
-  async function deleteCookies(name: string) {
-    await adminRequest<void>(`/api/admin/cookies/${encodeURIComponent(name)}`, { method: 'DELETE' })
-    setCookieProfiles((items) => items.filter((item) => item.name !== name))
-  }
-
-  return (
-    <section className="admin-console" aria-label="管理后台">
-      <div className="admin-backdrop" onClick={onClose} />
-      <div className="admin-shell">
-        <aside className="admin-sidebar">
-          <div>
-            <span className="caption">Admin Console</span>
-            <h2>影链工坊后台</h2>
-          </div>
-          <nav>
-            {tabs.map(([id, label, Icon]) => (
-              <button className={tab === id ? 'active' : ''} key={id} type="button" onClick={() => setTab(id)}>
-                <Icon size={16} />
-                {label}
-              </button>
-            ))}
-          </nav>
-          <button className="secondary-button" type="button" onClick={onClose}>返回前台</button>
-        </aside>
-
-        <section className="admin-main">
-          <header className="admin-main-header">
-            <div>
-              <span className="caption">Operations</span>
-              <h2>{tabs.find(([id]) => id === tab)?.[1]}</h2>
-            </div>
-            <button className="secondary-button" type="button" onClick={refreshAll} disabled={busy}>
-              {busy ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
-              刷新
-            </button>
-          </header>
-
-          {error && <div className="inline-alert"><AlertTriangle size={16} />{error}</div>}
-
-          {tab === 'overview' && overview && (
-            <div className="admin-metrics">
-              <Metric title="累计任务" value={overview.jobs_total} icon={<Database size={18} />} />
-              <Metric title="完成任务" value={overview.jobs_completed} icon={<CheckCircle2 size={18} />} />
-              <Metric title="失败任务" value={overview.jobs_failed} icon={<AlertTriangle size={18} />} />
-              <Metric title="API Key" value={`${overview.api_keys_active}/${overview.api_keys_total}`} icon={<KeyRound size={18} />} />
-              <Metric title="运行任务" value={overview.jobs_running} icon={<Activity size={18} />} />
-              <Metric title="缓存占用" value={formatBytes(overview.storage_bytes)} icon={<Database size={18} />} />
-            </div>
-          )}
-
-          {tab === 'api' && (
-            <div className="admin-section">
-              <form className="api-create" onSubmit={createApiKey}>
-                <input value={newApiName} onChange={(event) => setNewApiName(event.target.value)} placeholder="密钥名称，例如 Codex Agent" />
-                <input value={newApiLimit} onChange={(event) => setNewApiLimit(event.target.value)} placeholder="每日额度，留空为无限" inputMode="numeric" />
-                <button type="submit"><KeyRound size={16} />创建 API Key</button>
-              </form>
-              {createdKey && (
-                <div className="created-key">
-                  <span>密钥只显示一次</span>
-                  <code>{createdKey}</code>
-                  <button type="button" onClick={() => navigator.clipboard.writeText(createdKey)}><ClipboardCopy size={15} />复制</button>
-                </div>
-              )}
-              <div className="admin-table api-table">
-                {apiKeys.map((item) => (
-                  <div className="api-row" key={item.id}>
-                    <div><strong>{item.name}</strong><small>{item.prefix}... · {item.scopes.join(', ')}</small></div>
-                    <span>{item.daily_limit ? `${item.daily_used}/${item.daily_limit}` : '无限额度'}</span>
-                    <span>{item.last_used_at ? `最近 ${formatDate(item.last_used_at)}` : '未使用'}</span>
-                    <button type="button" onClick={() => updateApiKey(item.id, { status: item.status === 'active' ? 'disabled' : 'active' })}>
-                      {item.status === 'active' ? '禁用' : '启用'}
-                    </button>
-                    <button className="danger-button" type="button" onClick={() => deleteApiKey(item.id)}><Trash2 size={15} /></button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {tab === 'jobs' && (
-            <div className="admin-section">
-              <div className="admin-toolbar">
-                <p>任务历史已持久化；完成文件到期后自动清理，失败记录保留 30 天。</p>
-                <button className="secondary-button" type="button" onClick={cleanupCache}><Trash2 size={16} />清理缓存</button>
-              </div>
-              <div className="admin-table jobs-table">
-                {jobs.map((item) => (
-                  <div className="job-admin-row" key={item.job_id}>
-                    <div><strong>{item.title || item.job_id}</strong><small>{item.platform || '自动识别'} · {item.url}</small></div>
-                    <StatusBadge status={item.status} />
-                    <span>{Math.round(item.progress)}%</span>
-                    <span>{formatBytes(item.size_bytes || item.total_bytes)}</span>
-                  </div>
-                ))}
-                {!jobs.length && <p className="empty-admin">暂无任务。</p>}
-              </div>
-            </div>
-          )}
-
-          {tab === 'cookies' && (
-            <div className="admin-section">
-              <div className="cookie-notice"><Cookie size={18} /><div><strong>加密 Cookie 配置</strong><p>上传浏览器导出的 Netscape cookies.txt。文件会使用 AUTH_SECRET 加密保存，不会写入日志；命名为 default 时所有平台自动使用。</p></div></div>
-              <form className="cookie-upload" onSubmit={uploadCookies}>
-                <input value={cookieName} onChange={(event) => setCookieName(event.target.value)} placeholder="配置名称，例如 default 或 youtube" pattern="[a-zA-Z0-9_.-]+" required />
-                <input type="file" accept=".txt,text/plain" onChange={(event) => setCookieFile(event.target.files?.[0] || null)} required />
-                <button type="submit"><Cookie size={16} />加密上传</button>
-              </form>
-              <div className="admin-table">
-                {cookieProfiles.map((item) => (
-                  <div className="api-row" key={item.name}>
-                    <div><strong>{item.name}</strong><small>更新于 {formatDate(item.updated_at)}</small></div>
-                    <span>{formatBytes(item.size_bytes)}（加密后）</span><span>仅管理员可管理</span><span />
-                    <button className="danger-button" type="button" onClick={() => deleteCookies(item.name)}><Trash2 size={15} />删除</button>
-                  </div>
-                ))}
-                {!cookieProfiles.length && <p className="empty-admin">尚未配置 Cookie；公开内容仍可正常尝试解析。</p>}
-              </div>
-            </div>
-          )}
-
-          {tab === 'platforms' && platforms && (
-            <div className="admin-section platform-admin">
-              <h3>国内平台</h3>
-              <div className="platform-list">
-                {platforms.supported.filter((item) => item.region === 'china').map((item) => <span key={item.name}>{item.name}</span>)}
-              </div>
-              <h3>国际平台</h3>
-              <div className="platform-list">
-                {platforms.supported.filter((item) => item.region === 'international').map((item) => <span key={item.name}>{item.name}</span>)}
-              </div>
-              <h3>尝试解析，暂不保证</h3>
-              <div className="platform-list">
-                {platforms.experimental.map((item) => <span key={item.name}>{item.name}</span>)}
-              </div>
-            </div>
-          )}
-
-          {tab === 'docs' && (
-            <div className="admin-section api-docs">
-              <p>给智能体或 Codex 使用时，把 API Key 放在请求头里：<code>X-API-Key: ylg_xxx</code></p>
-              <pre>{`POST /api/v1/jobs
-Content-Type: application/json
-X-API-Key: ylg_xxx
-
-{"url":"https://www.douyin.com/video/..."}`}</pre>
-              <pre>{`GET /api/v1/jobs/{jobId}
-GET /api/v1/jobs/{jobId}/download
-GET /api/v1/platforms
-GET /api/v1/quota
-GET /api/v1/openapi.json`}</pre>
-            </div>
-          )}
-        </section>
-      </div>
-    </section>
-  )
-}
-
-function Metric({ title, value, icon }: { title: string; value: React.ReactNode; icon: React.ReactNode }) {
-  return (
-    <article className="metric-card">
-      <div>{icon}</div>
-      <span>{title}</span>
-      <strong>{value}</strong>
-    </article>
   )
 }
 

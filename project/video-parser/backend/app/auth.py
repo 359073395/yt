@@ -59,8 +59,8 @@ class AuthStore:
         secret: str,
         guest_daily_limit: int,
         user_daily_limit: int,
-        admin_username: str,
-        admin_password: str,
+        admin_username: str | None = None,
+        admin_password: str | None = None,
     ) -> None:
         self.database_path = database_path
         self.secret = secret.encode("utf-8")
@@ -68,7 +68,8 @@ class AuthStore:
         self.user_daily_limit = user_daily_limit
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
-        self.seed_admin(admin_username, admin_password)
+        if admin_username and admin_password:
+            self.seed_admin(admin_username, admin_password)
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.database_path, timeout=30)

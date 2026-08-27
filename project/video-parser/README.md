@@ -1,8 +1,8 @@
-# 影链工坊 2.2
+# 影链工坊 2.3
 
 基于官方 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 的自托管 Web 视频下载与文案中心。无需注册或登录本站，网页下载不限次数；支持单条视频和创作者主页批量下载、浏览器私有 Cookie、平台原生字幕、faster-whisper AI 语音转写、TXT/SRT/VTT 文案以及封面和描述打包导出。
 
-## 2.2 功能
+## 2.3 功能
 
 - 主页批量下载：粘贴一个创作者主页、频道或播放列表链接，扫描后把其中的视频全部加入队列
 - 抖音主页扫描：可粘贴带中文的整段分享文案或 `v.douyin.com` 短链，自动展开并读取作者公开视频；图文作品不会误计为视频
@@ -21,10 +21,9 @@
 - 持久化历史：SQLite 保存任务，服务更新或重启后仍可查看
 - 临时文件：到期自动清理，下载地址使用 15 分钟签名
 - 免账号使用：取消普通用户注册和登录，浏览器自动获得私有身份，网页下载不限次数
-- API Key：可为智能体或其他服务配置独立额度和权限
 - 浏览器 Cookie：无需本站账号即可导入各平台 Netscape cookies.txt；按浏览器隔离、加密保存并自动过滤其他网站条目
-- 扫码登录：抖音与 TikTok 使用平台官方二维码登录；单次等待 5 分钟，成功后按浏览器私有身份加密保存 Cookie
-- 管理员 Cookie：继续支持全站默认配置，为没有私有 Cookie 的任务提供降级
+- 扫码登录：抖音、TikTok 与哔哩哔哩使用平台官方二维码登录；单次等待 5 分钟，成功后按浏览器私有身份加密保存 Cookie
+- 无站点后台：不再提供管理员账号、后台登录或管理页面；每个浏览器只管理自己的平台登录状态
 - 新版引擎：`yt-dlp[default,curl-cffi]`、`yt-dlp-ejs`、Deno、FFmpeg、Chromium
 - 安全部署：非 root、只读容器根文件系统、移除 Linux capabilities
 
@@ -42,7 +41,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/359073395/yt/main/project/vi
 
 脚本优先拉取当前固定版本镜像。镜像暂不可用时自动回退到源码构建；新容器健康检查失败时自动恢复上一镜像。
 
-首次安装会随机生成 `AUTH_SECRET` 和管理员密码，并在安装结束时显示一次。配置保存在：
+首次安装会随机生成 `AUTH_SECRET`，用于加密浏览器私有 Cookie。配置保存在：
 
 ```text
 /opt/video-parser/project/video-parser/.env
@@ -60,18 +59,17 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 
 ## 从 1.0 / 2.0 升级
 
-2.2.2 继续使用原来的 `/data/video-parser.sqlite3` 和 Docker volume，不需要迁移历史任务、Cookie 或 API Key。旧用户记录会保留在数据库中，但前台不再提供普通用户登录。升级脚本会自动：
+2.3.0 继续使用原来的 `/data/video-parser.sqlite3` 和 Docker volume，不需要迁移历史任务或 Cookie。旧用户、管理员和 API Key 记录会留在数据库中用于兼容，但 2.3 不再暴露站点登录与管理后台。升级脚本会自动：
 
 1. 保留 `.env` 和数据卷。
-2. 将旧默认管理员密码替换为随机密码。
-3. 拉取 2.2.2 镜像，启动后验证精确版本和服务健康状态。
-4. 失败时回滚上一容器镜像。
+2. 拉取 2.3.0 镜像，启动后验证精确版本和服务健康状态。
+3. 失败时回滚上一容器镜像。
 
 不要使用 `docker compose down --volumes` 更新，否则会删除数据库和历史文件。
 
 ## Cookie 配置
 
-点击页面右上角“平台登录”即可使用，无需注册或登录本站。抖音和 TikTok 默认使用官方二维码扫码；其他平台或扫码不可用时仍可上传浏览器导出的 Netscape `cookies.txt`。系统只保留所选平台及其媒体域名的条目，其他网站 Cookie 会在加密前删除。
+点击页面右上角“平台登录”即可使用，无需注册或登录本站。抖音、TikTok 和哔哩哔哩默认使用官方二维码扫码；YouTube、Instagram、Facebook、X 等无法把手机扫码会话安全转移给下载服务器的平台，继续使用浏览器导出的 Netscape `cookies.txt`。系统只保留所选平台及其媒体域名的条目，其他网站 Cookie 会在加密前删除。
 
 - 系统自动为当前浏览器生成不入用户表的私有身份；不同浏览器只能读取和删除自己的 Cookie。
 - 私有身份保存在浏览器站点数据中；清除站点数据后会生成新身份，之前保存的 Cookie 不会自动暴露给新身份。
@@ -80,15 +78,8 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 - 解析时会按链接平台自动选择当前浏览器的 Cookie，无需每次手工指定。
 - 不接收平台账号和密码；建议使用专用低权限账号。
 - Cookie 过期后重新导出并覆盖即可。
-
-管理员仍可进入“管理后台 → Cookie 配置”上传全局 Netscape `cookies.txt`：
-
-管理员登录后进入“管理后台 → Cookie 配置”，上传浏览器扩展导出的 Netscape `cookies.txt`。
-
-- 配置名称使用 `default` 时，所有没有指定配置的任务自动使用。
-- Cookie 使用由 `AUTH_SECRET` 派生的密钥加密保存。
-- 更改 `AUTH_SECRET` 后需要重新上传 Cookie。
-- 只应使用专用的低权限平台账号，不要上传主账号 Cookie。
+- 旧版全局管理员 Cookie 不会再降级提供给网页访客；升级不会删除原文件，如确认不需要可自行备份后清理。
+- Cookie 使用由 `AUTH_SECRET` 派生的密钥加密保存；更改密钥后需要重新扫码或导入。
 
 ## AI 语音转写
 
@@ -139,7 +130,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 - `PUT /api/cookies/{platform}`：导入并加密当前浏览器的平台 Cookie
 - `DELETE /api/cookies/{platform}`：删除当前浏览器的平台 Cookie
 
-API Key 接口保持兼容：
+旧版已经创建的 API Key 接口保持兼容，但 2.3 不再提供网页签发和管理入口：
 
 - `POST /api/v1/jobs`
 - `GET /api/v1/jobs/{jobId}`

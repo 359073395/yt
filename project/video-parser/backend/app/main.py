@@ -18,15 +18,6 @@ from .config import get_settings
 from .cookies import CookieStore, MAX_COOKIE_BYTES, PLATFORM_DOMAINS
 from .downloader import DownloadRejected, Downloader
 from .models import (
-    AdminOverview,
-    AdminUserCreate,
-    AdminUserUpdate,
-    ApiKeyCreateRequest,
-    ApiKeyCreateResponse,
-    ApiKeyPublic,
-    ApiKeyUpdateRequest,
-    AuthRequest,
-    AuthResponse,
     BrowserSessionResponse,
     BatchJobCreateRequest,
     BatchJobCreateResponse,
@@ -46,7 +37,6 @@ from .models import (
     PlatformsResponse,
     QrLoginPublic,
     QuotaPublic,
-    UserPublic,
 )
 from .security import RateLimiter, client_ip_from_request, validate_public_url
 from .qr_login import QR_LOGIN_PLATFORMS, QrLoginCapacityError, QrLoginManager
@@ -68,8 +58,6 @@ auth_store = AuthStore(
     secret=settings.auth_secret,
     guest_daily_limit=settings.guest_daily_limit,
     user_daily_limit=settings.user_daily_limit,
-    admin_username=settings.admin_username,
-    admin_password=settings.admin_password,
 )
 
 SUPPORTED_PLATFORMS = [
@@ -124,7 +112,7 @@ async def lifespan(_: FastAPI):
         await qr_login_manager.close()
 
 
-app = FastAPI(title="影链工坊 2.2", version=settings.app_version, lifespan=lifespan)
+app = FastAPI(title="影链工坊 2.3", version=settings.app_version, lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -230,20 +218,6 @@ async def diagnostics() -> dict[str, object]:
             "transcription": f"faster-whisper/{settings.whisper_model}" if downloader.transcriber.available else "disabled",
         },
     }
-
-
-@app.post("/api/auth/register", response_model=AuthResponse)
-async def register(payload: AuthRequest, request: Request) -> AuthResponse:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail="普通用户注册已取消，无需账号即可无限下载。")
-
-
-@app.post("/api/auth/login", response_model=AuthResponse)
-async def login(payload: AuthRequest, request: Request) -> AuthResponse:
-    client_ip = client_ip_from_request(request, settings.trusted_proxy_headers)
-    user = auth_store.authenticate(payload.username, payload.password)
-    if user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="普通用户登录已取消，请直接使用下载功能。")
-    return AuthResponse(token=auth_store.create_token(user), user=auth_store.user_public(user), quota=auth_store.quota_for(user, client_ip))
 
 
 @app.post("/api/browser-session", response_model=BrowserSessionResponse)
@@ -439,34 +413,6 @@ def file_response(job_id: str) -> FileResponse:
     return FileResponse(path=job.file_path, filename=job.filename or job.file_path.name, media_type="application/octet-stream")
 
 
-@app.get("/api/admin/users", response_model=list[UserPublic])
-async def list_users(request: Request) -> list[UserPublic]:
-    auth_store.require_admin(request)
-    return auth_store.list_users()
-
-
-@app.post("/api/admin/users", response_model=UserPublic, status_code=status.HTTP_201_CREATED)
-async def create_admin_user(payload: AdminUserCreate, request: Request) -> UserPublic:
-    auth_store.require_admin(request)
-    user = auth_store.create_user(payload.username, payload.password, role=payload.role, user_status=payload.status, member_expires_at=payload.member_expires_at, daily_limit_override=payload.daily_limit_override)
-    return auth_store.user_public(user)
-
-
-@app.patch("/api/admin/users/{user_id}", response_model=UserPublic)
-async def update_user(user_id: int, payload: AdminUserUpdate, request: Request) -> UserPublic:
-    auth_store.require_admin(request)
-    fields = payload.model_fields_set
-    return auth_store.update_user(user_id, role=payload.role, user_status=payload.status, member_expires_at=payload.member_expires_at, daily_limit_override=payload.daily_limit_override, daily_used=payload.daily_used, set_member_expires_at="member_expires_at" in fields, set_daily_limit_override="daily_limit_override" in fields)
-
-
-@app.delete("/api/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_user(user_id: int, request: Request) -> None:
-    admin = auth_store.require_admin(request)
-    await qr_login_manager.cancel_user(user_id)
-    auth_store.delete_user(user_id, admin.id)
-    cookie_store.delete_owner(user_id)
-
-
 @app.get("/api/cookies", response_model=list[CookieProfilePublic])
 async def list_my_cookie_profiles(request: Request) -> list[CookieProfilePublic]:
     user = auth_store.require_user(request)
@@ -543,73 +489,6 @@ async def cancel_cookie_qr_login(session_id: str, request: Request) -> None:
         await qr_login_manager.cancel(session_id, user.id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="扫码登录会话不存在。") from exc
-
-
-@app.get("/api/admin/overview", response_model=AdminOverview)
-async def admin_overview(request: Request) -> AdminOverview:
-    auth_store.require_admin(request)
-    return AdminOverview(**auth_store.admin_counts(), **store.stats())
-
-
-@app.get("/api/admin/jobs", response_model=list[JobPublic])
-async def admin_jobs(request: Request) -> list[JobPublic]:
-    auth_store.require_admin(request)
-    return [public_job(job) for job in sorted(store.jobs.values(), key=lambda item: item.created_at, reverse=True)]
-
-
-@app.post("/api/admin/cleanup")
-async def admin_cleanup(request: Request) -> dict[str, int]:
-    auth_store.require_admin(request)
-    return {"removed": store.cleanup(), "storage_bytes": store.storage_bytes()}
-
-
-@app.get("/api/admin/cookies", response_model=list[CookieProfilePublic])
-async def list_cookie_profiles(request: Request) -> list[CookieProfilePublic]:
-    auth_store.require_admin(request)
-    return cookie_store.list()
-
-
-@app.put("/api/admin/cookies/{profile}", response_model=CookieProfilePublic)
-async def upload_cookie_profile(profile: str, request: Request, file: UploadFile = File(...)) -> CookieProfilePublic:
-    auth_store.require_admin(request)
-    content = await file.read(MAX_COOKIE_BYTES + 1)
-    try:
-        return cookie_store.save(profile, content)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.delete("/api/admin/cookies/{profile}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_cookie_profile(profile: str, request: Request) -> None:
-    auth_store.require_admin(request)
-    try:
-        cookie_store.delete(profile)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/admin/api-keys", response_model=list[ApiKeyPublic])
-async def list_api_keys(request: Request) -> list[ApiKeyPublic]:
-    auth_store.require_admin(request)
-    return auth_store.list_api_keys()
-
-
-@app.post("/api/admin/api-keys", response_model=ApiKeyCreateResponse)
-async def create_api_key(payload: ApiKeyCreateRequest, request: Request) -> ApiKeyCreateResponse:
-    auth_store.require_admin(request)
-    return auth_store.create_api_key(payload.name, payload.daily_limit, payload.scopes)
-
-
-@app.patch("/api/admin/api-keys/{api_key_id}", response_model=ApiKeyPublic)
-async def update_api_key(api_key_id: int, payload: ApiKeyUpdateRequest, request: Request) -> ApiKeyPublic:
-    auth_store.require_admin(request)
-    return auth_store.update_api_key(api_key_id, name=payload.name, key_status=payload.status, daily_limit=payload.daily_limit, scopes=payload.scopes)
-
-
-@app.delete("/api/admin/api-keys/{api_key_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_api_key(api_key_id: int, request: Request) -> None:
-    auth_store.require_admin(request)
-    auth_store.delete_api_key(api_key_id)
 
 
 @app.get("/api/v1/platforms", response_model=PlatformsResponse)

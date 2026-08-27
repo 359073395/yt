@@ -3,7 +3,7 @@ from fastapi import HTTPException
 
 from app import main
 from app.auth import AuthStore
-from app.models import AuthRequest, JobCreateRequest
+from app.models import JobCreateRequest
 from app.store import JobStore
 
 
@@ -95,20 +95,12 @@ async def test_browser_session_endpoint_reuses_valid_identity(tmp_path, monkeypa
     assert store.user_from_token(created.token).role == "browser"
 
 
-@pytest.mark.asyncio
-async def test_login_endpoint_rejects_legacy_regular_users(tmp_path, monkeypatch):
-    store = make_store(tmp_path)
-    store.create_user("legacyuser", "password123")
-    monkeypatch.setattr(main, "auth_store", store)
+def test_site_login_and_admin_routes_are_removed():
+    paths = {route.path for route in main.app.routes}
 
-    with pytest.raises(HTTPException) as exc:
-        await main.login(
-            AuthRequest(username="legacyuser", password="password123"),
-            type("Request", (), {"headers": {}, "client": None})(),
-        )
-
-    assert exc.value.status_code == 403
-    assert "普通用户登录已取消" in exc.value.detail
+    assert "/api/auth/login" not in paths
+    assert "/api/auth/register" not in paths
+    assert not any(path.startswith("/api/admin") for path in paths)
 
 
 def test_browser_jobs_are_isolated_even_on_the_same_ip(tmp_path, monkeypatch):

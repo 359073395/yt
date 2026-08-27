@@ -1,4 +1,4 @@
-name: Video Parser 2.2 CI
+name: Video Parser 2.3 CI
 
 on:
   push:
@@ -39,7 +39,6 @@ jobs:
           DATABASE_PATH: ${{ runner.temp }}/yinglian.sqlite3
           COOKIE_DIR: ${{ runner.temp }}/yinglian-cookies
           AUTH_SECRET: ci-only-secret
-          ADMIN_PASSWORD: ci-only-password
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -98,7 +97,6 @@ jobs:
           docker run -d --name video-parser-smoke \
             -p 127.0.0.1:18080:8080 \
             -e AUTH_SECRET=ci-smoke-auth-secret \
-            -e ADMIN_PASSWORD=ci-smoke-admin-password \
             -v video-parser-smoke-data:/data \
             --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,size=256m,uid=10001,gid=10001 \
@@ -114,7 +112,7 @@ jobs:
           response=""
           for _ in $(seq 1 40); do
             response="$(curl -fsS --max-time 5 http://127.0.0.1:18080/api/health 2>/dev/null || true)"
-            if [[ "$response" == *'"version":"2.2.2"'* && "$response" == *'"chromium":"available"'* && "$response" == *'"qr_login":"available"'* && "$response" == *'"transcription":"available"'* ]]; then
+            if [[ "$response" == *'"version":"2.3.0"'* && "$response" == *'"chromium":"available"'* && "$response" == *'"qr_login":"available"'* && "$response" == *'"transcription":"available"'* ]]; then
               break
             fi
             if [[ "$(docker inspect --format '{{.State.Running}}' video-parser-smoke 2>/dev/null || true)" != "true" ]]; then
@@ -122,7 +120,7 @@ jobs:
             fi
             sleep 2
           done
-          if [[ "$response" != *'"version":"2.2.2"'* || "$response" != *'"chromium":"available"'* || "$response" != *'"qr_login":"available"'* || "$response" != *'"transcription":"available"'* ]]; then
+          if [[ "$response" != *'"version":"2.3.0"'* || "$response" != *'"chromium":"available"'* || "$response" != *'"qr_login":"available"'* || "$response" != *'"transcription":"available"'* ]]; then
             echo "Unexpected health response: ${response:-no response}"
             docker inspect video-parser-smoke
             docker logs video-parser-smoke
@@ -148,6 +146,9 @@ jobs:
                   assert await page.title() == "browser-ok"
                   from app.qr_login import QrLoginManager
                   qr = await QrLoginManager._find_qr(page, "tiktok")
+                  assert await qr.screenshot(type="png")
+                  await page.set_content("<img alt='Scan me!' width='140' height='140'>")
+                  qr = await QrLoginManager._find_qr(page, "bilibili")
                   assert await qr.screenshot(type="png")
                   await browser.close()
 
@@ -180,7 +181,7 @@ jobs:
       meta-images: ghcr.io/359073395/video-parser
       meta-tags: |
         type=raw,value=latest
-        type=raw,value=2.2.2
+        type=raw,value=2.3.0
         type=sha
     secrets:
       registry-auths: |

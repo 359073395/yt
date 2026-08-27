@@ -48,6 +48,8 @@ def test_qr_login_detects_only_authenticated_session_cookies(tmp_path):
     assert manager._is_logged_in("douyin", [{"name": "sessionid", "value": "signed-in"}]) is True
     assert manager._is_logged_in("tiktok", [{"name": "sessionid_ss", "value": "signed-in"}]) is True
     assert manager._is_logged_in("tiktok", [{"name": "sessionid", "value": ""}]) is False
+    assert manager._is_logged_in("bilibili", [{"name": "buvid3", "value": "device"}]) is False
+    assert manager._is_logged_in("bilibili", [{"name": "SESSDATA", "value": "signed-in"}]) is True
 
 
 @pytest.mark.asyncio

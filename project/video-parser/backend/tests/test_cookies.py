@@ -49,6 +49,16 @@ def test_user_profile_automatically_selected_by_platform(tmp_path):
         assert b"user-secret" in cookie_file.read_bytes()
 
 
+def test_browser_profile_never_falls_back_to_legacy_global_cookie(tmp_path):
+    store = CookieStore(tmp_path / "cookies", "test-secret")
+    content = b"# Netscape HTTP Cookie File\n.tiktok.com\tTRUE\t/\tTRUE\t0\tsessionid\tglobal-secret\n"
+    store.save("tiktok", content, platform="tiktok")
+
+    assert store.exists("tiktok", owner_id=88) is False
+    with store.materialize(None, tmp_path / "work-private", owner_id=88, platform="tiktok") as cookie_file:
+        assert cookie_file is None
+
+
 def test_browser_cookies_are_converted_to_netscape_and_sanitized():
     content = CookieStore.browser_cookies_to_netscape([
         {

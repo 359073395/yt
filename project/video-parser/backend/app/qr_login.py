@@ -13,15 +13,17 @@ from .cookies import CookieStore
 from .models import CookieProfilePublic, QrLoginPublic, QrLoginStatus
 
 
-QR_LOGIN_PLATFORMS = {"douyin", "tiktok"}
+QR_LOGIN_PLATFORMS = {"douyin", "tiktok", "bilibili"}
 ACTIVE_STATUSES = {QrLoginStatus.starting, QrLoginStatus.waiting, QrLoginStatus.scanned}
 LOGIN_COOKIE_NAMES = {
     "douyin": {"sessionid", "sessionid_ss"},
     "tiktok": {"sessionid", "sessionid_ss"},
+    "bilibili": {"SESSDATA"},
 }
 LOGIN_URLS = {
     "douyin": "https://creator.douyin.com/creator-micro/content/upload",
     "tiktok": "https://www.tiktok.com/login/qrcode",
+    "bilibili": "https://passport.bilibili.com/login",
 }
 QR_SELECTORS = {
     "douyin": (
@@ -33,6 +35,10 @@ QR_SELECTORS = {
         "canvas",
         "img[alt*='QR']",
         "img[alt*='qr']",
+    ),
+    "bilibili": (
+        "img[alt='Scan me!']",
+        "img[src^='data:image/png;base64']",
     ),
 }
 

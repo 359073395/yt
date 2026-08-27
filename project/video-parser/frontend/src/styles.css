@@ -19,7 +19,7 @@
   color: var(--ink);
 }
 
-/* 影链工坊 2.2 workbench */
+/* 影链工坊 2.3 workbench */
 .app-v2 {
   width: min(1320px, calc(100% - 40px));
 }

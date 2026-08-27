@@ -15,8 +15,6 @@ class Settings(BaseSettings):
     cookie_dir: Path = Path("/data/cookies")
     static_dir: Path = Path("/app/static")
     auth_secret: str = "change-this-auth-secret"
-    admin_username: str = "admin"
-    admin_password: str = "change-this-admin-password"
     guest_daily_limit: int = Field(default=3, ge=1, le=1000)
     user_daily_limit: int = Field(default=10, ge=1, le=1000)
     max_concurrent_downloads: int = Field(default=2, ge=1, le=10)
@@ -36,7 +34,7 @@ class Settings(BaseSettings):
     whisper_cpu_threads: int = Field(default=2, ge=1, le=32)
     whisper_cache_dir: Path = Path("/data/cache/whisper")
     engine_channel: str = Field(default="stable", pattern=r"^(stable|nightly)$")
-    app_version: str = "2.2.2"
+    app_version: str = "2.3.0"
     trusted_proxy_headers: bool = False
 
     @property

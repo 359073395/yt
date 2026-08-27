@@ -6,7 +6,7 @@ DOMAIN=""
 INSTALL_DIR="/opt/video-parser"
 PUBLIC_PORT="8080"
 PORT_WAS_SET=0
-APP_VERSION="2.2.2"
+APP_VERSION="2.3.0"
 IMAGE="ghcr.io/359073395/video-parser:${APP_VERSION}"
 
 while [[ $# -gt 0 ]]; do
@@ -44,7 +44,6 @@ if ! need_cmd git; then
   apt-get install -y --no-install-recommends git ca-certificates curl
 fi
 
-FIRST_INSTALL=0
 if [[ -d "$INSTALL_DIR/.git" ]]; then
   git -C "$INSTALL_DIR" fetch --prune origin
   git -C "$INSTALL_DIR" pull --ff-only
@@ -52,7 +51,6 @@ elif [[ -e "$INSTALL_DIR" ]] && [[ -n "$(find "$INSTALL_DIR" -mindepth 1 -maxdep
   echo "安装目录已存在且不是 Git 仓库，请人工确认: $INSTALL_DIR"
   exit 1
 else
-  FIRST_INSTALL=1
   mkdir -p "$(dirname "$INSTALL_DIR")"
   git clone "$REPO_URL" "$INSTALL_DIR"
 fi
@@ -96,13 +94,8 @@ set_env APP_HOST "0.0.0.0"
 set_env APP_PORT "8080"
 set_env APP_VERSION "$APP_VERSION"
 
-GENERATED_PASSWORD=""
 if [[ "$(env_value AUTH_SECRET)" == "change-this-auth-secret" || -z "$(env_value AUTH_SECRET)" ]]; then
   set_env AUTH_SECRET "$(random_secret)"
-fi
-if [[ "$(env_value ADMIN_PASSWORD)" == "change-this-admin-password" || "$(env_value ADMIN_PASSWORD)" == "lhw111111" || -z "$(env_value ADMIN_PASSWORD)" ]]; then
-  GENERATED_PASSWORD="YL-$(random_secret | cut -c1-20)"
-  set_env ADMIN_PASSWORD "$GENERATED_PASSWORD"
 fi
 chmod 600 .env
 
@@ -114,7 +107,7 @@ if docker inspect video-parser >/dev/null 2>&1; then
   fi
 fi
 
-echo "正在获取影链工坊 2.2.2 镜像..."
+echo "正在获取影链工坊 2.3.0 镜像..."
 DEPLOY_IMAGE="$IMAGE"
 if VIDEO_PARSER_IMAGE="$IMAGE" docker compose pull video-parser; then
   :
@@ -197,17 +190,10 @@ fi
 
 SERVER_IP="$(curl -fsS https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
 echo
-echo "影链工坊 2.2.2 已通过健康检查。"
+echo "影链工坊 2.3.0 已通过健康检查。"
 echo "版本信息: http://${SERVER_IP}:${PUBLIC_PORT}/api/health"
 if [[ -n "$DOMAIN" ]]; then
   echo "请把 ${DOMAIN} 反向代理到 http://127.0.0.1:${PUBLIC_PORT}"
 else
   echo "访问地址: http://${SERVER_IP}:${PUBLIC_PORT}"
-fi
-echo "管理员账号: $(env_value ADMIN_USERNAME)"
-if [[ -n "$GENERATED_PASSWORD" ]]; then
-  echo "首次管理员密码: $GENERATED_PASSWORD"
-  echo "请立即登录并妥善保存；配置文件位于 $APP_DIR/.env"
-elif (( FIRST_INSTALL == 1 )); then
-  echo "管理员密码保存在 $APP_DIR/.env"
 fi

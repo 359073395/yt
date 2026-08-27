@@ -31,8 +31,9 @@ PLATFORM_DOMAINS: dict[str, tuple[str, ...]] = {
 class CookieStore:
     """Encrypted Netscape cookie profiles used by yt-dlp and Chromium.
 
-    Global administrator profiles keep their legacy paths. User profiles are
-    stored below ``users/<id>`` and are never returned to another account.
+    Legacy global profiles keep their original paths for API compatibility.
+    Browser profiles are stored below ``users/<id>`` and never fall back to a
+    global account, so one visitor cannot silently use another account.
     """
 
     def __init__(self, directory: Path, secret: str) -> None:
@@ -124,7 +125,7 @@ class CookieStore:
     def exists(self, name: str | None, owner_id: int | None = None) -> bool:
         if not name:
             return False
-        return self._path(name, owner_id).exists() or (owner_id is not None and self._path(name).exists())
+        return self._path(name, owner_id).exists()
 
     @staticmethod
     def browser_cookies_to_netscape(cookies: list[dict[str, Any]]) -> bytes:
@@ -165,9 +166,7 @@ class CookieStore:
         for candidate_name in preferred:
             if not candidate_name:
                 continue
-            if owner_id is not None:
-                candidates.append(self._path(candidate_name, owner_id))
-            candidates.append(self._path(candidate_name))
+            candidates.append(self._path(candidate_name, owner_id))
         selected = next((path for path in candidates if path.exists()), None)
         if not selected:
             yield None
