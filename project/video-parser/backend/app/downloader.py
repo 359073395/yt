@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import re
 import secrets
@@ -11,7 +12,7 @@ import tempfile
 import zipfile
 from datetime import datetime
 from xml.etree import ElementTree
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext, suppress
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from time import monotonic
@@ -38,6 +39,9 @@ from .models import (
 )
 from .store import JobStore
 from .transcriber import TranscriptSegment, Transcriber, TranscriptionUnavailable, clean_text, render_transcript
+
+
+logger = logging.getLogger(__name__)
 
 
 class DownloadRejected(Exception):
@@ -72,6 +76,50 @@ class Downloader:
         self.metadata_cache: dict[tuple[str, str | None, int | None], tuple[float, dict[str, Any]]] = {}
         self.douyin_video_profiles: dict[str, str] = {}
         self.transcriber = Transcriber(settings)
+
+    @asynccontextmanager
+    async def _chromium_browser(self, chromium: str):
+        from playwright.async_api import async_playwright
+
+        playwright: Any = None
+        browser: Any = None
+        try:
+            logger.info("downloader chromium_starting binary=%s", chromium)
+            playwright = await asyncio.wait_for(async_playwright().start(), timeout=10)
+            browser = await asyncio.wait_for(
+                playwright.chromium.launch(
+                    executable_path=chromium,
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-extensions",
+                        "--disable-background-networking",
+                        "--disable-sync",
+                        "--no-first-run",
+                        "--renderer-process-limit=2",
+                    ],
+                ),
+                timeout=20,
+            )
+            logger.info("downloader chromium_ready version=%s", browser.version)
+        except TimeoutError as exc:
+            logger.warning("downloader chromium_timeout", exc_info=True)
+            raise DownloadRejected("服务器浏览器启动超时，请重启影链工坊后重试。") from exc
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("downloader chromium_failed error=%s", str(exc)[:240], exc_info=True)
+            raise DownloadRejected("服务器浏览器启动失败，请重启影链工坊后重试。") from exc
+
+        try:
+            yield browser
+        finally:
+            if browser:
+                with suppress(Exception):
+                    await asyncio.wait_for(browser.close(), timeout=5)
+            if playwright:
+                with suppress(Exception):
+                    await asyncio.wait_for(playwright.stop(), timeout=5)
 
     async def inspect(self, url: str, cookie_profile: str | None = None, user_id: int | None = None) -> ParseResponse:
         async with self.semaphore:
@@ -158,6 +206,8 @@ class Downloader:
                     )
             except TimeoutError:
                 last_error = DownloadRejected("抖音主页扫描超时，请稍后重试；若多次出现，请上传有效的抖音 Cookie。")
+                logger.warning("douyin profile_scan_timeout source=%s", urlsplit(source_url).netloc)
+                raise last_error
             except DownloadRejected as exc:
                 last_error = exc
                 if "没有返回公开视频" not in str(exc):
@@ -269,15 +319,8 @@ class Downloader:
                 ))
                 self._remember_metadata(video_url, None, info)
 
-        async with async_playwright() as playwright:
-            browser = await asyncio.wait_for(
-                playwright.chromium.launch(
-                    executable_path=chromium,
-                    headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-                ),
-                timeout=15,
-            )
+        async with self._chromium_browser(chromium) as browser:
+            context: Any = None
             try:
                 context = await browser.new_context(
                     locale="zh-CN",
@@ -376,10 +419,9 @@ class Downloader:
                 for payload in api_payloads:
                     consume_payload(payload)
             finally:
-                try:
-                    await asyncio.wait_for(browser.close(), timeout=5)
-                except (Exception, asyncio.CancelledError):  # noqa: BLE001
-                    pass
+                if context:
+                    with suppress(Exception):
+                        await asyncio.wait_for(context.close(), timeout=5)
 
         if not items:
             cookie_hint = "请在页面右上角“平台登录”中扫码，或导入抖音 cookies.txt。" if not cookie_file else "当前抖音 Cookie 已失效，请重新扫码或导出并覆盖。"
@@ -520,8 +562,8 @@ class Downloader:
                     )
             except TimeoutError:
                 last_error = DownloadRejected("抖音作品页加载超时，请在“平台登录”中更新抖音 Cookie 后重试。")
-                if attempt:
-                    raise last_error
+                logger.warning("douyin video_scan_timeout source=%s", urlsplit(source_url).netloc)
+                raise last_error
             except DownloadRejected as exc:
                 last_error = exc
                 if attempt or "没有返回可下载的视频" not in str(exc):
@@ -559,15 +601,8 @@ class Downloader:
         description = ""
         thumbnail: str | None = None
         browser_cookies: list[dict[str, Any]] = []
-        async with async_playwright() as playwright:
-            browser = await asyncio.wait_for(
-                playwright.chromium.launch(
-                    executable_path=chromium,
-                    headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-                ),
-                timeout=15,
-            )
+        async with self._chromium_browser(chromium) as browser:
+            context: Any = None
             try:
                 context = await browser.new_context(
                     locale="zh-CN",
@@ -639,10 +674,9 @@ class Downloader:
                         thumbnail = open_graph_image
                 browser_cookies = await context.cookies()
             finally:
-                try:
-                    await asyncio.wait_for(browser.close(), timeout=5)
-                except (Exception, asyncio.CancelledError):  # noqa: BLE001
-                    pass
+                if context:
+                    with suppress(Exception):
+                        await asyncio.wait_for(context.close(), timeout=5)
 
         if not media_url:
             cookie_hint = "请在页面右上角“平台登录”中扫码，或导入抖音 cookies.txt。" if not cookie_file else "当前抖音 Cookie 已失效，请重新扫码或导出并覆盖。"

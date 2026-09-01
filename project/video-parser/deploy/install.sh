@@ -6,8 +6,15 @@ DOMAIN=""
 INSTALL_DIR="/opt/video-parser"
 PUBLIC_PORT="8080"
 PORT_WAS_SET=0
-APP_VERSION="2.3.0"
+APP_VERSION="2.3.1"
 IMAGE="ghcr.io/359073395/video-parser:${APP_VERSION}"
+LOG_FILE="/var/log/video-parser-install.log"
+
+if touch "$LOG_FILE" 2>/dev/null; then
+  exec > >(tee -a "$LOG_FILE") 2>&1
+fi
+echo
+echo "[$(date -Is)] 影链工坊升级开始：目标 ${APP_VERSION}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -107,7 +114,7 @@ if docker inspect video-parser >/dev/null 2>&1; then
   fi
 fi
 
-echo "正在获取影链工坊 2.3.0 镜像..."
+echo "正在获取影链工坊 ${APP_VERSION} 镜像..."
 DEPLOY_IMAGE="$IMAGE"
 if VIDEO_PARSER_IMAGE="$IMAGE" docker compose pull video-parser; then
   :
@@ -184,14 +191,19 @@ if (( healthy == 0 )); then
   if [[ -n "$OLD_IMAGE" ]] && docker image inspect video-parser:rollback >/dev/null 2>&1; then
     echo "正在自动回滚上一版本..."
     VIDEO_PARSER_IMAGE="video-parser:rollback" docker compose up -d --force-recreate
+    sleep 5
+    echo "回滚后健康接口: $(read_health)"
   fi
+  echo "完整升级日志: $LOG_FILE"
   exit 1
 fi
 
 SERVER_IP="$(curl -fsS https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
 echo
-echo "影链工坊 2.3.0 已通过健康检查。"
+echo "影链工坊 ${APP_VERSION} 已通过健康检查。"
+echo "当前容器镜像: $(docker inspect --format '{{.Config.Image}}' video-parser 2>/dev/null || echo unknown)"
 echo "版本信息: http://${SERVER_IP}:${PUBLIC_PORT}/api/health"
+echo "升级日志: $LOG_FILE"
 if [[ -n "$DOMAIN" ]]; then
   echo "请把 ${DOMAIN} 反向代理到 http://127.0.0.1:${PUBLIC_PORT}"
 else

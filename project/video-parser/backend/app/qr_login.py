@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import shutil
 import uuid
 from contextlib import suppress
@@ -13,6 +14,7 @@ from .cookies import CookieStore
 from .models import CookieProfilePublic, QrLoginPublic, QrLoginStatus
 
 
+logger = logging.getLogger(__name__)
 QR_LOGIN_PLATFORMS = {"douyin", "tiktok", "bilibili"}
 ACTIVE_STATUSES = {QrLoginStatus.starting, QrLoginStatus.waiting, QrLoginStatus.scanned}
 LOGIN_COOKIE_NAMES = {
@@ -96,6 +98,10 @@ class QrLoginManager:
         self._browser_lock = asyncio.Lock()
         self._playwright: Any = None
         self._browser: Any = None
+        self.browser_start_timeout_seconds = 25
+        self.browser_acquire_timeout_seconds = 45
+        self.page_load_timeout_seconds = 20
+        self.qr_find_timeout_seconds = 25
 
     async def start(self, user_id: int, platform: str) -> QrLoginPublic:
         platform = platform.lower()
@@ -121,6 +127,7 @@ class QrLoginManager:
             )
             self.sessions[session.session_id] = session
             self.owner_sessions[(user_id, platform)] = session.session_id
+            logger.info("qr_login session_started platform=%s session=%s", platform, session.session_id[:8])
             session.task = asyncio.create_task(self._run(session))
             return session.public()
 
@@ -163,14 +170,7 @@ class QrLoginManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         async with self._browser_lock:
-            if self._browser:
-                with suppress(Exception):
-                    await self._browser.close()
-            if self._playwright:
-                with suppress(Exception):
-                    await self._playwright.stop()
-            self._browser = None
-            self._playwright = None
+            await self._stop_browser_unlocked()
 
     def _owned(self, session_id: str, user_id: int) -> QrLoginSession:
         session = self.sessions.get(session_id)
@@ -198,34 +198,89 @@ class QrLoginManager:
                 raise RuntimeError("服务器未安装 Chromium，暂时无法扫码登录。")
             from playwright.async_api import async_playwright
 
-            if self._playwright:
-                with suppress(Exception):
-                    await self._playwright.stop()
-            self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                executable_path=chromium,
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"],
-            )
-            return self._browser
+            await self._stop_browser_unlocked()
+            logger.info("qr_login browser_starting binary=%s", chromium)
+            try:
+                self._playwright = await asyncio.wait_for(
+                    async_playwright().start(),
+                    timeout=10,
+                )
+                self._browser = await asyncio.wait_for(
+                    self._playwright.chromium.launch(
+                        executable_path=chromium,
+                        headless=True,
+                        args=[
+                            "--no-sandbox",
+                            "--disable-dev-shm-usage",
+                            "--disable-gpu",
+                            "--disable-extensions",
+                            "--disable-background-networking",
+                            "--disable-sync",
+                            "--no-first-run",
+                            "--renderer-process-limit=2",
+                        ],
+                    ),
+                    timeout=self.browser_start_timeout_seconds,
+                )
+                logger.info("qr_login browser_ready version=%s", self._browser.version)
+                return self._browser
+            except (Exception, asyncio.CancelledError) as exc:
+                await self._stop_browser_unlocked()
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                raise RuntimeError("服务器浏览器启动超时或失败，请重启容器后重试。") from exc
+
+    async def _stop_browser_unlocked(self) -> None:
+        browser, playwright = self._browser, self._playwright
+        self._browser = None
+        self._playwright = None
+        if browser:
+            with suppress(Exception):
+                await asyncio.wait_for(browser.close(), timeout=5)
+        if playwright:
+            with suppress(Exception):
+                await asyncio.wait_for(playwright.stop(), timeout=5)
+
+    async def _recycle_browser_if_idle(self) -> None:
+        if any(item.status in ACTIVE_STATUSES for item in self.sessions.values()):
+            return
+        async with self._browser_lock:
+            if not any(item.status in ACTIVE_STATUSES for item in self.sessions.values()):
+                await self._stop_browser_unlocked()
 
     async def _run(self, session: QrLoginSession) -> None:
         context: Any = None
         try:
-            browser = await self._ensure_browser()
-            version = browser.version
-            context = await browser.new_context(
-                locale="zh-CN",
-                viewport={"width": 1280, "height": 900},
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    f"(KHTML, like Gecko) Chrome/{version} Safari/537.36"
-                ),
+            session.message = "正在启动服务器浏览器…"
+            browser = await asyncio.wait_for(
+                self._ensure_browser(),
+                timeout=self.browser_acquire_timeout_seconds,
             )
-            page = await context.new_page()
+            version = browser.version
+            context = await asyncio.wait_for(
+                browser.new_context(
+                    locale="zh-CN",
+                    viewport={"width": 1280, "height": 900},
+                    user_agent=(
+                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                        f"(KHTML, like Gecko) Chrome/{version} Safari/537.36"
+                    ),
+                ),
+                timeout=10,
+            )
+            page = await asyncio.wait_for(context.new_page(), timeout=10)
             page.set_default_timeout(30_000)
-            await page.goto(LOGIN_URLS[session.platform], wait_until="domcontentloaded", timeout=60_000)
-            qr_locator = await self._find_qr(page, session.platform)
+            session.message = "正在打开平台官方登录页…"
+            try:
+                await page.goto(
+                    LOGIN_URLS[session.platform],
+                    wait_until="commit",
+                    timeout=self.page_load_timeout_seconds * 1000,
+                )
+            except Exception:  # noqa: BLE001
+                logger.info("qr_login page_navigation_incomplete platform=%s", session.platform)
+            session.message = "官方页面已打开，正在读取二维码…"
+            qr_locator = await self._find_qr(page, session.platform, self.qr_find_timeout_seconds)
             await self._update_qr(session, qr_locator)
             session.status = QrLoginStatus.waiting
             session.message = "请使用平台 App 扫描二维码并在手机上确认登录。"
@@ -259,6 +314,14 @@ class QrLoginManager:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
+            error_message = str(exc).splitlines()[0][:240] if str(exc).splitlines() else type(exc).__name__
+            logger.warning(
+                "qr_login session_failed platform=%s session=%s error=%s",
+                session.platform,
+                session.session_id[:8],
+                error_message,
+                exc_info=True,
+            )
             if session.status in ACTIVE_STATUSES:
                 session.status = QrLoginStatus.failed
                 session.message = self._safe_error(exc)
@@ -267,11 +330,13 @@ class QrLoginManager:
         finally:
             if context:
                 with suppress(Exception):
-                    await context.close()
+                    await asyncio.wait_for(context.close(), timeout=5)
+            with suppress(Exception):
+                await self._recycle_browser_if_idle()
 
     @staticmethod
-    async def _find_qr(page: Any, platform: str) -> Any:
-        deadline = monotonic() + 35
+    async def _find_qr(page: Any, platform: str, timeout_seconds: float = 35) -> Any:
+        deadline = monotonic() + timeout_seconds
         while monotonic() < deadline:
             for selector in QR_SELECTORS[platform]:
                 candidates = page.locator(selector)
@@ -308,7 +373,8 @@ class QrLoginManager:
 
     @staticmethod
     def _safe_error(exc: Exception) -> str:
-        message = str(exc).splitlines()[0].strip()
+        lines = str(exc).splitlines()
+        message = lines[0].strip() if lines else ""
         if "Timeout" in type(exc).__name__ or "timeout" in message.lower():
             return "平台登录页响应超时，请稍后重新生成二维码。"
         if not message or len(message) > 180:

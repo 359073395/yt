@@ -61,6 +61,24 @@ async def test_qr_login_rejects_unsupported_platform(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_qr_login_browser_acquire_has_a_hard_timeout(tmp_path, monkeypatch):
+    manager = QrLoginManager(CookieStore(tmp_path / "cookies", "test-secret"))
+    manager.browser_acquire_timeout_seconds = 0.01
+
+    async def stuck_browser():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(manager, "_ensure_browser", stuck_browser)
+
+    created = await manager.start(7, "douyin")
+    await manager.sessions[created.session_id].task
+    failed = manager.get(created.session_id, 7)
+
+    assert failed.status == QrLoginStatus.failed
+    assert "超时" in failed.message
+
+
+@pytest.mark.asyncio
 async def test_successful_scan_saves_only_platform_cookies(tmp_path, monkeypatch):
     store = CookieStore(tmp_path / "cookies", "test-secret")
     manager = QrLoginManager(store, timeout_seconds=300)
@@ -98,7 +116,7 @@ async def test_successful_scan_saves_only_platform_cookies(tmp_path, monkeypatch
     async def fake_browser():
         return FakeBrowser()
 
-    async def fake_find(_page, _platform):
+    async def fake_find(_page, _platform, _timeout_seconds=35):
         return FakeQr()
 
     monkeypatch.setattr(manager, "_ensure_browser", fake_browser)

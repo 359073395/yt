@@ -2,10 +2,12 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import shutil
 from contextlib import asynccontextmanager, suppress
+from importlib.util import find_spec
 from pathlib import Path
-from time import time
+from time import monotonic, time
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,6 +43,8 @@ from .models import (
 from .security import RateLimiter, client_ip_from_request, validate_public_url
 from .qr_login import QR_LOGIN_PLATFORMS, QrLoginCapacityError, QrLoginManager
 from .store import JobStore
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 store = JobStore(settings.download_dir, settings.job_ttl_seconds, settings.database_path)
@@ -179,8 +183,9 @@ async def binary_version(binary: str, *arguments: str) -> str:
 
 @app.get("/api/health")
 async def health() -> dict[str, object]:
-    """Return a fast liveness response without spawning subprocesses."""
+    """Return a fast liveness response without loading native runtimes."""
     chromium = settings.chromium_path.strip() or shutil.which("chromium") or shutil.which("chromium-browser")
+    transcription_available = settings.transcription_enabled and find_spec("faster_whisper") is not None
     return {
         "status": "ok",
         "version": settings.app_version,
@@ -191,7 +196,7 @@ async def health() -> dict[str, object]:
             "ffmpeg": "available" if shutil.which("ffmpeg") else "missing",
             "chromium": "available" if chromium and Path(chromium).is_file() else "missing",
             "qr_login": "available" if chromium and Path(chromium).is_file() else "missing",
-            "transcription": "available" if downloader.transcriber.available else "disabled",
+            "transcription": "available" if transcription_available else "disabled",
         },
     }
 
@@ -200,6 +205,7 @@ async def health() -> dict[str, object]:
 async def diagnostics() -> dict[str, object]:
     """Return detailed component versions for interactive troubleshooting."""
     chromium_binary = settings.chromium_path.strip() or shutil.which("chromium") or "chromium-browser"
+    transcription_available = settings.transcription_enabled and find_spec("faster_whisper") is not None
     deno, ffmpeg, chromium = await asyncio.gather(
         binary_version("deno", "--version"),
         binary_version("ffmpeg", "-version"),
@@ -215,7 +221,7 @@ async def diagnostics() -> dict[str, object]:
             "ffmpeg": ffmpeg,
             "chromium": chromium,
             "qr_login": "available" if chromium != "missing" else "missing",
-            "transcription": f"faster-whisper/{settings.whisper_model}" if downloader.transcriber.available else "disabled",
+            "transcription": f"faster-whisper/{settings.whisper_model}" if transcription_available else "disabled",
         },
     }
 
@@ -243,11 +249,16 @@ async def parse_video(payload: ParseRequest, request: Request) -> ParseResponse:
     user, client_ip = request_identity(request)
     rate_limiter.check(f"parse:{client_ip}")
     url = validate_public_url(payload.url)
+    started = monotonic()
+    logger.info("parse started")
     if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile, user.id if user else None):
         raise HTTPException(status_code=400, detail="所选 Cookie 配置不存在。")
     try:
-        return await downloader.inspect(url, payload.cookie_profile, user.id if user else None)
+        result = await downloader.inspect(url, payload.cookie_profile, user.id if user else None)
+        logger.info("parse completed platform=%s elapsed=%.2f", result.platform, monotonic() - started)
+        return result
     except DownloadRejected as exc:
+        logger.warning("parse rejected elapsed=%.2f error=%s", monotonic() - started, str(exc)[:240])
         raise HTTPException(status_code=422, detail=downloader._safe_error(exc)) from exc
 
 
@@ -256,11 +267,16 @@ async def inspect_collection(payload: CollectionInspectRequest, request: Request
     user, client_ip = request_identity(request)
     rate_limiter.check(f"collection:{client_ip}")
     url = validate_public_url(payload.url)
+    started = monotonic()
+    logger.info("collection started max_items=%s", payload.max_items)
     if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile, user.id if user else None):
         raise HTTPException(status_code=400, detail="所选 Cookie 配置不存在。")
     try:
-        return await downloader.inspect_collection(url, payload.max_items, payload.cookie_profile, user.id if user else None)
+        result = await downloader.inspect_collection(url, payload.max_items, payload.cookie_profile, user.id if user else None)
+        logger.info("collection completed extractor=%s items=%s elapsed=%.2f", result.extractor, len(result.items), monotonic() - started)
+        return result
     except DownloadRejected as exc:
+        logger.warning("collection rejected elapsed=%.2f error=%s", monotonic() - started, str(exc)[:240])
         raise HTTPException(status_code=422, detail=downloader._safe_error(exc)) from exc
 
 

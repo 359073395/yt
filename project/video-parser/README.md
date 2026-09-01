@@ -59,10 +59,10 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 
 ## 从 1.0 / 2.0 升级
 
-2.3.0 继续使用原来的 `/data/video-parser.sqlite3` 和 Docker volume，不需要迁移历史任务或 Cookie。旧用户、管理员和 API Key 记录会留在数据库中用于兼容，但 2.3 不再暴露站点登录与管理后台。升级脚本会自动：
+2.3.1 继续使用原来的 `/data/video-parser.sqlite3` 和 Docker volume，不需要迁移历史任务或 Cookie。旧用户、管理员和 API Key 记录会留在数据库中用于兼容，但 2.3 不再暴露站点登录与管理后台。2.3.1 为服务器 Chromium 启动、扫码资源回收和解析超时增加硬保护，避免页面长期停在“正在连接”。升级脚本会自动：
 
 1. 保留 `.env` 和数据卷。
-2. 拉取 2.3.0 镜像，启动后验证精确版本和服务健康状态。
+2. 拉取 2.3.1 镜像，启动后验证精确版本和服务健康状态。
 3. 失败时回滚上一容器镜像。
 
 不要使用 `docker compose down --volumes` 更新，否则会删除数据库和历史文件。

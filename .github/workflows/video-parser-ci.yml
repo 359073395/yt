@@ -112,7 +112,7 @@ jobs:
           response=""
           for _ in $(seq 1 40); do
             response="$(curl -fsS --max-time 5 http://127.0.0.1:18080/api/health 2>/dev/null || true)"
-            if [[ "$response" == *'"version":"2.3.0"'* && "$response" == *'"chromium":"available"'* && "$response" == *'"qr_login":"available"'* && "$response" == *'"transcription":"available"'* ]]; then
+            if [[ "$response" == *'"version":"2.3.1"'* && "$response" == *'"chromium":"available"'* && "$response" == *'"qr_login":"available"'* && "$response" == *'"transcription":"available"'* ]]; then
               break
             fi
             if [[ "$(docker inspect --format '{{.State.Running}}' video-parser-smoke 2>/dev/null || true)" != "true" ]]; then
@@ -120,7 +120,7 @@ jobs:
             fi
             sleep 2
           done
-          if [[ "$response" != *'"version":"2.3.0"'* || "$response" != *'"chromium":"available"'* || "$response" != *'"qr_login":"available"'* || "$response" != *'"transcription":"available"'* ]]; then
+          if [[ "$response" != *'"version":"2.3.1"'* || "$response" != *'"chromium":"available"'* || "$response" != *'"qr_login":"available"'* || "$response" != *'"transcription":"available"'* ]]; then
             echo "Unexpected health response: ${response:-no response}"
             docker inspect video-parser-smoke
             docker logs video-parser-smoke
@@ -181,7 +181,7 @@ jobs:
       meta-images: ghcr.io/359073395/video-parser
       meta-tags: |
         type=raw,value=latest
-        type=raw,value=2.3.0
+        type=raw,value=2.3.1
         type=sha
     secrets:
       registry-auths: |
