@@ -17,8 +17,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     XDG_CACHE_HOME=/data/cache \
     DENO_DIR=/data/cache/deno \
     CHROMIUM_PATH=/usr/bin/chromium \
-    QR_LOGIN_TIMEOUT_SECONDS=300 \
-    QR_LOGIN_MAX_SESSIONS=3 \
     WHISPER_CACHE_DIR=/data/cache/whisper \
     HOME=/tmp/yinglian
 
@@ -35,7 +33,7 @@ COPY backend/app ./app
 COPY --from=frontend /src/frontend/dist ./static
 RUN groupadd --gid 10001 yinglian \
     && useradd --uid 10001 --gid yinglian --no-create-home --shell /usr/sbin/nologin yinglian \
-    && mkdir -p /data/downloads /data/cookies /data/cache/whisper /tmp/yinglian \
+    && mkdir -p /data/downloads /data/cache/whisper /tmp/yinglian \
     && chown -R yinglian:yinglian /app /data /tmp/yinglian
 
 EXPOSE 8080

@@ -619,8 +619,8 @@ class AuthStore:
         return QuotaPublic(limit=None, used=0, remaining=None, unlimited=True)
 
     def consume_quota(self, user: AuthUser | None, client_ip: str, amount: int = 1) -> QuotaPublic:
-        if amount < 1 or amount > 50:
-            raise ValueError("单次额度扣除数量必须在 1 到 50 之间。")
+        if amount < 1 or amount > 500:
+            raise ValueError("单次任务数量必须在 1 到 500 之间。")
         return self.quota_for(user, client_ip)
 
     def _usage_count(self, subject_type: str, subject_key: str) -> int:

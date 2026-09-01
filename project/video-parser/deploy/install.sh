@@ -6,7 +6,7 @@ DOMAIN=""
 INSTALL_DIR="/opt/video-parser"
 PUBLIC_PORT="8080"
 PORT_WAS_SET=0
-APP_VERSION="2.3.1"
+APP_VERSION="2.5.0"
 IMAGE="ghcr.io/359073395/video-parser:${APP_VERSION}"
 LOG_FILE="/var/log/video-parser-install.log"
 

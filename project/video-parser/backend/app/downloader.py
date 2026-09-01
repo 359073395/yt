@@ -25,6 +25,7 @@ import httpx
 from .assets import RemoteAssetError, fetch_remote_asset, signed_asset_url
 from .config import Settings
 from .cookies import CookieStore
+from .douyin_public import DouyinPublicError, DouyinPublicSession
 from .models import (
     CollectionInspectResponse,
     CollectionItem,
@@ -75,6 +76,15 @@ class Downloader:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.metadata_cache: dict[tuple[str, str | None, int | None], tuple[float, dict[str, Any]]] = {}
         self.douyin_video_profiles: dict[str, str] = {}
+        chromium = (
+            settings.chromium_path.strip()
+            or shutil.which("chromium")
+            or shutil.which("chromium-browser")
+            or shutil.which("chrome")
+            or shutil.which("google-chrome")
+            or ""
+        )
+        self.douyin_public = DouyinPublicSession(chromium, settings.request_timeout_seconds)
         self.transcriber = Transcriber(settings)
 
     @asynccontextmanager
@@ -136,7 +146,7 @@ class Downloader:
                     if self._is_douyin_url(resolved_url):
                         info = self._cached_metadata(resolved_url, cookie_profile, user_id)
                         if info is None:
-                            info, _ = await self._capture_douyin_browser_info(resolved_url, cookie_file)
+                            info = await self._capture_douyin_public_info(resolved_url)
                         output = json.dumps(info, ensure_ascii=False)
                     else:
                         output, _ = await self._capture_metadata(resolved_url, cookie_file)
@@ -167,13 +177,83 @@ class Downloader:
                 ) if self.cookies else nullcontext(None)
                 with context as cookie_file:
                     if self._is_douyin_url(url):
-                        return await self._inspect_douyin_collection(url, max_items, cookie_file)
+                        return await self._inspect_douyin_public_collection(url, max_items)
                     output = await self._capture_collection(url, max_items, cookie_file)
         try:
             info = json.loads(output)
         except json.JSONDecodeError as exc:
             raise DownloadRejected("主页解析器返回了无效数据，请更新引擎后重试。") from exc
         return self._collection_response(url, info, max_items)
+
+    async def _capture_douyin_public_info(self, source_url: str) -> dict[str, Any]:
+        resolved_url = await asyncio.to_thread(self._resolve_douyin_url, source_url)
+        video_id = self._douyin_video_id(resolved_url)
+        if not video_id:
+            raise DownloadRejected("这不是抖音单个作品链接；博主主页请切换到“博主主页”。")
+        try:
+            aweme = await self.douyin_public.video_detail(video_id, resolved_url)
+        except DouyinPublicError as exc:
+            raise DownloadRejected(str(exc)) from exc
+        info = self._douyin_aweme_info(aweme)
+        if info is None:
+            raise DownloadRejected("该抖音公开作品不是可下载的视频，或暂时没有返回媒体地址。")
+        return info
+
+    async def _inspect_douyin_public_collection(
+        self,
+        source_url: str,
+        max_items: int,
+    ) -> CollectionInspectResponse:
+        sec_uid = self._douyin_sec_uid(source_url)
+        resolved_url = source_url if sec_uid else await asyncio.to_thread(self._resolve_douyin_url, source_url)
+        sec_uid = sec_uid or self._douyin_sec_uid(resolved_url)
+        if not sec_uid:
+            if self._douyin_video_id(resolved_url):
+                raise DownloadRejected("这是抖音单个作品链接，请切换到“单条解析”。")
+            raise DownloadRejected("没有识别出抖音博主主页，请复制作者主页分享链接后重试。")
+
+        canonical_url = f"https://www.douyin.com/user/{sec_uid}"
+        try:
+            raw_items, has_more, total_count = await self.douyin_public.profile_posts(
+                sec_uid,
+                max_items,
+                canonical_url,
+            )
+        except DouyinPublicError as exc:
+            raise DownloadRejected(str(exc)) from exc
+
+        items: list[CollectionItem] = []
+        title = "抖音博主主页"
+        for aweme in raw_items:
+            info = self._douyin_aweme_info(aweme)
+            if info is None:
+                continue
+            author = aweme.get("author") if isinstance(aweme.get("author"), dict) else {}
+            nickname = str(author.get("nickname") or "").strip()
+            if nickname:
+                title = nickname
+            video_url = str(info["webpage_url"])
+            self.douyin_video_profiles[str(info["id"])] = sec_uid
+            self._remember_metadata(video_url, None, info)
+            items.append(CollectionItem(
+                url=video_url,
+                title=str(info["title"]),
+                thumbnail=info.get("thumbnail"),
+                thumbnail_proxy_url=self._signed_asset(info.get("thumbnail"), "cover", download=False),
+                duration=info.get("duration"),
+                uploader=nickname or None,
+            ))
+
+        if not items:
+            raise DownloadRejected("该抖音主页暂时没有返回可下载的公开视频。")
+        return CollectionInspectResponse(
+            source_url=source_url,
+            title=title,
+            extractor="DouyinPublic",
+            total_count=total_count,
+            items=items,
+            truncated=has_more or bool(total_count and total_count > len(raw_items)),
+        )
 
     async def _inspect_douyin_collection(
         self,
@@ -584,7 +664,7 @@ class Downloader:
             video_id = self._douyin_video_id(resolved_url)
         if not video_id:
             if self._douyin_sec_uid(resolved_url):
-                raise DownloadRejected("这是抖音创作者主页，请切换到“批量下载”。")
+                raise DownloadRejected("这是抖音创作者主页，请切换到“博主主页”。")
             raise DownloadRejected("没有从该抖音链接识别出视频作品。")
 
         chromium = self.settings.chromium_path.strip() or shutil.which("chromium") or shutil.which("chromium-browser")
@@ -730,17 +810,14 @@ class Downloader:
             self.store.save(job)
             info = self._cached_metadata(job.url, job.cookie_profile, job.user_id) or self._cached_metadata(job.url, None)
             if info is None:
-                info, _ = await self._capture_douyin_browser_info(job.url, cookie_file)
+                info = await self._capture_douyin_public_info(job.url)
             job.update_from_info(info)
             self._enforce_limits(job)
             self.store.save(job)
 
             formats = info.get("formats")
             available = [item for item in formats if isinstance(item, dict)] if isinstance(formats, list) else []
-            selected = next(
-                (item for item in available if job.format_id != "best" and item.get("format_id") == job.format_id),
-                available[0] if available else {},
-            )
+            selected = self._select_direct_format(available, job.format_id)
             media_url = str(selected.get("url") or "")
             if not self._is_douyin_media_url(media_url):
                 raise DownloadRejected("抖音作品没有返回安全的媒体地址。")
@@ -772,10 +849,7 @@ class Downloader:
 
         formats = info.get("formats")
         available = [item for item in formats if isinstance(item, dict)] if isinstance(formats, list) else []
-        selected = next(
-            (item for item in available if job.format_id != "best" and item.get("format_id") == job.format_id),
-            available[0] if available else {},
-        )
+        selected = self._select_direct_format(available, job.format_id)
         media_url = str(selected.get("url") or "")
         if not self._is_tiktok_media_url(media_url):
             raise DownloadRejected("TikTok 作品没有返回安全的媒体地址。")
@@ -1144,6 +1218,26 @@ class Downloader:
         job.expires_at = job.updated_at + self.settings.job_ttl_seconds
         self.store.save(job)
 
+    @classmethod
+    def _select_direct_format(cls, available: list[dict[str, Any]], format_id: str) -> dict[str, Any]:
+        if not available:
+            return {}
+        if match := re.fullmatch(r"max-(2160|1440|1080|720|480|360)", format_id):
+            ceiling = int(match.group(1))
+            within_limit = [
+                item for item in available
+                if (cls._as_int(item.get("height")) or 0) <= ceiling
+            ]
+            if within_limit:
+                return max(within_limit, key=lambda item: (
+                    cls._as_int(item.get("height")) or 0,
+                    cls._as_int(item.get("tbr") or item.get("bitrate")) or 0,
+                ))
+        return next(
+            (item for item in available if format_id != "best" and item.get("format_id") == format_id),
+            available[0],
+        )
+
     @staticmethod
     def _safe_filename(title: str, media_id: str) -> str:
         cleaned = re.sub(r"[^\w\u3400-\u9fff.-]+", "_", title, flags=re.UNICODE).strip("._")
@@ -1295,7 +1389,7 @@ class Downloader:
         except TimeoutError as exc:
             process.kill()
             await process.wait()
-            raise DownloadRejected("解析超时，请检查网络、Cookie 或稍后重试。") from exc
+            raise DownloadRejected("解析超时，请检查服务器网络或稍后重试。") from exc
         if process.returncode != 0:
             message = stderr.decode("utf-8", errors="replace").strip()
             raise DownloadRejected(message[-1600:] or f"yt-dlp 退出码 {process.returncode}")
@@ -1336,6 +1430,13 @@ class Downloader:
 
     async def _capture_collection(self, url: str, max_items: int, cookie_file: Path | None) -> str:
         is_tiktok = self._is_tiktok_url(url)
+        collection_target = url
+        if is_tiktok and self._tiktok_profile_username(url):
+            try:
+                sec_uid = await asyncio.to_thread(self._resolve_tiktok_profile_sec_uid, url)
+            except (OSError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+                raise DownloadRejected("TikTok 公开主页暂时无法识别，请稍后重试。") from exc
+            collection_target = f"tiktokuser:{sec_uid}"
         targets = self.TIKTOK_IMPERSONATE_TARGETS if is_tiktok else (None,)
         for index, target in enumerate(targets):
             command = [
@@ -1345,7 +1446,7 @@ class Downloader:
                 str(max_items + 1),
                 "--dump-single-json",
                 "--skip-download",
-                url,
+                collection_target,
             ]
             try:
                 output = await self._run_capture(command, self.settings.metadata_timeout_seconds)
@@ -1355,7 +1456,7 @@ class Downloader:
                     raise
             else:
                 return output
-        raise DownloadRejected("TikTok 主页未返回视频列表，请稍后重试或上传 Cookie。")
+        raise DownloadRejected("TikTok 公开主页暂时没有返回视频列表，请稍后重试。")
 
     async def _canonicalize_tiktok_url(self, url: str) -> str:
         if not self._is_tiktok_url(url):
@@ -1391,6 +1492,10 @@ class Downloader:
         video_id = self._tiktok_video_id(url)
         if not video_id:
             raise ValueError("TikTok URL does not contain a video ID")
+        html = self._fetch_tiktok_embed_html(video_id)
+        return self._tiktok_info_from_embed_html(html, url, video_id)
+
+    def _fetch_tiktok_embed_html(self, video_id: str) -> str:
         embed_url = f"https://www.tiktok.com/embed/v2/{video_id}"
         request = Request(
             embed_url,
@@ -1406,10 +1511,45 @@ class Downloader:
             payload = response.read(self.TIKTOK_EMBED_MAX_BYTES + 1)
         if len(payload) > self.TIKTOK_EMBED_MAX_BYTES:
             raise ValueError("TikTok embed response is too large")
-        return self._tiktok_info_from_embed_html(payload.decode("utf-8"), url, video_id)
+        return payload.decode("utf-8")
 
-    @classmethod
-    def _tiktok_info_from_embed_html(cls, html: str, webpage_url: str, video_id: str) -> dict[str, Any]:
+    def _resolve_tiktok_profile_sec_uid(self, url: str) -> str:
+        username = self._tiktok_profile_username(url)
+        if not username:
+            raise ValueError("TikTok URL is not a creator profile")
+        profile_url = f"https://www.tiktok.com/embed/@{username}"
+        request = Request(
+            profile_url,
+            headers={"Accept": "text/html,application/xhtml+xml", "User-Agent": self.BROWSER_USER_AGENT},
+        )
+        with urlopen(request, timeout=min(self.settings.request_timeout_seconds, 20)) as response:  # noqa: S310
+            payload = response.read(self.TIKTOK_EMBED_MAX_BYTES + 1)
+        if len(payload) > self.TIKTOK_EMBED_MAX_BYTES:
+            raise ValueError("TikTok profile embed response is too large")
+        state = self._tiktok_frontity_state(payload.decode("utf-8"))
+        entries = state.get("source", {}).get("data", {})
+        profile = entries.get(f"/embed/@{username}") if isinstance(entries, dict) else None
+        videos = profile.get("videoList") if isinstance(profile, dict) else None
+        if not isinstance(videos, list):
+            raise ValueError("TikTok profile embed video list is missing")
+        for item in videos[:12]:
+            video_id = str(item.get("id") or "") if isinstance(item, dict) else ""
+            if not re.fullmatch(r"\d{10,24}", video_id):
+                continue
+            try:
+                video_state = self._tiktok_frontity_state(self._fetch_tiktok_embed_html(video_id))
+                video_entry = self._tiktok_embed_entry(video_state, video_id)
+            except (OSError, TimeoutError, ValueError, json.JSONDecodeError):
+                continue
+            video_data = video_entry.get("videoData")
+            author = video_data.get("authorInfos") if isinstance(video_data, dict) else None
+            sec_uid = str(author.get("secUid") or "") if isinstance(author, dict) else ""
+            if re.fullmatch(r"MS4wLjABAAAA[A-Za-z0-9_-]+", sec_uid):
+                return sec_uid
+        raise ValueError("TikTok profile secUid is missing")
+
+    @staticmethod
+    def _tiktok_frontity_state(html: str) -> dict[str, Any]:
         match = re.search(
             r'<script[^>]+\bid=["\']__FRONTITY_CONNECT_STATE__["\'][^>]*>(.*?)</script>',
             html,
@@ -1420,6 +1560,10 @@ class Downloader:
         state = json.loads(match.group(1))
         if not isinstance(state, dict) or not isinstance(state.get("source"), dict):
             raise ValueError("TikTok embed state is invalid")
+        return state
+
+    @staticmethod
+    def _tiktok_embed_entry(state: dict[str, Any], video_id: str) -> dict[str, Any]:
         entries = state["source"].get("data")
         if not isinstance(entries, dict):
             raise ValueError("TikTok embed source data is invalid")
@@ -1432,6 +1576,14 @@ class Downloader:
                 ),
                 None,
             )
+        if not isinstance(entry, dict):
+            raise ValueError("TikTok embed video entry is missing")
+        return entry
+
+    @classmethod
+    def _tiktok_info_from_embed_html(cls, html: str, webpage_url: str, video_id: str) -> dict[str, Any]:
+        state = cls._tiktok_frontity_state(html)
+        entry = cls._tiktok_embed_entry(state, video_id)
         video_data = entry.get("videoData") if isinstance(entry, dict) else None
         item = video_data.get("itemInfos") if isinstance(video_data, dict) else None
         if not isinstance(item, dict) or str(item.get("id") or "") != video_id:
@@ -1567,7 +1719,10 @@ class Downloader:
         if job.media_type in {MediaType.audio, MediaType.transcript}:
             command.extend(["--format", "bestaudio/best", "--extract-audio", "--audio-format", job.audio_format])
         else:
-            if job.format_id == "best":
+            if match := re.fullmatch(r"max-(2160|1440|1080|720|480|360)", job.format_id):
+                height = match.group(1)
+                selector = f"bv*[height<={height}]+ba/b[height<={height}]/b"
+            elif job.format_id == "best":
                 selector = "bv*+ba/b"
             elif job.format_has_audio:
                 selector = job.format_id
@@ -1683,6 +1838,15 @@ class Downloader:
         except ValueError:
             return None
         match = re.search(r"/(?:video|v1|v2)/(\d{10,24})(?:/|$)", path)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _tiktok_profile_username(url: str) -> str | None:
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return None
+        match = re.fullmatch(r"/@([A-Za-z0-9._-]{1,64})/?", parsed.path)
         return match.group(1) if match else None
 
     @staticmethod
@@ -1870,10 +2034,16 @@ class Downloader:
 
         items: list[CollectionItem] = []
         seen: set[str] = set()
+        tiktok_username = self._tiktok_profile_username(source_url)
         for entry in raw_entries:
             if len(items) >= max_items or not isinstance(entry, dict):
                 continue
-            item_url = self._collection_entry_url(entry, info)
+            entry_id = str(entry.get("id") or "")
+            item_url = (
+                f"https://www.tiktok.com/@{tiktok_username}/video/{entry_id}"
+                if tiktok_username and re.fullmatch(r"\d{10,24}", entry_id)
+                else self._collection_entry_url(entry, info)
+            )
             if not item_url or item_url in seen:
                 continue
             seen.add(item_url)
@@ -1889,14 +2059,19 @@ class Downloader:
                 )
             )
         if not items:
-            raise DownloadRejected("没有从这个主页中找到可下载的视频；私密主页可能需要 Cookie。")
+            raise DownloadRejected("没有从这个主页中找到公开可下载的视频；私密或登录可见内容不在支持范围。")
 
         total_count = self._as_int(info.get("playlist_count") or info.get("n_entries"))
         discovered_more = len(raw_entries) > len(items)
         truncated = discovered_more or bool(total_count and total_count > len(items))
         return CollectionInspectResponse(
             source_url=source_url,
-            title=str(info.get("title") or info.get("playlist_title") or info.get("uploader") or "视频主页"),
+            title=str(
+                info.get("title")
+                or info.get("playlist_title")
+                or info.get("uploader")
+                or (f"@{tiktok_username}" if tiktok_username else "视频主页")
+            ),
             extractor=info.get("extractor_key") or info.get("extractor"),
             total_count=total_count,
             items=items,
@@ -1993,12 +2168,17 @@ class Downloader:
         if "unsupported url" in lower:
             return "yt-dlp 暂不支持该链接或平台。"
         if "sign in" in lower or "cookies" in lower or "login" in lower:
-            return "平台要求登录验证，请在页面右上角“平台登录”中扫码或更新对应平台 Cookie。"
+            return "该内容要求账号登录，影链工坊公开版仅处理免登录即可访问的内容。"
         if "larger than max-filesize" in lower:
             return "文件超过站点下载大小上限。"
         if "requested format is not available" in lower:
             return "所选清晰度已经失效，请重新解析并选择格式。"
-        if "universal data for rehydration" in lower:
-            return "TikTok 未返回视频数据，请确认链接可公开播放，或在“平台登录”中更新 TikTok Cookie。"
+        if any(marker in lower for marker in (
+            "universal data for rehydration",
+            "unexpected response from webpage request",
+            "failed to parse json",
+            "no video formats found",
+        )) and "tiktok" in lower:
+            return "TikTok 没有为这个公开条目提供可下载媒体流，已跳过；其他任务会继续。"
         cleaned = re.sub(r"/[^\s]*/\.cookies\.txt", "[cookie]", message)
         return cleaned[-800:] or "任务失败，请稍后重试。"

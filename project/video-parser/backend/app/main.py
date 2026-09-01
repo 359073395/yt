@@ -9,7 +9,7 @@ from importlib.util import find_spec
 from pathlib import Path
 from time import monotonic, time
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,7 +17,6 @@ from fastapi.staticfiles import StaticFiles
 from .assets import RemoteAssetError, fetch_remote_asset, signed_asset_url, verify_asset_token
 from .auth import AuthStore, AuthUser
 from .config import get_settings
-from .cookies import CookieStore, MAX_COOKIE_BYTES, PLATFORM_DOMAINS
 from .downloader import DownloadRejected, Downloader
 from .models import (
     BrowserSessionResponse,
@@ -26,7 +25,6 @@ from .models import (
     BatchJobItemResponse,
     CollectionInspectRequest,
     CollectionInspectResponse,
-    CookieProfilePublic,
     Job,
     JobCreateRequest,
     JobCreateResponse,
@@ -37,11 +35,9 @@ from .models import (
     ParseResponse,
     PlatformItem,
     PlatformsResponse,
-    QrLoginPublic,
     QuotaPublic,
 )
 from .security import RateLimiter, client_ip_from_request, validate_public_url
-from .qr_login import QR_LOGIN_PLATFORMS, QrLoginCapacityError, QrLoginManager
 from .store import JobStore
 
 logger = logging.getLogger(__name__)
@@ -49,14 +45,7 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 store = JobStore(settings.download_dir, settings.job_ttl_seconds, settings.database_path)
 rate_limiter = RateLimiter(settings.rate_limit_per_minute)
-cookie_store = CookieStore(settings.cookie_dir, settings.auth_secret)
-qr_login_manager = QrLoginManager(
-    cookie_store,
-    chromium_path=settings.chromium_path,
-    timeout_seconds=settings.qr_login_timeout_seconds,
-    max_sessions=settings.qr_login_max_sessions,
-)
-downloader = Downloader(settings, store, cookie_store)
+downloader = Downloader(settings, store)
 auth_store = AuthStore(
     database_path=settings.database_path,
     secret=settings.auth_secret,
@@ -65,19 +54,19 @@ auth_store = AuthStore(
 )
 
 SUPPORTED_PLATFORMS = [
-    PlatformItem(name="YouTube", extractor="youtube", region="international", status="supported", note="部分视频需要 Cookie 与 JavaScript 运行时。"),
+    PlatformItem(name="YouTube", extractor="youtube", region="international", status="supported", note="仅处理公开可访问视频。"),
     PlatformItem(name="TikTok", extractor="TikTok", region="international", status="supported"),
-    PlatformItem(name="Instagram", extractor="Instagram", region="international", status="supported", note="登录内容需要 Cookie。"),
-    PlatformItem(name="Facebook", extractor="Facebook", region="international", status="supported", note="登录内容需要 Cookie。"),
+    PlatformItem(name="Instagram", extractor="Instagram", region="international", status="supported", note="仅处理公开可访问内容。"),
+    PlatformItem(name="Facebook", extractor="Facebook", region="international", status="supported", note="仅处理公开可访问内容。"),
     PlatformItem(name="X / Twitter", extractor="Twitter", region="international", status="supported"),
     PlatformItem(name="Vimeo", extractor="Vimeo", region="international", status="supported"),
     PlatformItem(name="SoundCloud", extractor="SoundCloud", region="international", status="supported"),
     PlatformItem(name="Reddit", extractor="Reddit", region="international", status="supported"),
     PlatformItem(name="Twitch", extractor="Twitch", region="international", status="supported"),
     PlatformItem(name="Dailymotion", extractor="Dailymotion", region="international", status="supported"),
-    PlatformItem(name="抖音", extractor="Douyin", region="china", status="supported", note="平台风控时需要更新 Cookie。"),
+    PlatformItem(name="抖音", extractor="DouyinPublic", region="china", status="supported", note="服务器自动建立匿名访客会话。"),
     PlatformItem(name="小红书", extractor="XiaoHongShu", region="china", status="supported", note="能力随 yt-dlp 提取器更新。"),
-    PlatformItem(name="哔哩哔哩", extractor="BiliBili", region="china", status="supported", note="会员或高画质内容需要 Cookie。"),
+    PlatformItem(name="哔哩哔哩", extractor="BiliBili", region="china", status="supported", note="会员内容不在公开版支持范围。"),
     PlatformItem(name="微博", extractor="Weibo", region="china", status="supported"),
     PlatformItem(name="AcFun", extractor="AcFunVideo", region="china", status="supported"),
     PlatformItem(name="优酷", extractor="youku", region="china", status="supported"),
@@ -98,13 +87,11 @@ async def cleanup_loop() -> None:
     while True:
         await asyncio.sleep(60)
         store.cleanup()
-        await qr_login_manager.cleanup()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.download_dir.mkdir(parents=True, exist_ok=True)
-    settings.cookie_dir.mkdir(parents=True, exist_ok=True)
     settings.whisper_cache_dir.mkdir(parents=True, exist_ok=True)
     cleanup_task = asyncio.create_task(cleanup_loop())
     try:
@@ -113,10 +100,9 @@ async def lifespan(_: FastAPI):
         cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task
-        await qr_login_manager.close()
 
 
-app = FastAPI(title="影链工坊 2.3", version=settings.app_version, lifespan=lifespan)
+app = FastAPI(title="影链工坊 2.5 公开版", version=settings.app_version, lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -195,7 +181,7 @@ async def health() -> dict[str, object]:
             "deno": "available" if shutil.which("deno") else "missing",
             "ffmpeg": "available" if shutil.which("ffmpeg") else "missing",
             "chromium": "available" if chromium and Path(chromium).is_file() else "missing",
-            "qr_login": "available" if chromium and Path(chromium).is_file() else "missing",
+            "douyin_public_session": "available" if chromium and Path(chromium).is_file() else "missing",
             "transcription": "available" if transcription_available else "disabled",
         },
     }
@@ -220,7 +206,7 @@ async def diagnostics() -> dict[str, object]:
             "deno": deno,
             "ffmpeg": ffmpeg,
             "chromium": chromium,
-            "qr_login": "available" if chromium != "missing" else "missing",
+            "douyin_public_session": "available" if chromium != "missing" else "missing",
             "transcription": f"faster-whisper/{settings.whisper_model}" if transcription_available else "disabled",
         },
     }
@@ -251,8 +237,6 @@ async def parse_video(payload: ParseRequest, request: Request) -> ParseResponse:
     url = validate_public_url(payload.url)
     started = monotonic()
     logger.info("parse started")
-    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile, user.id if user else None):
-        raise HTTPException(status_code=400, detail="所选 Cookie 配置不存在。")
     try:
         result = await downloader.inspect(url, payload.cookie_profile, user.id if user else None)
         logger.info("parse completed platform=%s elapsed=%.2f", result.platform, monotonic() - started)
@@ -269,8 +253,6 @@ async def inspect_collection(payload: CollectionInspectRequest, request: Request
     url = validate_public_url(payload.url)
     started = monotonic()
     logger.info("collection started max_items=%s", payload.max_items)
-    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile, user.id if user else None):
-        raise HTTPException(status_code=400, detail="所选 Cookie 配置不存在。")
     try:
         result = await downloader.inspect_collection(url, payload.max_items, payload.cookie_profile, user.id if user else None)
         logger.info("collection completed extractor=%s items=%s elapsed=%.2f", result.extractor, len(result.items), monotonic() - started)
@@ -284,8 +266,6 @@ async def create_download(payload: JobCreateRequest, request: Request, api_key_m
     user, client_ip = request_identity(request)
     rate_limiter.check(f"job:{client_ip}")
     url = validate_public_url(payload.url)
-    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile, user.id if user else None):
-        raise HTTPException(status_code=400, detail="所选 Cookie 配置不存在。")
     if not api_key_mode:
         auth_store.consume_quota(user, client_ip)
     job = store.create(url, client_ip, payload, user.id if user else None)
@@ -302,8 +282,6 @@ async def create_job(payload: JobCreateRequest, request: Request) -> JobCreateRe
 async def create_batch_jobs(payload: BatchJobCreateRequest, request: Request) -> BatchJobCreateResponse:
     user, client_ip = request_identity(request)
     rate_limiter.check(f"job:{client_ip}")
-    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile, user.id if user else None):
-        raise HTTPException(status_code=400, detail="所选 Cookie 配置不存在。")
     urls = [validate_public_url(url) for url in payload.urls]
     quota = auth_store.consume_quota(user, client_ip, amount=len(urls))
     jobs: list[Job] = []
@@ -311,15 +289,15 @@ async def create_batch_jobs(payload: BatchJobCreateRequest, request: Request) ->
         job_payload = JobCreateRequest(
             url=url,
             media_type=payload.media_type,
-            format_id="best",
-            format_has_audio=True,
+            format_id=payload.format_id,
+            format_has_audio=payload.format_id == "best",
             audio_format=payload.audio_format,
             transcript_mode=payload.transcript_mode,
             transcript_format=payload.transcript_format,
             transcript_language=payload.transcript_language,
             include_description=payload.include_description,
             include_thumbnail=payload.include_thumbnail,
-            cookie_profile=payload.cookie_profile,
+            cookie_profile=None,
         )
         jobs.append(store.create(url, client_ip, job_payload, user.id if user else None))
     for job in jobs:
@@ -429,84 +407,6 @@ def file_response(job_id: str) -> FileResponse:
     return FileResponse(path=job.file_path, filename=job.filename or job.file_path.name, media_type="application/octet-stream")
 
 
-@app.get("/api/cookies", response_model=list[CookieProfilePublic])
-async def list_my_cookie_profiles(request: Request) -> list[CookieProfilePublic]:
-    user = auth_store.require_user(request)
-    return cookie_store.list(user.id)
-
-
-@app.put("/api/cookies/{platform}", response_model=CookieProfilePublic)
-async def upload_my_cookie_profile(platform: str, request: Request, file: UploadFile = File(...)) -> CookieProfilePublic:
-    user = auth_store.require_user(request)
-    platform = platform.lower()
-    if platform not in PLATFORM_DOMAINS:
-        raise HTTPException(status_code=400, detail="暂不支持该平台的用户 Cookie。")
-    content = await file.read(MAX_COOKIE_BYTES + 1)
-    try:
-        await qr_login_manager.cancel_platform(user.id, platform)
-        return cookie_store.save(platform, content, owner_id=user.id, platform=platform)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.delete("/api/cookies/{platform}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_my_cookie_profile(platform: str, request: Request) -> None:
-    user = auth_store.require_user(request)
-    platform = platform.lower()
-    if platform not in PLATFORM_DOMAINS:
-        raise HTTPException(status_code=400, detail="Cookie 平台名称无效。")
-    await qr_login_manager.cancel_platform(user.id, platform)
-    cookie_store.delete(platform, user.id)
-
-
-@app.post("/api/cookie-login/{platform}", response_model=QrLoginPublic, status_code=status.HTTP_201_CREATED)
-async def start_cookie_qr_login(platform: str, request: Request) -> QrLoginPublic:
-    user = auth_store.require_user(request)
-    platform = platform.lower()
-    if platform not in QR_LOGIN_PLATFORMS:
-        raise HTTPException(status_code=400, detail="该平台暂不支持扫码登录。")
-    try:
-        return await qr_login_manager.start(user.id, platform)
-    except QrLoginCapacityError as exc:
-        raise HTTPException(status_code=429, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/cookie-login/session/{session_id}", response_model=QrLoginPublic)
-async def get_cookie_qr_login(session_id: str, request: Request) -> QrLoginPublic:
-    user = auth_store.require_user(request)
-    try:
-        return qr_login_manager.get(session_id, user.id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="扫码登录会话不存在。") from exc
-
-
-@app.get("/api/cookie-login/session/{session_id}/qrcode")
-async def get_cookie_qr_code(session_id: str, request: Request) -> Response:
-    user = auth_store.require_user(request)
-    try:
-        image, revision = qr_login_manager.qr_code(session_id, user.id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="扫码登录会话不存在。") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=425, detail=str(exc)) from exc
-    return Response(
-        image,
-        media_type="image/png",
-        headers={"Cache-Control": "no-store, private", "ETag": f'"{revision}"'},
-    )
-
-
-@app.delete("/api/cookie-login/session/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def cancel_cookie_qr_login(session_id: str, request: Request) -> None:
-    user = auth_store.require_user(request)
-    try:
-        await qr_login_manager.cancel(session_id, user.id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="扫码登录会话不存在。") from exc
-
-
 @app.get("/api/v1/platforms", response_model=PlatformsResponse)
 async def v1_platforms() -> PlatformsResponse:
     return PlatformsResponse(supported=SUPPORTED_PLATFORMS, experimental=EXPERIMENTAL_PLATFORMS)
@@ -526,8 +426,6 @@ async def v1_create_job(payload: JobCreateRequest, request: Request) -> JobCreat
     auth_store.require_api_scope(api_key, "jobs:create")
     rate_limiter.check(f"api:{api_key.id}")
     url = validate_public_url(payload.url)
-    if payload.cookie_profile and not cookie_store.exists(payload.cookie_profile):
-        raise HTTPException(status_code=400, detail="所选全局 Cookie 配置不存在。")
     auth_store.consume_api_quota(api_key)
     job = store.create(url, client_ip, payload)
     asyncio.create_task(downloader.run(job))

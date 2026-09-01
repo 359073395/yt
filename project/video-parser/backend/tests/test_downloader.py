@@ -23,6 +23,15 @@ INFO = {
 TIKTOK_ID = "7678218577157115156"
 TIKTOK_URL = f"https://www.tiktok.com/@cisun_/video/{TIKTOK_ID}"
 
+
+def test_tiktok_public_stream_failure_is_reported_as_skipped():
+    message = Downloader._safe_error(
+        RuntimeError("ERROR: [TikTok] 123: Unexpected response from webpage request")
+    )
+
+    assert "TikTok" in message
+    assert "已跳过" in message
+
 COLLECTION_INFO = {
     "_type": "playlist",
     "title": "Fixture Channel",
@@ -200,7 +209,7 @@ def test_tiktok_collection_retries_with_browser_impersonation(tmp_path, monkeypa
     assert targets == [None, "Edge-101:Windows-10"]
 
 
-def test_douyin_share_profile_short_link_uses_browser_scanner(tmp_path, monkeypatch):
+def test_douyin_share_profile_short_link_uses_public_session(tmp_path, monkeypatch):
     downloader, _ = make_downloader(tmp_path)
     captured = {}
     monkeypatch.setattr(
@@ -209,27 +218,29 @@ def test_douyin_share_profile_short_link_uses_browser_scanner(tmp_path, monkeypa
         lambda _url: f"https://www.iesdouyin.com/share/user/{DOUYIN_SEC_UID}?sec_uid={DOUYIN_SEC_UID}",
     )
 
-    async def fake_scan(source_url, canonical_url, sec_uid, max_items, cookie_file):
+    async def fake_posts(sec_uid, max_items, profile_url):
         captured.update({
-            "source_url": source_url,
-            "canonical_url": canonical_url,
             "sec_uid": sec_uid,
             "max_items": max_items,
-            "cookie_file": cookie_file,
+            "profile_url": profile_url,
         })
-        return CollectionInspectResponse(
-            source_url=source_url,
-            title="Fixture Douyin Creator",
-            extractor="DouyinProfile",
-            items=[CollectionItem(url="https://www.douyin.com/video/7678266474595665907", title="Fixture")],
-        )
+        return ([{
+            "aweme_id": "7678266474595665907",
+            "desc": "Fixture",
+            "author": {"sec_uid": sec_uid, "nickname": "Fixture Douyin Creator"},
+            "video": {
+                "duration": 1000,
+                "play_addr": {"url_list": ["https://v3-dy-o.zjcdn.com/fixture.mp4"]},
+                "cover": {"url_list": ["https://p3.douyinpic.com/fixture.jpg"]},
+            },
+        }], False, 1)
 
-    monkeypatch.setattr(downloader, "_scan_douyin_profile_browser", fake_scan)
+    monkeypatch.setattr(downloader.douyin_public, "profile_posts", fake_posts)
     source = "https://v.douyin.com/qybx95SkFnQ/"
     result = asyncio.run(downloader.inspect_collection(source, 50))
 
-    assert result.extractor == "DouyinProfile"
-    assert captured["canonical_url"] == f"https://www.douyin.com/user/{DOUYIN_SEC_UID}"
+    assert result.extractor == "DouyinPublic"
+    assert captured["profile_url"] == f"https://www.douyin.com/user/{DOUYIN_SEC_UID}"
     assert captured["sec_uid"] == DOUYIN_SEC_UID
     assert captured["max_items"] == 50
 
@@ -522,6 +533,16 @@ def test_download_command_is_allowlisted(tmp_path):
     assert "137+bestaudio/137" in command
     assert "--embed-subs" in command
     assert command[-1] == payload.url
+
+
+def test_batch_quality_ceiling_builds_safe_selector(tmp_path):
+    downloader, store = make_downloader(tmp_path)
+    payload = JobCreateRequest(url="https://example.com/video", format_id="max-1080")
+    job = store.create(payload.url, "127.0.0.1", payload)
+
+    command = downloader._download_command(job, None)
+
+    assert command[command.index("--format") + 1] == "bv*[height<=1080]+ba/b[height<=1080]/b"
 
 
 def test_download_command_can_reuse_inspection_json(tmp_path):

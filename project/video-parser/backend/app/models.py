@@ -51,7 +51,7 @@ class QrLoginStatus(StrEnum):
 
 class ParseRequest(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
-    cookie_profile: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
+    cookie_profile: None = Field(default=None, exclude=True)
 
 
 class FormatOption(BaseModel):
@@ -96,8 +96,8 @@ class ParseResponse(BaseModel):
 
 class CollectionInspectRequest(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
-    max_items: int = Field(default=20, ge=1, le=50)
-    cookie_profile: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
+    max_items: int = Field(default=100, ge=1, le=500)
+    cookie_profile: None = Field(default=None, exclude=True)
 
 
 class CollectionItem(BaseModel):
@@ -130,7 +130,7 @@ class JobCreateRequest(BaseModel):
     transcript_language: str | None = Field(default=None, max_length=16, pattern=r"^[a-zA-Z0-9_.-]+$")
     include_description: bool = False
     include_thumbnail: bool = False
-    cookie_profile: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
+    cookie_profile: None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
     def normalize_transcript_job(self) -> "JobCreateRequest":
@@ -144,15 +144,16 @@ class JobCreateResponse(BaseModel):
 
 
 class BatchJobCreateRequest(BaseModel):
-    urls: list[str] = Field(min_length=1, max_length=50)
+    urls: list[str] = Field(min_length=1, max_length=500)
     media_type: MediaType = MediaType.video
+    format_id: str = Field(default="best", pattern=r"^(?:best|max-(?:2160|1440|1080|720|480|360))$")
     audio_format: str = Field(default="mp3", pattern=r"^(mp3|m4a|opus|wav|flac)$")
     transcript_mode: TranscriptMode = TranscriptMode.none
     transcript_format: TranscriptFormat = TranscriptFormat.srt
     transcript_language: str | None = Field(default=None, max_length=16, pattern=r"^[a-zA-Z0-9_.-]+$")
     include_description: bool = False
     include_thumbnail: bool = False
-    cookie_profile: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
+    cookie_profile: None = Field(default=None, exclude=True)
 
     @field_validator("urls")
     @classmethod
@@ -308,6 +309,20 @@ class CookieProfilePublic(BaseModel):
     expires_at: float | None = None
     expired: bool = False
     scope: str = "global"
+
+
+class BrowserCookie(BaseModel):
+    name: str = Field(min_length=1, max_length=256)
+    value: str = Field(max_length=16384)
+    domain: str = Field(min_length=1, max_length=255)
+    path: str = Field(default="/", min_length=1, max_length=2048)
+    secure: bool = False
+    http_only: bool = False
+    expires: float = Field(default=0, ge=0, le=253402300799)
+
+
+class BrowserCookieImportRequest(BaseModel):
+    cookies: list[BrowserCookie] = Field(min_length=1, max_length=500)
 
 
 class QrLoginPublic(BaseModel):

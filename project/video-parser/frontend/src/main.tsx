@@ -6,7 +6,6 @@ import {
   ClipboardCopy,
   Clock3,
   Captions,
-  Cookie,
   Copy,
   Download,
   FileVideo,
@@ -17,7 +16,6 @@ import {
   Music2,
   FileText,
   Play,
-  QrCode,
   RefreshCw,
   RotateCcw,
   Search,
@@ -118,6 +116,12 @@ type BatchJobCreateResponse = {
   quota: Quota
 }
 
+type BatchRun = {
+  label: string
+  jobIds: string[]
+  mode: 'batch' | 'profile'
+}
+
 type CollectionItem = {
   url: string
   title: string
@@ -148,32 +152,6 @@ type BrowserSessionResponse = {
   quota: Quota
 }
 
-type CookieProfile = {
-  name: string
-  size_bytes: number
-  updated_at: number
-  cookie_count: number
-  domains: string[]
-  expires_at?: number | null
-  expired: boolean
-  scope: 'user' | 'global'
-}
-
-type QrLoginSession = {
-  session_id: string
-  platform: 'douyin' | 'tiktok' | 'bilibili'
-  status: 'starting' | 'waiting' | 'scanned' | 'completed' | 'failed' | 'expired' | 'cancelled'
-  created_at: number
-  expires_at: number
-  message: string
-  qr_ready: boolean
-  qr_revision?: string | null
-  profile?: CookieProfile | null
-}
-
-type AuthenticatedRequest = <T>(path: string, options?: RequestInit) => Promise<T>
-type AuthenticatedFetch = (path: string, options?: RequestInit) => Promise<Response>
-
 const statusText: Record<JobStatus, string> = {
   queued: '排队中',
   parsing: '解析中',
@@ -200,11 +178,16 @@ function formatBytes(value?: number | null) {
   return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
 }
 
+function extractSharedUrls(value: string): string[] {
+  const candidates = [
+    ...Array.from(value.matchAll(/https?:\/\/[^\s<>"'，。！？；：、【】（）《》\u200b-\u200d\ufeff]+/gi), (match) => match[0]),
+    ...Array.from(value.matchAll(/(?:www\.|v\.)?douyin\.com\/[^\s<>"'，。！？；：、【】（）《》\u200b-\u200d\ufeff]+/gi), (match) => `https://${match[0]}`),
+  ]
+  return Array.from(new Set(candidates.map((candidate) => candidate.replace(/[)\]}>.,!;]+$/g, ''))))
+}
+
 function extractSharedUrl(value: string): string | null {
-  const direct = value.match(/https?:\/\/[^\s<>"'，。！？；：、【】（）《》\u200b-\u200d\ufeff]+/i)?.[0]
-  const fallback = value.match(/(?:www\.|v\.)?douyin\.com\/[^\s<>"'，。！？；：、【】（）《》\u200b-\u200d\ufeff]+/i)?.[0]
-  const candidate = direct || (fallback ? `https://${fallback}` : '')
-  return candidate ? candidate.replace(/[)\]}>.,!;]+$/g, '') : null
+  return extractSharedUrls(value)[0] || null
 }
 
 function formatDuration(value?: number | null) {
@@ -248,12 +231,14 @@ async function readError(response: Response) {
 }
 
 function App() {
-  const [inputMode, setInputMode] = React.useState<'single' | 'batch'>('single')
+  const [inputMode, setInputMode] = React.useState<'single' | 'batch' | 'profile'>('single')
   const [url, setUrl] = React.useState('')
+  const [batchText, setBatchText] = React.useState('')
   const [collectionUrl, setCollectionUrl] = React.useState('')
-  const [collectionLimit, setCollectionLimit] = React.useState(20)
+  const [collectionLimit, setCollectionLimit] = React.useState(500)
   const [collection, setCollection] = React.useState<CollectionInspectResponse | null>(null)
   const [batchMediaType, setBatchMediaType] = React.useState<'video' | 'audio' | 'transcript'>('video')
+  const [batchFormatId, setBatchFormatId] = React.useState('best')
   const [batchAudioFormat, setBatchAudioFormat] = React.useState('mp3')
   const [batchTranscriptMode, setBatchTranscriptMode] = React.useState<'none' | 'native' | 'ai' | 'auto'>('none')
   const [batchTranscriptFormat, setBatchTranscriptFormat] = React.useState<'txt' | 'srt' | 'vtt'>('txt')
@@ -269,29 +254,39 @@ function App() {
   const [transcriptLanguage, setTranscriptLanguage] = React.useState('auto')
   const [includeDescription, setIncludeDescription] = React.useState(false)
   const [includeThumbnail, setIncludeThumbnail] = React.useState(false)
-  const [cookieProfiles, setCookieProfiles] = React.useState<CookieProfile[]>([])
-  const [cookieManagerOpen, setCookieManagerOpen] = React.useState(false)
   const [history, setHistory] = React.useState<Job[]>([])
   const [job, setJob] = React.useState<Job | null>(null)
   const [isParsing, setIsParsing] = React.useState(false)
   const [isCreating, setIsCreating] = React.useState(false)
   const [isCollectionParsing, setIsCollectionParsing] = React.useState(false)
   const [isBatchCreating, setIsBatchCreating] = React.useState(false)
+  const [batchRun, setBatchRun] = React.useState<BatchRun | null>(null)
   const [message, setMessage] = React.useState<string | null>(null)
   const [clientToken, setClientToken] = React.useState('')
   const [sessionReady, setSessionReady] = React.useState(false)
+  const batchUrls = React.useMemo(() => extractSharedUrls(batchText), [batchText])
+  const batchProgress = React.useMemo(() => {
+    if (!batchRun) return null
+    const tracked = history.filter((item) => batchRun.jobIds.includes(item.job_id))
+    const completed = tracked.filter((item) => item.status === 'completed').length
+    const skipped = tracked.filter((item) => item.status === 'failed' && item.error?.includes('已跳过')).length
+    const failed = tracked.filter((item) => item.status === 'failed' && !item.error?.includes('已跳过')).length
+    const cancelled = tracked.filter((item) => item.status === 'cancelled' || item.status === 'expired').length
+    const finished = completed + skipped + failed + cancelled
+    return {
+      completed,
+      skipped,
+      failed: failed + cancelled,
+      finished,
+      total: batchRun.jobIds.length,
+      percent: batchRun.jobIds.length ? (finished / batchRun.jobIds.length) * 100 : 0,
+    }
+  }, [batchRun, history])
 
   async function apiFetch(path: string, options: RequestInit = {}, authToken = clientToken) {
     const headers = new Headers(options.headers)
     if (authToken) headers.set('Authorization', `Bearer ${authToken}`)
     return fetch(path, { ...options, headers })
-  }
-
-  async function clientRequest<T>(path: string, options: RequestInit = {}) {
-    const response = await apiFetch(path, options)
-    if (!response.ok) throw new Error(await readError(response))
-    if (response.status === 204) return undefined as T
-    return (await response.json()) as T
   }
 
   async function initializeBrowserSession() {
@@ -324,23 +319,6 @@ function App() {
     return []
   }
 
-  async function refreshCookies(authToken = clientToken) {
-    if (!authToken) {
-      setCookieProfiles([])
-      return []
-    }
-    try {
-      const response = await apiFetch('/api/cookies', {}, authToken)
-      if (!response.ok) throw new Error(await readError(response))
-      const items = (await response.json()) as CookieProfile[]
-      setCookieProfiles(items)
-      return items
-    } catch {
-      setCookieProfiles([])
-      return []
-    }
-  }
-
   React.useEffect(() => {
     void initializeBrowserSession()
   }, [])
@@ -348,7 +326,6 @@ function App() {
   React.useEffect(() => {
     if (!clientToken) return
     void refreshHistory(clientToken)
-    void refreshCookies(clientToken)
   }, [clientToken])
 
   const hasActiveHistory = history.some((item) => ['queued', 'parsing', 'downloading', 'transcribing', 'merging'].includes(item.status))
@@ -420,13 +397,8 @@ function App() {
     }
   }
 
-  async function createBatch() {
+  async function submitBatchJobs(urls: string[], successMessage: (count: number) => string, mode: 'batch' | 'profile') {
     setMessage(null)
-    const urls = collection?.items.map((item) => item.url) || []
-    if (!urls.length) {
-      setMessage('请先扫描一个包含公开视频的主页。')
-      return
-    }
     setIsBatchCreating(true)
     try {
       const response = await apiFetch('/api/jobs/batch', {
@@ -435,6 +407,7 @@ function App() {
         body: JSON.stringify({
           urls,
           media_type: batchMediaType,
+          format_id: batchFormatId,
           audio_format: batchAudioFormat,
           transcript_mode: batchMediaType === 'transcript' ? (batchTranscriptMode === 'none' ? 'auto' : batchTranscriptMode) : batchTranscriptMode,
           transcript_format: batchTranscriptFormat,
@@ -445,15 +418,58 @@ function App() {
       })
       if (!response.ok) throw new Error(await readError(response))
       const body = (await response.json()) as BatchJobCreateResponse
+      const confirmation = successMessage(body.jobs.length)
+      setBatchRun({ label: confirmation, jobIds: body.jobs.map((item) => item.job_id), mode })
       const items = await refreshHistory()
       const first = items.find((item) => item.job_id === body.jobs[0]?.job_id) || items[0]
       if (first) setJob(first)
-      setMessage(`已从“${collection?.title || '该主页'}”将 ${body.jobs.length} 个视频全部加入下载队列。`)
+      setMessage(confirmation)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '批量任务创建失败')
     } finally {
       setIsBatchCreating(false)
     }
+  }
+
+  async function createLinkBatch(event: React.FormEvent) {
+    event.preventDefault()
+    if (!batchUrls.length) {
+      setMessage('没有找到可下载的视频链接；每行可粘贴一条链接或整段中文分享文案。')
+      return
+    }
+    if (batchUrls.length > 50) {
+      setMessage(`识别到 ${batchUrls.length} 条链接，单次最多提交 50 条。`)
+      return
+    }
+    await submitBatchJobs(batchUrls, (count) => `已将 ${count} 条作品链接加入下载队列，可来自不同平台或不同博主。`, 'batch')
+  }
+
+  async function createProfileBatch() {
+    const urls = collection?.items.map((item) => item.url) || []
+    if (!urls.length) {
+      setMessage('请先扫描一个包含公开视频的博主主页。')
+      return
+    }
+    await submitBatchJobs(urls, (count) => `已从“${collection?.title || '该主页'}”将 ${count} 个视频全部加入下载队列。`, 'profile')
+  }
+
+  function renderBatchOptions() {
+    return (
+      <>
+        <div className="batch-options">
+          <label><span>统一下载类型</span><select value={batchMediaType} onChange={(event) => { const next = event.target.value as 'video' | 'audio' | 'transcript'; setBatchMediaType(next); if (next === 'transcript' && batchTranscriptMode === 'none') setBatchTranscriptMode('auto'); if (next !== 'transcript' && batchMediaType === 'transcript') setBatchTranscriptMode('none') }}><option value="video">视频</option><option value="audio">仅音频</option><option value="transcript">仅字幕 / 口播文案</option></select></label>
+          {batchMediaType === 'video' && <label><span>统一画质上限</span><select value={batchFormatId} onChange={(event) => setBatchFormatId(event.target.value)}><option value="best">自动最佳画质</option><option value="max-2160">最高 4K / 2160p</option><option value="max-1440">最高 2K / 1440p</option><option value="max-1080">最高 1080p</option><option value="max-720">最高 720p</option><option value="max-480">最高 480p</option><option value="max-360">最高 360p</option></select></label>}
+          {batchMediaType === 'audio' && <label><span>统一音频格式</span><select value={batchAudioFormat} onChange={(event) => setBatchAudioFormat(event.target.value)}><option value="mp3">MP3</option><option value="m4a">M4A</option><option value="opus">OPUS</option><option value="flac">FLAC</option><option value="wav">WAV</option></select></label>}
+          {batchMediaType !== 'transcript' && <label><span>随每个文件生成文案</span><select value={batchTranscriptMode} onChange={(event) => setBatchTranscriptMode(event.target.value as 'none' | 'native' | 'ai' | 'auto')}><option value="none">不生成</option><option value="auto">自动 · 原生字幕优先，AI 兜底</option><option value="native">仅平台原生字幕</option><option value="ai">AI 识别视频语音</option></select></label>}
+          {batchMediaType === 'transcript' && <label><span>提取方式</span><select value={batchTranscriptMode === 'none' ? 'auto' : batchTranscriptMode} onChange={(event) => setBatchTranscriptMode(event.target.value as 'native' | 'ai' | 'auto')}><option value="auto">自动 · 原生字幕优先，AI 兜底</option><option value="native">仅平台原生字幕</option><option value="ai">AI 识别视频语音</option></select></label>}
+          {(batchMediaType === 'transcript' || batchTranscriptMode !== 'none') && <label><span>文案格式</span><select value={batchTranscriptFormat} onChange={(event) => setBatchTranscriptFormat(event.target.value as 'txt' | 'srt' | 'vtt')}><option value="txt">TXT · 纯文字</option><option value="srt">SRT · 带时间轴</option><option value="vtt">VTT · 网页字幕</option></select></label>}
+        </div>
+        <div className="bundle-options">
+          <label><input type="checkbox" checked={batchIncludeDescription} onChange={(event) => setBatchIncludeDescription(event.target.checked)} />附带作品标题、描述与话题文案</label>
+          <label><input type="checkbox" checked={batchIncludeThumbnail} onChange={(event) => setBatchIncludeThumbnail(event.target.checked)} />附带原始封面</label>
+        </div>
+      </>
+    )
   }
 
   async function createJob() {
@@ -517,30 +533,27 @@ function App() {
   return (
     <main className="app-shell app-v2">
       <header className="top-nav">
-        <a className="brand" href="#top"><span className="brand-mark"><Play size={15} fill="currentColor" /></span>影链工坊 <em>2.3</em></a>
+        <a className="brand" href="#top"><span className="brand-mark"><Play size={15} fill="currentColor" /></span>影链工坊 <em>公开版</em></a>
         <nav><a href="#workspace">下载工作台</a><a href="#platforms">支持平台</a><a href="#notice">使用说明</a></nav>
-        <div className="header-account">
-          <button className="account-chip" type="button" onClick={() => setCookieManagerOpen(true)} disabled={!sessionReady || !clientToken}>
-            <Cookie size={15} />平台登录
-          </button>
-        </div>
+        <span className="public-badge"><CheckCircle2 size={15} />免安装 · 免登录</span>
       </header>
 
       <section className="v2-intro" id="top">
-        <span className="version-pill"><Zap size={14} />Powered by yt-dlp · Web 下载中心</span>
+        <span className="version-pill"><Zap size={14} />影链工坊 2.5 · 公开内容下载中心</span>
         <h1>粘贴链接，选择你真正需要的格式。</h1>
-        <p>无需注册、无需登录、不限下载次数。画质、封面、字幕、文案和主页批量任务，一处完成。</p>
+        <p>无需安装助手，不用登录账号。单条作品、多链接批量、博主主页、画质、封面、字幕和文案，一处完成。</p>
       </section>
 
       <section className="workbench" id="workspace">
         <div className="parser-workspace">
           <div className="entry-mode" role="tablist" aria-label="下载模式">
             <button className={inputMode === 'single' ? 'active' : ''} type="button" onClick={() => { setInputMode('single'); setMessage(null) }}>单条解析</button>
-            <button className={inputMode === 'batch' ? 'active' : ''} type="button" onClick={() => { setInputMode('batch'); setMessage(null) }}>批量下载</button>
+            <button className={inputMode === 'batch' ? 'active' : ''} type="button" onClick={() => { setInputMode('batch'); setMessage(null) }}>多链接批量</button>
+            <button className={inputMode === 'profile' ? 'active' : ''} type="button" onClick={() => { setInputMode('profile'); setMessage(null) }}>博主主页</button>
           </div>
-          <div className="cookie-status-bar">
-            <span><Cookie size={15} />{cookieProfiles.length ? `当前浏览器已接入 ${cookieProfiles.length} 个平台账号` : '无需本站账号，当前使用公开解析'}</span>
-            <button type="button" onClick={() => setCookieManagerOpen(true)} disabled={!sessionReady || !clientToken}>{cookieProfiles.length ? '管理平台账号' : '扫码登录 / Cookie'}</button>
+          <div className="public-mode-bar">
+            <span><CheckCircle2 size={15} />免安装 · 免登录 · 仅处理无需账号即可访问的公开内容</span>
+            <small>服务器自动建立匿名访客会话</small>
           </div>
 
           {inputMode === 'single' ? (
@@ -554,19 +567,38 @@ function App() {
                 </button>
               </div>
             </form>
+          ) : inputMode === 'batch' ? (
+            <form className="batch-form multi-link-batch" onSubmit={createLinkBatch}>
+              <div className="batch-heading"><label htmlFor="batch-urls">多条作品链接</label><span>可混合不同平台、不同博主 · 最多 50 条</span></div>
+              <div className="multi-link-input">
+                <textarea id="batch-urls" value={batchText} onChange={(event) => setBatchText(event.target.value)} placeholder={'每行粘贴一条视频链接，或直接粘贴多段带中文的分享文案\nhttps://www.tiktok.com/@creator/video/123...\n长按复制此条消息，打开抖音查看作品 https://v.douyin.com/...'} rows={7} />
+                <span className={batchUrls.length > 50 ? 'over-limit' : ''}>已识别 {batchUrls.length} 条</span>
+              </div>
+              {batchUrls.length > 0 && (
+                <div className="multi-link-preview">
+                  {batchUrls.slice(0, 8).map((item, index) => <div className="multi-link-item" key={item}><span>{index + 1}</span><code>{item}</code></div>)}
+                  {batchUrls.length > 8 && <p>另有 {batchUrls.length - 8} 条链接，将一起加入队列。</p>}
+                </div>
+              )}
+              {renderBatchOptions()}
+              <button className="primary-download" type="submit" disabled={isBatchCreating || !batchUrls.length || batchUrls.length > 50 || !sessionReady || !clientToken}>
+                {isBatchCreating ? <Loader2 className="spin" size={18} /> : <ClipboardCopy size={18} />}{isBatchCreating ? '正在加入下载队列' : `批量下载 ${batchUrls.length || 0} 条作品`}
+              </button>
+              <p className="batch-note">每条链接会成为独立任务，按服务器并发能力依次下载；某条不可用会明确跳过，不影响其他链接。</p>
+            </form>
           ) : (
             <div className="batch-form">
               <form className="collection-scan" onSubmit={scanCollection}>
-                <div className="batch-heading"><label htmlFor="collection-url">主页 / 频道 / 播放列表链接</label><span>单次最多 50 个视频</span></div>
+                <div className="batch-heading"><label htmlFor="collection-url">单个博主主页 / 频道链接</label><span>最多读取 500 个公开视频</span></div>
                 <div className="collection-link-row">
                   <div className="collection-link-input"><Link2 size={19} /><input id="collection-url" value={collectionUrl} onChange={(event) => { setCollectionUrl(event.target.value); setCollection(null) }} placeholder="可粘贴整段分享文案、主页短链或频道链接" autoComplete="off" /></div>
-                  <label className="collection-limit"><span>扫描数量</span><select value={collectionLimit} onChange={(event) => { setCollectionLimit(Number(event.target.value)); setCollection(null) }}><option value={10}>最近 10 个</option><option value={20}>最近 20 个</option><option value={50}>最近 50 个</option></select></label>
+                  <label className="collection-limit"><span>读取范围</span><select value={collectionLimit} onChange={(event) => { setCollectionLimit(Number(event.target.value)); setCollection(null) }}><option value={20}>最近 20 个</option><option value={50}>最近 50 个</option><option value={100}>最近 100 个</option><option value={500}>全部公开作品（最多 500）</option></select></label>
                   <button className="scan-button" type="submit" disabled={isCollectionParsing || !collectionUrl.trim() || !sessionReady || !clientToken}>{isCollectionParsing ? <Loader2 className="spin" size={17} /> : <Search size={17} />}{isCollectionParsing ? '正在扫描' : '扫描主页'}</button>
                 </div>
-                <p className="batch-note">支持抖音短链及 YouTube、TikTok、Bilibili 等主页。无需本站账号；遇到登录内容时，可用当前浏览器的扫码登录或 Cookie。</p>
+                <p className="batch-note">这里一次只填写一个博主主页；选择“全部公开作品”会自动翻页读取。多位博主的单条作品请使用“多链接批量”。</p>
               </form>
 
-              {isCollectionParsing && <div className="collection-loading"><Loader2 className="spin" size={26} /><div><strong>正在读取主页视频列表</strong><span>主页内容较多时可能需要几十秒。</span></div></div>}
+              {isCollectionParsing && <div className="collection-loading"><Loader2 className="spin" size={26} /><div><strong>正在读取主页视频列表</strong><span>系统正在建立匿名访客会话并自动翻页，请稍候。</span></div></div>}
 
               {collection && (
                 <section className="collection-result">
@@ -581,27 +613,34 @@ function App() {
                     ))}
                   </div>
                   {collection.truncated && <p className="collection-warning"><AlertTriangle size={14} />该主页还有更多视频，本次按你选择的上限下载；可提高扫描数量后重新扫描。</p>}
-                  <div className="batch-options">
-                    <label><span>统一下载类型</span><select value={batchMediaType} onChange={(event) => { const next = event.target.value as 'video' | 'audio' | 'transcript'; setBatchMediaType(next); if (next === 'transcript' && batchTranscriptMode === 'none') setBatchTranscriptMode('auto'); if (next !== 'transcript' && batchMediaType === 'transcript') setBatchTranscriptMode('none') }}><option value="video">视频 · 自动最佳画质</option><option value="audio">仅音频</option><option value="transcript">仅字幕 / 口播文案</option></select></label>
-                    {batchMediaType === 'audio' && <label><span>统一音频格式</span><select value={batchAudioFormat} onChange={(event) => setBatchAudioFormat(event.target.value)}><option value="mp3">MP3</option><option value="m4a">M4A</option><option value="opus">OPUS</option><option value="flac">FLAC</option><option value="wav">WAV</option></select></label>}
-                    {batchMediaType !== 'transcript' && <label><span>随每个文件生成文案</span><select value={batchTranscriptMode} onChange={(event) => setBatchTranscriptMode(event.target.value as 'none' | 'native' | 'ai' | 'auto')}><option value="none">不生成</option><option value="auto">自动 · 原生字幕优先，AI 兜底</option><option value="native">仅平台原生字幕</option><option value="ai">AI 识别视频语音</option></select></label>}
-                    {batchMediaType === 'transcript' && <label><span>提取方式</span><select value={batchTranscriptMode === 'none' ? 'auto' : batchTranscriptMode} onChange={(event) => setBatchTranscriptMode(event.target.value as 'native' | 'ai' | 'auto')}><option value="auto">自动 · 原生字幕优先，AI 兜底</option><option value="native">仅平台原生字幕</option><option value="ai">AI 识别视频语音</option></select></label>}
-                    {(batchMediaType === 'transcript' || batchTranscriptMode !== 'none') && <label><span>文案格式</span><select value={batchTranscriptFormat} onChange={(event) => setBatchTranscriptFormat(event.target.value as 'txt' | 'srt' | 'vtt')}><option value="txt">TXT · 纯文字</option><option value="srt">SRT · 带时间轴</option><option value="vtt">VTT · 网页字幕</option></select></label>}
-                  </div>
-                  <div className="bundle-options">
-                    <label><input type="checkbox" checked={batchIncludeDescription} onChange={(event) => setBatchIncludeDescription(event.target.checked)} />附带作品标题、描述与话题文案</label>
-                    <label><input type="checkbox" checked={batchIncludeThumbnail} onChange={(event) => setBatchIncludeThumbnail(event.target.checked)} />附带原始封面</label>
-                  </div>
-                  <button className="primary-download" type="button" onClick={createBatch} disabled={isBatchCreating || !sessionReady || !clientToken}>
+                  {renderBatchOptions()}
+                  <button className="primary-download" type="button" onClick={createProfileBatch} disabled={isBatchCreating || !sessionReady || !clientToken}>
                     {isBatchCreating ? <Loader2 className="spin" size={18} /> : <ClipboardCopy size={18} />}{isBatchCreating ? '正在加入下载队列' : `全部下载这 ${collection.items.length} 个视频`}
                   </button>
-                  <p className="batch-note">下载次数不限，任务会按服务器并发能力自动排队，避免同时挤占全部带宽。</p>
+                  <p className="batch-note">主页里的每个视频会成为独立任务。平台未公开媒体流的作品会单独标记跳过，其余任务继续下载。</p>
                 </section>
               )}
             </div>
           )}
 
           {message && <div className="inline-alert" role="status"><AlertTriangle size={16} />{message}</div>}
+
+          {batchRun && batchRun.mode === inputMode && batchProgress && (
+            <section className="batch-progress" aria-live="polite">
+              <div className="batch-progress-head">
+                <div><span>本次批量任务</span><strong>{batchRun.label}</strong></div>
+                <b>{batchProgress.finished} / {batchProgress.total}</b>
+              </div>
+              <div className="progress-track"><div style={{ width: `${batchProgress.percent}%` }} /></div>
+              <div className="batch-progress-stats">
+                <span className="batch-stat-completed"><CheckCircle2 size={14} />已完成 {batchProgress.completed}</span>
+                <span className="batch-stat-skipped"><AlertTriangle size={14} />平台未提供，已跳过 {batchProgress.skipped}</span>
+                <span className="batch-stat-failed"><XCircle size={14} />其他失败 {batchProgress.failed}</span>
+                <span><Clock3 size={14} />剩余 {batchProgress.total - batchProgress.finished}</span>
+              </div>
+              <p>{batchProgress.finished === batchProgress.total ? '本批任务已处理完毕；已完成的文件可直接下载。' : '正在逐条处理；某条失败不会中断整批。'}</p>
+            </section>
+          )}
 
           {inputMode === 'single' && !parsed && !isParsing && (
             <div className="empty-parser">
@@ -662,7 +701,6 @@ function App() {
 
       <section className="lower-grid"><HistoryPanel history={history} /><InfoPanel /></section>
       <FooterInfo />
-      {cookieManagerOpen && clientToken && <CookieManager request={clientRequest} fetchResponse={apiFetch} profiles={cookieProfiles} onChanged={() => refreshCookies()} onClose={() => setCookieManagerOpen(false)} />}
     </main>
   )
 }
@@ -688,7 +726,7 @@ function QueuePanel({
       {current ? (
         <div className="current-download">
           <div className="current-title"><div className="mini-thumb">{current.thumbnail ? <img src={current.thumbnail_proxy_url || current.thumbnail} alt="" /> : current.media_type === 'transcript' ? <FileText size={22} /> : <FileVideo size={22} />}</div><div><h3>{current.title || '正在读取视频信息'}</h3><p>{current.platform || '解析中'} · {current.media_type === 'audio' ? current.audio_format.toUpperCase() : current.media_type === 'transcript' ? current.transcript_format.toUpperCase() : current.format_id}</p></div></div>
-          <div className="current-state"><StatusBadge status={current.status} /><strong>{Math.round(current.progress)}%</strong></div>
+          <div className="current-state"><StatusBadge status={current.status} error={current.error} /><strong>{Math.round(current.progress)}%</strong></div>
           <div className="progress-track"><div style={{ width: `${Math.max(0, Math.min(current.progress, 100))}%` }} /></div>
           <div className="transfer-meta"><span>{formatBytes(current.downloaded_bytes)} / {formatBytes(current.total_bytes)}</span><span>{current.speed ? `${formatBytes(current.speed)}/s` : '等待数据'}{current.eta ? ` · ${current.eta}s` : ''}</span></div>
           {current.error && <p className="error-text">{current.error}</p>}
@@ -706,220 +744,11 @@ function QueuePanel({
       <div className="queue-list">
         {history.slice(0, 8).map((item) => (
           <button className={current?.job_id === item.job_id ? 'active' : ''} type="button" key={item.job_id} onClick={() => onSelect(item)}>
-            <div><strong>{item.title || '等待解析'}</strong><span>{formatDate(item.created_at)} · {item.media_type === 'audio' ? '音频' : item.media_type === 'transcript' ? '字幕 / 文案' : '视频'}</span></div><StatusBadge status={item.status} />
+            <div><strong>{item.title || '等待解析'}</strong><span>{formatDate(item.created_at)} · {item.media_type === 'audio' ? '音频' : item.media_type === 'transcript' ? '字幕 / 文案' : '视频'}</span></div><StatusBadge status={item.status} error={item.error} />
           </button>
         ))}
       </div>
     </aside>
-  )
-}
-
-function CookieManager({
-  request,
-  fetchResponse,
-  profiles,
-  onChanged,
-  onClose,
-}: {
-  request: AuthenticatedRequest
-  fetchResponse: AuthenticatedFetch
-  profiles: CookieProfile[]
-  onChanged: () => Promise<unknown>
-  onClose: () => void
-}) {
-  const platforms = [
-    ['douyin', '抖音'],
-    ['tiktok', 'TikTok'],
-    ['youtube', 'YouTube'],
-    ['bilibili', '哔哩哔哩'],
-    ['instagram', 'Instagram'],
-    ['facebook', 'Facebook'],
-    ['twitter', 'X / Twitter'],
-  ] as const
-  const [platform, setPlatform] = React.useState<(typeof platforms)[number][0]>('douyin')
-  const [file, setFile] = React.useState<File | null>(null)
-  const [busy, setBusy] = React.useState(false)
-  const [message, setMessage] = React.useState<string | null>(null)
-  const [error, setError] = React.useState<string | null>(null)
-  const [qrSession, setQrSession] = React.useState<QrLoginSession | null>(null)
-  const [qrImageUrl, setQrImageUrl] = React.useState<string | null>(null)
-  const [clock, setClock] = React.useState(() => Date.now())
-  const completedSession = React.useRef<string | null>(null)
-  const scanPlatforms = ['douyin', 'tiktok', 'bilibili'] as const
-  const canScan = scanPlatforms.includes(platform as (typeof scanPlatforms)[number])
-  const platformLabel = platforms.find(([id]) => id === platform)?.[1] || platform
-  const qrActive = Boolean(qrSession && ['starting', 'waiting', 'scanned'].includes(qrSession.status))
-
-  React.useEffect(() => {
-    if (!qrActive) return
-    const timer = window.setInterval(() => setClock(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [qrActive])
-
-  React.useEffect(() => {
-    if (!qrSession || !['starting', 'waiting', 'scanned'].includes(qrSession.status)) return
-    let stopped = false
-    const poll = async () => {
-      try {
-        const next = await request<QrLoginSession>(`/api/cookie-login/session/${qrSession.session_id}`)
-        if (stopped) return
-        setQrSession(next)
-        if (next.status === 'completed' && completedSession.current !== next.session_id) {
-          completedSession.current = next.session_id
-          await onChanged()
-          setMessage(`${platforms.find(([id]) => id === next.platform)?.[1] || next.platform} 扫码登录成功，Cookie 已加密保存并启用。`)
-        }
-        if (next.status === 'failed' || next.status === 'expired') setError(next.message)
-      } catch (err) {
-        if (!stopped) setError(err instanceof Error ? err.message : '无法读取扫码状态')
-      }
-    }
-    void poll()
-    const timer = window.setInterval(() => void poll(), 2000)
-    return () => {
-      stopped = true
-      window.clearInterval(timer)
-    }
-  }, [qrSession?.session_id, qrSession?.status])
-
-  React.useEffect(() => {
-    if (!qrSession?.qr_ready || !qrSession.qr_revision) {
-      setQrImageUrl(null)
-      return
-    }
-    let stopped = false
-    let objectUrl: string | null = null
-    const load = async () => {
-      const response = await fetchResponse(`/api/cookie-login/session/${qrSession.session_id}/qrcode?revision=${encodeURIComponent(qrSession.qr_revision || '')}`)
-      if (!response.ok) throw new Error(await readError(response))
-      const blob = await response.blob()
-      if (stopped) return
-      objectUrl = URL.createObjectURL(blob)
-      setQrImageUrl(objectUrl)
-    }
-    void load().catch((err) => {
-      if (!stopped) setError(err instanceof Error ? err.message : '二维码加载失败')
-    })
-    return () => {
-      stopped = true
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
-    }
-  }, [qrSession?.session_id, qrSession?.qr_revision, qrSession?.qr_ready])
-
-  async function startQrLogin() {
-    if (!canScan) return
-    setBusy(true)
-    setError(null)
-    setMessage(null)
-    completedSession.current = null
-    try {
-      const session = await request<QrLoginSession>(`/api/cookie-login/${platform}`, { method: 'POST' })
-      setQrSession(session)
-      setClock(Date.now())
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '扫码登录启动失败')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function cancelQrLogin() {
-    const session = qrSession
-    setQrSession(null)
-    if (!session || !['starting', 'waiting', 'scanned'].includes(session.status)) return
-    try {
-      await request<void>(`/api/cookie-login/session/${session.session_id}`, { method: 'DELETE' })
-    } catch {
-      // Closing the dialog should not be blocked by a failed cancellation request.
-    }
-  }
-
-  async function closeManager() {
-    await cancelQrLogin()
-    onClose()
-  }
-
-  async function changePlatform(next: typeof platform) {
-    if (next === platform) return
-    await cancelQrLogin()
-    setPlatform(next)
-    setError(null)
-    setMessage(null)
-  }
-
-  async function upload(event: React.FormEvent) {
-    event.preventDefault()
-    if (!file) return
-    setBusy(true)
-    setError(null)
-    setMessage(null)
-    const form = new FormData()
-    form.append('file', file)
-    try {
-      const item = await request<CookieProfile>(`/api/cookies/${platform}`, { method: 'PUT', body: form })
-      await onChanged()
-      setQrSession(null)
-      setFile(null)
-      setMessage(`${platforms.find(([id]) => id === item.name)?.[1] || item.name} Cookie 已加密保存并启用。`)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Cookie 上传失败')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function remove(name: string) {
-    if (!window.confirm('确定删除这个平台的 Cookie 吗？')) return
-    await request<void>(`/api/cookies/${encodeURIComponent(name)}`, { method: 'DELETE' })
-    await onChanged()
-  }
-
-  return (
-    <section className="admin-overlay cookie-center" aria-label="我的 Cookie">
-      <div className="admin-backdrop" onClick={() => void closeManager()} />
-      <div className="admin-dialog cookie-dialog">
-        <header className="admin-dialog-header">
-          <div><span className="caption">Private browser state</span><h2>当前浏览器的平台账号</h2><p>抖音、TikTok 与哔哩哔哩可直接扫码；无需注册本站账号，Cookie 按当前浏览器私有身份隔离并加密保存。</p></div>
-          <button className="secondary-button" type="button" onClick={() => void closeManager()}>关闭</button>
-        </header>
-        <div className="cookie-security"><Shield size={18} /><div><strong>扫码发生在平台官方页面</strong><p>二维码会话最多等待 5 分钟；登录成功后只保留所选平台域名的 Cookie，直到平台失效、退出登录或你主动删除。</p></div></div>
-        <div className="cookie-platform-tabs" role="tablist" aria-label="选择登录平台">
-          {platforms.map(([id, label]) => <button type="button" role="tab" aria-selected={platform === id} className={platform === id ? 'active' : ''} onClick={() => void changePlatform(id)} key={id}>{label}</button>)}
-        </div>
-        {canScan && (
-          <div className="qr-login-card">
-            <div className="qr-login-heading"><div><QrCode size={20} /><span><strong>{platformLabel} 扫码登录</strong><small>打开平台 App 扫描并在手机上确认</small></span></div>{qrActive && <span className="qr-countdown">{Math.max(0, Math.ceil(((qrSession?.expires_at || 0) * 1000 - clock) / 1000))} 秒</span>}</div>
-            {!qrSession && <button className="qr-start-button" type="button" onClick={() => void startQrLogin()} disabled={busy}>{busy ? <Loader2 className="spin" size={17} /> : <QrCode size={17} />}{busy ? '正在连接官方页面' : '生成登录二维码'}</button>}
-            {qrSession && qrActive && (
-              <div className="qr-login-body">
-                <div className="qr-image-frame">{qrImageUrl ? <img src={qrImageUrl} alt={`${platformLabel} 登录二维码`} /> : <div><Loader2 className="spin" size={28} /><span>正在生成二维码</span></div>}</div>
-                <div className="qr-login-status"><span className={`qr-status-dot ${qrSession.status}`} /> <strong>{qrSession.status === 'scanned' ? '等待手机确认' : qrSession.status === 'starting' ? '正在连接' : '等待扫码'}</strong><p>{qrSession.message}</p><button className="secondary-button" type="button" onClick={() => void cancelQrLogin()}>取消本次扫码</button></div>
-              </div>
-            )}
-            {qrSession && ['failed', 'expired', 'cancelled'].includes(qrSession.status) && <button className="qr-start-button" type="button" onClick={() => { setQrSession(null); void startQrLogin() }}><RefreshCw size={17} />重新生成二维码</button>}
-            {qrSession?.status === 'completed' && <div className="qr-completed"><CheckCircle2 size={18} />扫码登录成功，登录状态已加密保存。</div>}
-          </div>
-        )}
-        <details className="cookie-file-fallback" open={!canScan}>
-          <summary>{canScan ? '扫码不可用？改用 cookies.txt' : '导入 cookies.txt'}</summary>
-          <form className="cookie-user-upload" onSubmit={upload}>
-            <label><span>{platforms.find(([id]) => id === platform)?.[1]} cookies.txt</span><input type="file" accept=".txt,text/plain" onChange={(event) => setFile(event.target.files?.[0] || null)} /></label>
-            <button type="submit" disabled={!file || busy}>{busy ? <Loader2 className="spin" size={16} /> : <Cookie size={16} />}{busy ? '正在加密' : '导入并启用'}</button>
-          </form>
-        </details>
-        {message && <div className="cookie-success"><CheckCircle2 size={16} />{message}</div>}
-        {error && <div className="inline-alert"><AlertTriangle size={16} />{error}</div>}
-        <div className="cookie-profile-list">
-          {profiles.map((item) => (
-            <article key={item.name}>
-              <div><strong>{platforms.find(([id]) => id === item.name)?.[1] || item.name}</strong><span>{item.cookie_count} 条 Cookie · {item.domains.join('、') || '域名未知'}</span><small>{item.expired ? 'Cookie 可能已经过期，请重新导出' : item.expires_at ? `最晚到期 ${formatDate(item.expires_at)}` : '包含浏览器会话 Cookie'}</small></div>
-              <button className="danger-button" type="button" onClick={() => remove(item.name)}><Trash2 size={15} />删除</button>
-            </article>
-          ))}
-          {!profiles.length && <p>尚未导入平台 Cookie，公开内容仍会正常解析。</p>}
-        </div>
-      </div>
-    </section>
   )
 }
 
@@ -932,7 +761,7 @@ function TaskPanel({ job, onCopy }: { job: Job; onCopy: (downloadUrl?: string | 
           <span className="caption">Current job</span>
           <h2>{isPreview ? '等待链接输入' : statusText[job.status]}</h2>
         </div>
-        <StatusBadge status={job.status} />
+        <StatusBadge status={job.status} error={job.error} />
       </div>
 
       <div className="steps">
@@ -995,7 +824,7 @@ function HistoryPanel({ history }: { history: Job[] }) {
               <strong>{item.title || '未命名视频'}</strong>
               <span>{item.platform || new URL(item.url).hostname}</span>
             </div>
-            <StatusBadge status={item.status} />
+            <StatusBadge status={item.status} error={item.error} />
           </div>
         ))}
         {!history.length && <p className="history-empty">完成或失败的任务会持久保存在这里。</p>}
@@ -1026,7 +855,7 @@ function InfoPanel() {
       <div className="info-block">
         <span className="caption">Platforms</span>
         <h2>支持平台</h2>
-        <p>能力跟随当前 yt-dlp、服务器区域、平台风控和 Cookie 状态。快手、Shopee 与 TikTok Shop 属于实验性解析。</p>
+        <p>能力跟随当前 yt-dlp、服务器区域、平台风控和公开页面可用性。快手、Shopee 与 TikTok Shop 属于实验性解析。</p>
       </div>
       <span className="platform-group-title">国内平台</span>
       <div className="platform-list" aria-label="支持平台列表">
@@ -1053,9 +882,9 @@ function FooterInfo() {
           <h2>安全限制</h2>
         </div>
         <div className="limit-grid">
-          <span><Download size={16} />无需注册，无限下载</span>
-          <span><Cookie size={16} />平台账号按浏览器隔离</span>
-          <span><Shield size={16} />Cookie 加密保存</span>
+          <span><Download size={16} />无需安装，无需注册</span>
+          <span><CheckCircle2 size={16} />匿名访客会话自动建立</span>
+          <span><Shield size={16} />只处理公开可访问内容</span>
           <span><Gauge size={16} />默认 512 MB 文件上限</span>
           <span><FileText size={16} />原生字幕优先，AI 转写兜底</span>
         </div>
@@ -1072,9 +901,10 @@ function FooterInfo() {
   )
 }
 
-function StatusBadge({ status }: { status: JobStatus }) {
+function StatusBadge({ status, error }: { status: JobStatus; error?: string | null }) {
+  const skipped = status === 'failed' && error?.includes('已跳过')
   const icon = status === 'completed' ? <CheckCircle2 size={14} /> : status === 'failed' || status === 'cancelled' || status === 'expired' ? <AlertTriangle size={14} /> : <Loader2 size={14} className={status === 'queued' ? '' : 'spin'} />
-  return <span className={`status status-${status}`}>{icon}{statusText[status]}</span>
+  return <span className={`status ${skipped ? 'status-skipped' : `status-${status}`}`}>{icon}{skipped ? '已跳过' : statusText[status]}</span>
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(<App />)
