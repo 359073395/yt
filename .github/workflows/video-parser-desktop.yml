@@ -50,4 +50,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
-          gh release create $env:GITHUB_REF_NAME $installer.FullName --verify-tag --title "影链工坊 Desktop $($env:GITHUB_REF_NAME.Replace('video-parser-desktop-v', ''))" --generate-notes
+          if (gh release view $env:GITHUB_REF_NAME 2>$null) {
+            gh release upload $env:GITHUB_REF_NAME $installer.FullName --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME $installer.FullName --verify-tag --title "影链工坊 Desktop $($env:GITHUB_REF_NAME.Replace('video-parser-desktop-v', ''))" --generate-notes
+          }
