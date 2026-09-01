@@ -1,0 +1,17 @@
+{
+  "generatedAt": "2026-09-01T17:21:52.126Z",
+  "components": {
+    "ytDlp": {
+      "source": "https://github.com/yt-dlp/yt-dlp/releases/latest",
+      "bytes": 17840399
+    },
+    "ffmpeg": {
+      "tag": "latest",
+      "asset": "ffmpeg-master-latest-win64-lgpl-shared.zip"
+    },
+    "whisper": {
+      "tag": "b4938",
+      "asset": "whisper-bin-x64.zip"
+    }
+  }
+}

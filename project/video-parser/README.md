@@ -24,6 +24,12 @@
 - SQLite 任务历史、SSE 实时进度、取消、重试和 15 分钟签名下载链接
 - 非 root、只读容器根文件系统、移除 Linux capabilities
 
+## Windows 桌面版
+
+不想维护服务器时可使用轻量的 [影链工坊 Desktop](desktop/README.md)：无需安装浏览器助手，支持单条、多链接批量和博主主页下载，并可把视频、封面、平台文案、字幕、AI 语音识别与中文翻译统一保存到用户选择的目录。语音和翻译模型按需下载，模型目录也可单独选择。
+
+正式安装包在 [GitHub Releases](https://github.com/359073395/yt/releases) 发布；Windows 10/11 安装后直接运行。
+
 ## 一键安装或更新
 
 首次安装并指定端口：
