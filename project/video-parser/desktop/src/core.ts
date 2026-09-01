@@ -69,6 +69,17 @@ export interface ProfileItem {
   id: string
 }
 
+export interface MediaPreview {
+  url: string
+  title: string
+  platform: string
+  uploader: string
+  thumbnail?: string | null
+  duration?: number | null
+  size_bytes?: number | null
+  error?: string | null
+}
+
 export interface ProgressEvent {
   job_id: string
   phase: TaskStatus

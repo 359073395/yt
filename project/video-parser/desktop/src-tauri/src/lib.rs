@@ -112,6 +112,18 @@ struct ProfileItem {
     id: String,
 }
 
+#[derive(Serialize)]
+struct MediaPreview {
+    url: String,
+    title: String,
+    platform: String,
+    uploader: String,
+    thumbnail: Option<String>,
+    duration: Option<f64>,
+    size_bytes: Option<u64>,
+    error: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct TranslationSegment {
     index: usize,
@@ -1008,6 +1020,181 @@ async fn scan_profile(
             );
         }
         Ok(items)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn platform_from_preview(source: &str, payload: &Value) -> String {
+    let extractor = payload
+        .get("extractor_key")
+        .or_else(|| payload.get("extractor"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_lowercase();
+    let host = Url::parse(source)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_lowercase))
+        .unwrap_or_default();
+    if extractor.contains("douyin") || host.contains("douyin.com") {
+        "抖音".into()
+    } else if extractor.contains("tiktok") || host.contains("tiktok.com") {
+        "TikTok".into()
+    } else if extractor.contains("youtube")
+        || host.contains("youtube.com")
+        || host.contains("youtu.be")
+    {
+        "YouTube".into()
+    } else if extractor.contains("bilibili")
+        || host.contains("bilibili.com")
+        || host.contains("b23.tv")
+    {
+        "哔哩哔哩".into()
+    } else if extractor.contains("instagram") || host.contains("instagram.com") {
+        "Instagram".into()
+    } else if extractor.contains("facebook")
+        || host.contains("facebook.com")
+        || host.contains("fb.watch")
+    {
+        "Facebook".into()
+    } else if extractor.contains("twitter")
+        || host.contains("twitter.com")
+        || host.contains("x.com")
+    {
+        "X / Twitter".into()
+    } else {
+        "自动识别".into()
+    }
+}
+
+fn preview_from_payload(source: String, payload: Value) -> MediaPreview {
+    let thumbnail = payload
+        .get("thumbnail")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            payload
+                .get("thumbnails")
+                .and_then(Value::as_array)
+                .and_then(|items| items.iter().rev().find_map(|item| item.get("url")))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    let size_bytes = payload
+        .get("filesize")
+        .or_else(|| payload.get("filesize_approx"))
+        .and_then(Value::as_u64);
+    MediaPreview {
+        platform: platform_from_preview(&source, &payload),
+        url: source,
+        title: payload
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("未命名视频")
+            .to_string(),
+        uploader: payload
+            .get("uploader")
+            .or_else(|| payload.get("channel"))
+            .or_else(|| payload.get("creator"))
+            .and_then(Value::as_str)
+            .unwrap_or("未知作者")
+            .to_string(),
+        thumbnail,
+        duration: payload.get("duration").and_then(Value::as_f64),
+        size_bytes,
+        error: None,
+    }
+}
+
+fn inspect_item(app: &tauri::AppHandle, yt_dlp: &Path, source: String) -> MediaPreview {
+    let fallback = |message: String| MediaPreview {
+        platform: platform_from_preview(&source, &Value::Null),
+        url: source.clone(),
+        title: "等待下载时读取详情".into(),
+        uploader: "公开作品".into(),
+        thumbnail: None,
+        duration: None,
+        size_bytes: None,
+        error: Some(message),
+    };
+    let url = match validate_url(&source) {
+        Ok(url) => url,
+        Err(error) => return fallback(error),
+    };
+    if is_douyin_url(&url) && !login_profile_exists(app) {
+        let profile = match public_edge_profile_dir(app) {
+            Ok(profile) => profile,
+            Err(error) => return fallback(error),
+        };
+        if !public_session_fresh(&profile) {
+            let edge = match find_edge() {
+                Some(edge) => edge,
+                None => return fallback("未找到 Windows 自带的 Microsoft Edge".into()),
+            };
+            if let Err(error) = scan_profile_with_edge(&edge, &profile, &url, 0) {
+                return fallback(error);
+            }
+        }
+    }
+    if is_tiktok_url(&url) {
+        let cache = match app.path().app_cache_dir() {
+            Ok(cache) => cache,
+            Err(error) => return fallback(error.to_string()),
+        };
+        if let Err(error) = fs::create_dir_all(&cache) {
+            return fallback(format!("无法创建预览缓存：{error}"));
+        }
+        let path = cache.join(format!(
+            "preview-tiktok-{}.json",
+            tiktok_video_id(&url).unwrap_or_default()
+        ));
+        let result = prepare_tiktok_info_json(&url, &path)
+            .and_then(|path| fs::read(&path).map_err(|error| error.to_string()))
+            .and_then(|bytes| {
+                serde_json::from_slice::<Value>(&bytes).map_err(|error| error.to_string())
+            });
+        let _ = fs::remove_file(path);
+        return match result {
+            Ok(payload) => preview_from_payload(url, payload),
+            Err(error) => fallback(error),
+        };
+    }
+    let mut command = Command::new(yt_dlp);
+    hidden(&mut command)
+        .arg("--dump-single-json")
+        .arg("--skip-download")
+        .arg("--no-playlist")
+        .arg("--no-warnings")
+        .arg(&url);
+    add_cookie_args(app, &mut command);
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(error) => return fallback(format!("解析启动失败：{error}")),
+    };
+    if !output.status.success() {
+        return fallback(user_error(&String::from_utf8_lossy(&output.stderr)));
+    }
+    match serde_json::from_slice::<Value>(&output.stdout) {
+        Ok(payload) => preview_from_payload(url, payload),
+        Err(_) => fallback("平台没有返回可识别的视频信息".into()),
+    }
+}
+
+#[tauri::command]
+async fn inspect_items(
+    app: tauri::AppHandle,
+    urls: Vec<String>,
+) -> Result<Vec<MediaPreview>, String> {
+    if urls.is_empty() || urls.len() > 50 {
+        return Err("一次可以解析 1 到 50 条作品".into());
+    }
+    let yt_dlp = find_tool(&app, "yt-dlp.exe").ok_or("下载引擎尚未就绪")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(urls
+            .into_iter()
+            .map(|url| inspect_item(&app, &yt_dlp, url))
+            .collect::<Vec<_>>())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2112,6 +2299,7 @@ pub fn run() {
             open_directory,
             launch_login,
             scan_profile,
+            inspect_items,
             download_item,
             cancel_job,
             download_model,
@@ -2124,4 +2312,29 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("影链工坊启动失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_uses_public_metadata() {
+        let preview = preview_from_payload(
+            "https://www.tiktok.com/@creator/video/1234567890123456789".into(),
+            serde_json::json!({
+                "title": "测试作品",
+                "uploader": "creator",
+                "thumbnail": "https://example.com/cover.jpg",
+                "duration": 12.5,
+                "filesize_approx": 1024_u64
+            }),
+        );
+        assert_eq!(preview.platform, "TikTok");
+        assert_eq!(preview.title, "测试作品");
+        assert_eq!(preview.uploader, "creator");
+        assert_eq!(preview.duration, Some(12.5));
+        assert_eq!(preview.size_bytes, Some(1024));
+        assert!(preview.error.is_none());
+    }
 }

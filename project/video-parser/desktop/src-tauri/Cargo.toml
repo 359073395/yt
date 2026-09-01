@@ -1,6 +1,6 @@
 [package]
 name = "yinglian-desktop"
-version = "1.0.0"
+version = "1.1.0"
 description = "轻量、非阻塞的本地视频与多语言文案下载工具"
 authors = ["359073395"]
 edition = "2021"

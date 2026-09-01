@@ -3,23 +3,33 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import {
   AlertCircle,
-  Check,
+  CheckSquare2,
+  ChevronDown,
   ChevronRight,
   CircleStop,
+  ClipboardPaste,
   Download,
   FileText,
   FolderOpen,
+  History,
+  Image,
   Languages,
   Link2,
+  ListChecks,
   ListVideo,
   LoaderCircle,
   LogIn,
+  MoreHorizontal,
   PackageOpen,
+  RefreshCw,
+  Search,
   Settings2,
-  Sparkles,
+  Square,
+  Subtitles,
   Trash2,
   UserRound,
   Video,
+  WandSparkles,
   X,
 } from 'lucide-react'
 import {
@@ -28,6 +38,7 @@ import {
   type DownloadResult,
   type DownloadTask,
   type InputMode,
+  type MediaPreview,
   type ModelProgress,
   type ProfileItem,
   type ProgressEvent,
@@ -36,7 +47,6 @@ import {
   type TranslationInput,
   extractSharedUrls,
   platformName,
-  statusLabel,
 } from './core'
 import { clearTranslationModel, preloadTranslationModel, toTranslationLanguage, translateToChinese } from './translator'
 
@@ -50,9 +60,34 @@ const LOGIN_PLATFORMS = [
   ['twitter', 'X / Twitter'],
 ] as const
 
-function formatBytes(value: number) {
-  if (!value) return '0 MB'
-  return value >= 1024 ** 3 ? `${(value / 1024 ** 3).toFixed(1)} GB` : `${Math.round(value / 1024 ** 2)} MB`
+interface PendingItem extends MediaPreview {
+  id: string
+  selected: boolean
+  quality: string
+  loading: boolean
+}
+
+interface ModelPromptState {
+  speech: boolean
+  translation: boolean
+  resumeDownload: boolean
+}
+
+function formatBytes(value?: number | null) {
+  if (!value) return '大小待确认'
+  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} GB`
+  return `${Math.max(1, Math.round(value / 1024 ** 2))} MB`
+}
+
+function formatDuration(value?: number | null) {
+  if (!value) return '--:--'
+  const total = Math.max(0, Math.round(value))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+    : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 }
 
 function App() {
@@ -61,24 +96,29 @@ function App() {
   const [input, setInput] = React.useState('')
   const [profileLimit, setProfileLimit] = React.useState(50)
   const [downloadDir, setDownloadDir] = React.useState('')
-  const [quality, setQuality] = React.useState('best')
-  const [transcriptMode, setTranscriptMode] = React.useState<TranscriptMode>('auto')
+  const [quality] = React.useState('1080')
+  const [transcriptMode, setTranscriptMode] = React.useState<TranscriptMode>('none')
   const [language, setLanguage] = React.useState('auto')
   const [modelId, setModelId] = React.useState('small')
+  const includeVideo = true
   const [includeThumbnail, setIncludeThumbnail] = React.useState(true)
   const [includeDescription, setIncludeDescription] = React.useState(true)
+  const [includeSubtitle, setIncludeSubtitle] = React.useState(false)
+  const [pendingItems, setPendingItems] = React.useState<PendingItem[]>([])
   const [tasks, setTasks] = React.useState<DownloadTask[]>([])
   const [running, setRunning] = React.useState(false)
-  const [scanning, setScanning] = React.useState(false)
+  const [parsing, setParsing] = React.useState(false)
   const [message, setMessage] = React.useState<string | null>(null)
   const [accountOpen, setAccountOpen] = React.useState(false)
   const [modelsOpen, setModelsOpen] = React.useState(false)
+  const [modelPrompt, setModelPrompt] = React.useState<ModelPromptState | null>(null)
   const [modelProgress, setModelProgress] = React.useState<ModelProgress | null>(null)
   const [modelBusy, setModelBusy] = React.useState(false)
   const [translationTarget, setTranslationTarget] = React.useState<'none' | 'zh'>('none')
   const [translationBusy, setTranslationBusy] = React.useState(false)
   const [translationProgress, setTranslationProgress] = React.useState({ percent: 0, message: '' })
   const [translationCached, setTranslationCached] = React.useState(false)
+  const parseToken = React.useRef(0)
 
   const refreshRuntime = React.useCallback(async () => {
     const info = await invoke<RuntimeInfo>('runtime_info')
@@ -92,13 +132,9 @@ function App() {
     refreshRuntime().catch((error) => setMessage(String(error)))
     const cleanups = [
       listen<ProgressEvent>('job-progress', ({ payload }) => {
-        setTasks((current) =>
-          current.map((task) =>
-            task.id === payload.job_id
-              ? { ...task, status: payload.phase, percent: payload.percent, message: payload.message }
-              : task,
-          ),
-        )
+        setTasks((current) => current.map((task) => task.id === payload.job_id
+          ? { ...task, status: payload.phase, percent: payload.percent, message: payload.message }
+          : task))
       }),
       listen<ModelProgress>('model-progress', ({ payload }) => {
         if (payload.model_id === 'translation') {
@@ -114,8 +150,13 @@ function App() {
   }, [refreshRuntime])
 
   const urls = React.useMemo(() => extractSharedUrls(input), [input])
-  const installedModel = runtime?.models.find((model) => model.id === modelId)?.installed ?? false
+  const selectedItems = React.useMemo(() => pendingItems.filter((item) => item.selected), [pendingItems])
+  const selectedModel = runtime?.models.find((model) => model.id === modelId)
+  const installedModel = selectedModel?.installed ?? false
   const toolsReady = Boolean(runtime?.yt_dlp_available && runtime?.ffmpeg_available)
+  const completedCount = tasks.filter((task) => task.status === 'completed').length
+  const activeTask = tasks.find((task) => ['queued', 'scanning', 'downloading', 'transcribing'].includes(task.status))
+  const estimatedSize = selectedItems.reduce((total, item) => total + (item.size_bytes || 0), 0)
 
   async function chooseDirectory() {
     const selected = await invoke<string | null>('choose_download_dir')
@@ -141,10 +182,7 @@ function App() {
     try {
       await invoke('download_model', { modelId: selected })
       await refreshRuntime()
-      setMessage('多语言模型已准备好。')
-    } catch (error) {
-      setMessage(String(error))
-      throw error
+      setMessage('多语言语音模型已准备好。')
     } finally {
       setModelBusy(false)
       setModelProgress(null)
@@ -186,81 +224,182 @@ function App() {
     }
   }
 
-  async function resolveUrls(): Promise<string[]> {
-    if (mode === 'profile') {
-      if (urls.length !== 1) throw new Error('博主主页模式一次只粘贴一个主页或频道链接。')
-      setScanning(true)
-      try {
-        const entries = await invoke<ProfileItem[]>('scan_profile', {
-          request: { url: urls[0], limit: profileLimit },
-        })
-        return entries.map((item) => item.url)
-      } finally {
-        setScanning(false)
-      }
-    }
-    if (!urls.length) throw new Error('没有识别到有效链接，可以直接粘贴带中文的完整分享文案。')
-    if (mode === 'single') return [urls[0]]
-    if (urls.length > 50) throw new Error('多链接批量一次最多处理 50 条。')
-    return urls
+  function seedItems(rawUrls: string[], titles?: Map<string, string>) {
+    return rawUrls.map<PendingItem>((url) => ({
+      id: crypto.randomUUID(),
+      url,
+      title: titles?.get(url) || '正在读取作品信息',
+      platform: platformName(url),
+      uploader: '公开作品',
+      selected: true,
+      quality,
+      loading: true,
+    }))
   }
 
-  async function startDownload(event: React.FormEvent) {
-    event.preventDefault()
-    if (running || scanning) return
+  async function inspectInChunks(rawUrls: string[], token: number) {
+    for (let index = 0; index < rawUrls.length; index += 12) {
+      if (token !== parseToken.current) return
+      const chunk = rawUrls.slice(index, index + 12)
+      const previews = await invoke<MediaPreview[]>('inspect_items', { urls: chunk })
+      if (token !== parseToken.current) return
+      const lookup = new Map(previews.map((item) => [item.url, item]))
+      setPendingItems((current) => current.map((item) => {
+        const preview = lookup.get(item.url)
+        return preview ? { ...item, ...preview, loading: false } : item
+      }))
+    }
+  }
+
+  async function parseLinks(event?: React.FormEvent) {
+    event?.preventDefault()
+    if (parsing || running) return
     setMessage(null)
     if (!toolsReady) {
       setMessage('桌面运行组件尚未准备好，请使用正式安装包或重新安装。')
       return
     }
-    let translationReady: Promise<void> | null = null
+    const token = ++parseToken.current
+    setParsing(true)
     try {
-      if (translationTarget === 'zh' && transcriptMode === 'none') {
-        throw new Error('请先开启“字幕优先，AI 兜底”或“AI 识别语音”，才能翻译成中文。')
+      let resolved = urls
+      let titles: Map<string, string> | undefined
+      if (mode === 'profile') {
+        if (urls.length !== 1) throw new Error('博主主页模式一次只粘贴一个主页或频道链接。')
+        const entries = await invoke<ProfileItem[]>('scan_profile', { request: { url: urls[0], limit: profileLimit } })
+        resolved = entries.map((item) => item.url)
+        titles = new Map(entries.map((item) => [item.url, item.title]))
+      } else {
+        if (!urls.length) throw new Error('没有识别到有效链接，可以直接粘贴带中文的完整分享文案。')
+        if (mode === 'single') resolved = [urls[0]]
+        if (mode === 'batch' && urls.length > 50) throw new Error('多链接批量一次最多处理 50 条。')
       }
-      if ((transcriptMode === 'ai' || transcriptMode === 'auto') && !installedModel) {
-        setMessage('首次使用 AI 文案，模型下载完成后会自动开始任务。')
-        await installModel(modelId)
+      if (token !== parseToken.current) return
+      setPendingItems(seedItems(resolved, titles))
+      await inspectInChunks(resolved, token)
+    } catch (error) {
+      setMessage(String(error))
+    } finally {
+      if (token === parseToken.current) setParsing(false)
+    }
+  }
+
+  function requestTranscriptMode(next: TranscriptMode) {
+    setTranscriptMode(next)
+    setIncludeSubtitle(next !== 'none')
+    if ((next === 'auto' || next === 'ai') && !installedModel) {
+      setModelPrompt({ speech: true, translation: false, resumeDownload: false })
+    }
+  }
+
+  function requestTranslation(next: 'none' | 'zh') {
+    setTranslationTarget(next)
+    if (next === 'zh') {
+      if (transcriptMode === 'none') {
+        setTranscriptMode('auto')
+        setIncludeSubtitle(true)
       }
-      if (translationTarget === 'zh') {
-        translationReady = prepareTranslation()
-        void translationReady.catch(() => undefined)
+      if (!translationCached || !installedModel) {
+        setModelPrompt({ speech: !installedModel, translation: !translationCached, resumeDownload: false })
       }
-      const resolved = await resolveUrls()
-      const created = resolved.map<DownloadTask>((url) => ({
-        id: crypto.randomUUID(),
-        url,
-        title: '等待读取视频信息',
-        platform: platformName(url),
-        status: 'queued',
-        percent: 0,
-        message: '已加入本地队列',
-      }))
-      setTasks((current) => [...created, ...current].slice(0, 200))
-      setRunning(true)
-      const options: DownloadOptions = {
-        download_dir: downloadDir,
-        quality,
-        include_thumbnail: includeThumbnail,
-        include_description: includeDescription,
-        transcript_mode: transcriptMode,
-        language,
-        model_id: modelId,
-        translation_target: translationTarget === 'zh' ? 'zh' : null,
-      }
-      for (const task of created) {
+    }
+  }
+
+  function requiredModels(resumeDownload: boolean) {
+    const speech = (transcriptMode === 'auto' || transcriptMode === 'ai') && !installedModel
+    const translation = translationTarget === 'zh' && !translationCached
+    if (speech || translation) {
+      setModelPrompt({ speech, translation, resumeDownload })
+      return true
+    }
+    return false
+  }
+
+  async function confirmModelSetup() {
+    if (!modelPrompt) return
+    const prompt = modelPrompt
+    try {
+      if (prompt.speech && !installedModel) await installModel(modelId)
+      if (prompt.translation && !translationCached) await prepareTranslation()
+      setModelPrompt(null)
+      if (prompt.resumeDownload) await executeSelectedDownloads(true)
+    } catch (error) {
+      setMessage(String(error))
+    }
+  }
+
+  function skipModelSetup() {
+    if (modelPrompt?.speech) {
+      setTranscriptMode('none')
+      setIncludeSubtitle(false)
+    }
+    if (modelPrompt?.translation) setTranslationTarget('none')
+    setModelPrompt(null)
+    setMessage('已跳过模型下载，仍可正常下载视频、封面和平台文案。')
+  }
+
+  async function startSelectedDownloads() {
+    if (!selectedItems.length) {
+      setMessage('请先解析并勾选至少一条作品。')
+      return
+    }
+    if (!includeVideo) {
+      setMessage('当前版本下载任务必须包含视频文件。')
+      return
+    }
+    if (requiredModels(true)) return
+    await executeSelectedDownloads()
+  }
+
+  async function executeSelectedDownloads(modelsPrepared = false) {
+    if (running) return
+    setMessage(null)
+    const chosen = pendingItems.filter((item) => item.selected)
+    if (!chosen.length) return
+    const created = chosen.map<DownloadTask>((item) => ({
+      id: crypto.randomUUID(),
+      url: item.url,
+      title: item.title,
+      platform: item.platform,
+      status: 'queued',
+      percent: 0,
+      message: '已加入本地下载队列',
+    }))
+    setTasks((current) => [...created, ...current].slice(0, 200))
+    setRunning(true)
+    let translationReady: Promise<void> | null = null
+    if (translationTarget === 'zh') {
+      translationReady = modelsPrepared ? Promise.resolve() : prepareTranslation()
+      void translationReady.catch(() => undefined)
+    }
+    try {
+      for (let index = 0; index < created.length; index += 1) {
+        const task = created[index]
+        const source = chosen[index]
         try {
+          const options: DownloadOptions = {
+            download_dir: downloadDir,
+            quality: source.quality,
+            include_thumbnail: includeThumbnail,
+            include_description: includeDescription,
+            transcript_mode: includeSubtitle ? transcriptMode : 'none',
+            language,
+            model_id: modelId,
+            translation_target: translationTarget === 'zh' ? 'zh' : null,
+          }
           const request: DownloadRequest = { job_id: task.id, url: task.url, options }
           const result = await invoke<DownloadResult>('download_item', { request })
           let finalMessage = result.warning || '视频、封面和文案已保存'
           if (translationTarget === 'zh' && result.transcript_available) {
-            const source = toTranslationLanguage(result.source_language)
-            if (source === 'zh') {
+            const sourceLanguage = toTranslationLanguage(result.source_language)
+            if (sourceLanguage === 'zh') {
               finalMessage = `${finalMessage}；语音文案已经是中文`
-            } else if (!source) {
+            } else if (!sourceLanguage) {
               finalMessage = `${finalMessage}；未能确定原文语言，中文翻译已跳过`
             } else {
-              setTasks((current) => current.map((item) => item.id === task.id ? { ...item, title: result.title, platform: result.platform || item.platform, status: 'transcribing', percent: 0, outputDir: result.output_dir, message: '正在翻译为中文' } : item))
+              setTasks((current) => current.map((item) => item.id === task.id
+                ? { ...item, title: result.title, platform: result.platform || item.platform, status: 'transcribing', percent: 0, outputDir: result.output_dir, message: '正在翻译为中文' }
+                : item))
               try {
                 await translationReady
                 const translationInput = await invoke<TranslationInput>('translation_input', {
@@ -268,9 +407,11 @@ function App() {
                 })
                 const translations = await translateToChinese(
                   translationInput.segments.map((segment) => segment.text),
-                  source,
+                  sourceLanguage,
                   runtime!.model_server_url,
-                  (percent, detail) => setTasks((current) => current.map((item) => item.id === task.id ? { ...item, status: 'transcribing', percent, message: detail } : item)),
+                  (percent, detail) => setTasks((current) => current.map((item) => item.id === task.id
+                    ? { ...item, status: 'transcribing', percent, message: detail }
+                    : item)),
                 )
                 await invoke('save_translation', {
                   request: { output_dir: result.output_dir, segments: translationInput.segments, translations },
@@ -281,21 +422,17 @@ function App() {
               }
             }
           }
-          setTasks((current) => current.map((item) => item.id === task.id ? { ...item, title: result.title, platform: result.platform || item.platform, status: 'completed', percent: 100, outputDir: result.output_dir, message: finalMessage } : item))
+          setTasks((current) => current.map((item) => item.id === task.id
+            ? { ...item, title: result.title, platform: result.platform || item.platform, status: 'completed', percent: 100, outputDir: result.output_dir, message: finalMessage }
+            : item))
         } catch (error) {
           const detail = String(error)
           const cancelled = detail.toLowerCase().includes('terminated') || detail.includes('已取消')
-          setTasks((current) =>
-            current.map((item) =>
-              item.id === task.id
-                ? { ...item, status: cancelled ? 'cancelled' : 'failed', message: detail }
-                : item,
-            ),
-          )
+          setTasks((current) => current.map((item) => item.id === task.id
+            ? { ...item, status: cancelled ? 'cancelled' : 'failed', message: detail }
+            : item))
         }
       }
-    } catch (error) {
-      setMessage(String(error))
     } finally {
       setRunning(false)
     }
@@ -304,7 +441,9 @@ function App() {
   async function cancelTask(task: DownloadTask) {
     try {
       await invoke('cancel_job', { jobId: task.id })
-      setTasks((current) => current.map((item) => (item.id === task.id ? { ...item, status: 'cancelled', message: '用户已取消' } : item)))
+      setTasks((current) => current.map((item) => item.id === task.id
+        ? { ...item, status: 'cancelled', message: '用户已取消' }
+        : item))
     } catch (error) {
       setMessage(String(error))
     }
@@ -321,116 +460,151 @@ function App() {
     }
   }
 
+  function toggleAll() {
+    const shouldSelect = pendingItems.some((item) => !item.selected)
+    setPendingItems((current) => current.map((item) => ({ ...item, selected: shouldSelect })))
+  }
+
   return (
-    <main className="desktop-app">
-      <header className="topbar">
-        <div className="brand"><span><Video size={17} fill="currentColor" /></span><strong>影链工坊</strong><em>Desktop 1.0</em></div>
-        <div className="top-actions">
-          <button className="quiet" type="button" onClick={() => setModelsOpen(true)}><Sparkles size={16} />模型</button>
-          <button className="quiet" type="button" onClick={() => setAccountOpen(true)}><UserRound size={16} />平台登录{runtime?.login_profile_available && <i />}</button>
+    <main className="desktop-shell">
+      <header className="app-header">
+        <div className="brand"><span><Video size={18} fill="currentColor" /></span><strong>影链工坊</strong></div>
+        <form className="quick-paste" onSubmit={parseLinks}>
+          <ClipboardPaste size={18} />
+          <input value={input} onChange={(event) => setInput(event.target.value)} placeholder="粘贴链接或分享文案，按 Enter 解析" />
+          {input && <button className="clear-input" type="button" onClick={() => setInput('')} aria-label="清空"><X size={16} /></button>}
+          <button className="parse-button" type="submit" disabled={parsing || running || !toolsReady} aria-label="解析内容">{parsing ? <LoaderCircle className="spin" size={18} /> : <ChevronRight size={21} />}</button>
+        </form>
+        <div className="header-actions">
+          <button type="button" onClick={() => setModelsOpen(true)}><Languages size={17} /><span>模型</span></button>
+          <button type="button" onClick={() => setAccountOpen(true)} className="account-button"><UserRound size={18} />{runtime?.login_profile_available && <i />}</button>
+          <button type="button" onClick={() => setModelsOpen(true)}><Settings2 size={18} /></button>
         </div>
       </header>
 
-      <section className="hero">
-        <div><span className="eyebrow">本地处理 · 公开内容免登录 · 登录会话不上传</span><h1>视频、封面与多语言文案，一次保存。</h1><p>粘贴作品或博主主页；下载在后台执行，界面始终可以操作。</p></div>
-        <div className="runtime-strip">
-          <span className={runtime?.yt_dlp_available ? 'ok' : 'bad'}>{runtime?.yt_dlp_available ? <Check /> : <AlertCircle />}下载引擎</span>
-          <span className={runtime?.ffmpeg_available ? 'ok' : 'bad'}>{runtime?.ffmpeg_available ? <Check /> : <AlertCircle />}媒体处理</span>
-          <span className={installedModel ? 'ok' : ''}>{installedModel ? <Check /> : <PackageOpen />}多语言模型</span>
-        </div>
-      </section>
+      {message && <div className="notice"><AlertCircle size={16} /><span>{message}</span><button type="button" onClick={() => setMessage(null)}><X size={15} /></button></div>}
 
-      {message && <div className="notice"><AlertCircle size={17} /><span>{message}</span><button type="button" onClick={() => setMessage(null)}><X size={15} /></button></div>}
-
-      <section className="workspace">
-        <form className="composer" onSubmit={startDownload}>
-          <div className="mode-tabs">
-            <button type="button" className={mode === 'single' ? 'active' : ''} onClick={() => setMode('single')}><Link2 size={16} />单条</button>
-            <button type="button" className={mode === 'batch' ? 'active' : ''} onClick={() => setMode('batch')}><ListVideo size={16} />多链接批量</button>
-            <button type="button" className={mode === 'profile' ? 'active' : ''} onClick={() => setMode('profile')}><UserRound size={16} />博主主页</button>
+      <div className="app-body">
+        <section className="inbox-pane">
+          <div className="inbox-toolbar">
+            <div><h1>待下载</h1><b>{pendingItems.length}</b></div>
+            <div className="list-tools">
+              <button type="button" onClick={toggleAll}>{pendingItems.length > 0 && pendingItems.every((item) => item.selected) ? <CheckSquare2 /> : <Square />}全选</button>
+              <button type="button" onClick={() => setPendingItems((current) => current.filter((item) => !item.selected))}><Trash2 />移除</button>
+              <button type="button" onClick={() => parseLinks()} disabled={parsing || !input}><RefreshCw className={parsing ? 'spin' : ''} />刷新</button>
+            </div>
           </div>
 
-          <label className="input-label" htmlFor="share-input">
-            <span>{mode === 'profile' ? '主页 / 频道链接' : mode === 'batch' ? '作品链接或分享文案' : '视频链接或完整分享文案'}</span>
-            <small>{mode === 'profile' ? '一个博主的全部公开视频' : mode === 'batch' ? '可以混合不同平台和博主' : '会自动识别中文分享文本中的链接'}</small>
-          </label>
-          <div className="link-input">
-            <textarea
-              id="share-input"
-              rows={mode === 'batch' ? 6 : 3}
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              placeholder={mode === 'profile' ? '粘贴抖音 / TikTok / YouTube 等主页链接' : '长按复制此条消息，打开平台查看作品 https://...'}
-            />
-            <span>识别 {urls.length} 条</span>
-          </div>
-
-          {mode === 'profile' && (
-            <label className="range-row"><span>读取数量</span><input type="number" min="1" max="500" value={profileLimit} onChange={(event) => setProfileLimit(Math.min(500, Math.max(1, Number(event.target.value))))} /><small>最多 500 条</small></label>
-          )}
-
-          <div className="options">
-            <label><span>视频清晰度</span><select value={quality} onChange={(event) => setQuality(event.target.value)}><option value="best">自动最佳</option><option value="2160">最高 4K</option><option value="1440">最高 2K</option><option value="1080">最高 1080p</option><option value="720">最高 720p</option><option value="480">最高 480p</option></select></label>
-            <label><span>文案提取</span><select value={transcriptMode} onChange={(event) => setTranscriptMode(event.target.value as TranscriptMode)}><option value="auto">字幕优先，AI 兜底</option><option value="ai">始终 AI 识别语音</option><option value="native">仅平台字幕</option><option value="none">不提取语音文案</option></select></label>
-            <label><span>识别语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="auto">自动检测</option><option value="zh">中文</option><option value="en">英语</option><option value="id">印尼语</option><option value="ja">日语</option><option value="ko">韩语</option><option value="es">西班牙语</option></select></label>
-            <label><span>识别模型</span><select value={modelId} onChange={(event) => { setModelId(event.target.value); window.localStorage.setItem('yinglian-model', event.target.value) }}>{runtime?.models.map((model) => <option key={model.id} value={model.id}>{model.name}{model.installed ? ' · 已下载' : ` · ${formatBytes(model.size_bytes)}`}</option>)}</select></label>
-            <label><span>中文翻译</span><select value={translationTarget} onChange={(event) => { const next = event.target.value as 'none' | 'zh'; setTranslationTarget(next); if (next === 'zh' && transcriptMode === 'none') setTranscriptMode('auto') }}><option value="none">不翻译</option><option value="zh">原文 + 中文 + 双语字幕</option></select></label>
-          </div>
-
-          <div className="checks">
-            <label><input type="checkbox" checked={includeThumbnail} onChange={(event) => setIncludeThumbnail(event.target.checked)} />下载原始封面</label>
-            <label><input type="checkbox" checked={includeDescription} onChange={(event) => setIncludeDescription(event.target.checked)} />保存标题、简介和话题</label>
-          </div>
-
-          <div className="destination">
-            <div><FolderOpen size={16} /><span>{downloadDir || '正在读取下载目录'}</span></div>
-            <button type="button" onClick={chooseDirectory}>更改作品位置</button>
-          </div>
-          <small className="destination-note">视频、封面、平台文案、字幕、语音识别和翻译文件都会保存到这里。</small>
-
-          <button className="primary" type="submit" disabled={running || scanning || modelBusy || !toolsReady}>
-            {running || scanning || modelBusy ? <LoaderCircle className="spin" size={18} /> : <Download size={18} />}
-            {modelBusy ? '正在准备模型' : scanning ? '正在扫描主页' : running ? '队列处理中' : mode === 'profile' ? '扫描并全部下载' : mode === 'batch' ? `下载 ${urls.length} 条作品` : '开始下载'}
-          </button>
-        </form>
-
-        <aside className="queue-panel">
-          <div className="panel-heading"><div><span>LOCAL QUEUE</span><h2>本地任务</h2></div><b>{tasks.filter((task) => task.status === 'completed').length} / {tasks.length}</b></div>
-          {!tasks.length ? (
-            <div className="empty"><ListVideo size={34} /><strong>还没有任务</strong><p>下载开始后可以继续修改输入和选项，窗口不会卡住。</p></div>
+          {!pendingItems.length ? (
+            <div className="inbox-empty">
+              <div className="empty-mark"><Link2 size={28} /></div>
+              <h2>粘贴链接，先确认再下载</h2>
+              <p>支持带中文的完整分享文案、多个不同博主链接，以及一个博主的公开主页。</p>
+              <div className="empty-shortcuts"><span><Search />自动识别链接</span><span><ListChecks />下载前可勾选</span><span><FolderOpen />保存位置自选</span></div>
+            </div>
           ) : (
-            <div className="task-list">
-              {tasks.map((task) => (
-                <article className={`task ${task.status}`} key={task.id}>
-                  <div className="task-head"><div className="task-icon">{task.status === 'completed' ? <Check /> : task.status === 'failed' ? <AlertCircle /> : <Video />}</div><div><strong>{task.title}</strong><span>{task.platform} · {statusLabel(task.status)}</span></div></div>
-                  <div className="progress"><i style={{ width: `${task.percent}%` }} /></div>
-                  <p>{task.message}</p>
-                  <div className="task-actions">
-                    {task.outputDir && <button type="button" onClick={() => invoke('open_directory', { path: task.outputDir })}><FolderOpen size={14} />打开文件夹</button>}
-                    {['downloading', 'transcribing'].includes(task.status) && <button type="button" onClick={() => cancelTask(task)}><CircleStop size={14} />取消</button>}
-                  </div>
+            <div className="media-list">
+              {pendingItems.map((item) => (
+                <article className={`media-row ${item.selected ? 'selected' : ''}`} key={item.id}>
+                  <button className="select-box" type="button" onClick={() => setPendingItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, selected: !entry.selected } : entry))}>{item.selected ? <CheckSquare2 /> : <Square />}</button>
+                  <div className="media-thumb">{item.thumbnail ? <img src={item.thumbnail} alt="" /> : <Video size={24} />}<span>{formatDuration(item.duration)}</span></div>
+                  <div className="media-copy"><strong title={item.title}>{item.title}</strong><span>{item.platform} · {item.uploader}</span>{item.error && <small title={item.error}>预览受限，下载时会再次尝试</small>}</div>
+                  <select value={item.quality} aria-label="视频清晰度" onChange={(event) => setPendingItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, quality: event.target.value } : entry))}><option value="best">最佳</option><option value="2160">4K</option><option value="1080">1080P</option><option value="720">720P</option><option value="480">480P</option></select>
+                  <div className="media-tags">{includeThumbnail && <span>封面</span>}{includeDescription && <span>文案</span>}{includeSubtitle && <span>字幕</span>}</div>
+                  <button className="row-more" type="button" aria-label="更多"><MoreHorizontal /></button>
+                  {item.loading && <div className="row-loading"><LoaderCircle className="spin" />读取中</div>}
                 </article>
               ))}
             </div>
           )}
+        </section>
+
+        <aside className="inspector-pane">
+          <section className="setting-section mode-section">
+            <h2>解析模式</h2>
+            <div className="mode-switch">
+              <button type="button" className={mode === 'single' ? 'active' : ''} onClick={() => setMode('single')}><Link2 />单条</button>
+              <button type="button" className={mode === 'batch' ? 'active' : ''} onClick={() => setMode('batch')}><ListVideo />多链接</button>
+              <button type="button" className={mode === 'profile' ? 'active' : ''} onClick={() => setMode('profile')}><UserRound />博主主页</button>
+            </div>
+            {mode === 'profile' && <label className="profile-count"><span>读取最近作品</span><input type="number" min="1" max="500" value={profileLimit} onChange={(event) => setProfileLimit(Math.min(500, Math.max(1, Number(event.target.value))))} /><small>最多 500 条</small></label>}
+          </section>
+
+          <section className="setting-section">
+            <h2>输出内容</h2>
+            <div className="output-grid">
+              <label title="视频为下载任务的核心文件"><input type="checkbox" checked={includeVideo} readOnly aria-disabled="true" /><Video />视频</label>
+              <label><input type="checkbox" checked={includeThumbnail} onChange={(event) => setIncludeThumbnail(event.target.checked)} /><Image />封面</label>
+              <label><input type="checkbox" checked={includeDescription} onChange={(event) => setIncludeDescription(event.target.checked)} /><FileText />文案</label>
+              <label><input type="checkbox" checked={includeSubtitle} onChange={(event) => { const checked = event.target.checked; setIncludeSubtitle(checked); if (!checked) setTranscriptMode('none'); else if (transcriptMode === 'none') requestTranscriptMode('auto') }} /><Subtitles />字幕</label>
+            </div>
+          </section>
+
+          <section className="setting-section ai-section">
+            <div className="section-row"><div><h2>AI 提取文案</h2><p>优先平台字幕，没有时识别语音</p></div><label className="switch"><input type="checkbox" checked={transcriptMode !== 'none'} onChange={(event) => requestTranscriptMode(event.target.checked ? 'auto' : 'none')} /><i /></label></div>
+            {transcriptMode !== 'none' && <>
+              <label className="select-field"><span>提取方式</span><select value={transcriptMode} onChange={(event) => requestTranscriptMode(event.target.value as TranscriptMode)}><option value="auto">字幕优先，AI 兜底</option><option value="ai">始终 AI 识别语音</option><option value="native">仅平台字幕</option></select></label>
+              <label className="select-field"><span>来源语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="auto">自动检测</option><option value="zh">中文</option><option value="en">英语</option><option value="id">印尼语</option><option value="ja">日语</option><option value="ko">韩语</option><option value="es">西班牙语</option></select></label>
+            </>}
+            <label className="select-field"><span>翻译为</span><select value={translationTarget} onChange={(event) => requestTranslation(event.target.value as 'none' | 'zh')}><option value="none">不翻译</option><option value="zh">中文（原文 + 中文 + 双语字幕）</option></select></label>
+          </section>
+
+          <section className="setting-section save-section">
+            <h2>保存位置</h2>
+            <button className="folder-field" type="button" onClick={chooseDirectory}><span title={downloadDir}>{downloadDir || '正在读取下载目录'}</span><FolderOpen /></button>
+            <div className="space-row"><span>已选 {selectedItems.length} 项</span><b>{estimatedSize ? `约 ${formatBytes(estimatedSize)}` : '大小下载时确认'}</b></div>
+          </section>
+
+          <button className="download-selected" type="button" onClick={startSelectedDownloads} disabled={running || parsing || !selectedItems.length || !toolsReady}>
+            {running ? <LoaderCircle className="spin" /> : <Download />}
+            {running ? `正在下载 ${Math.min(completedCount + 1, tasks.length)} / ${tasks.length}` : `下载已选 ${selectedItems.length} 项`}
+            <ChevronDown />
+          </button>
         </aside>
-      </section>
+      </div>
+
+      <footer className="activity-bar">
+        <div className="activity-label"><History /><strong>{activeTask ? '下载中 1 项' : tasks.length ? `已完成 ${completedCount} 项` : '暂无下载任务'}</strong></div>
+        {activeTask ? <>
+          <div className="activity-title"><Video /><span>{activeTask.title}</span><em>{activeTask.platform}</em></div>
+          <b>{Math.round(activeTask.percent)}%</b>
+          <div className="activity-progress"><i style={{ width: `${activeTask.percent}%` }} /></div>
+          <span className="activity-message">{activeTask.message}</span>
+          <button type="button" onClick={() => cancelTask(activeTask)}><CircleStop />取消</button>
+        </> : <span className="activity-hint">粘贴链接后先检查内容，再开始下载</span>}
+      </footer>
+
+      {modelPrompt && (
+        <div className="modal-backdrop">
+          <section className="modal first-model-modal">
+            <div className="model-prompt-mark"><WandSparkles /></div>
+            <h2>首次使用需要下载模型</h2>
+            <p>模型只下载一次，并保存在你选择的本地位置。没有得到确认前，影链工坊不会自动下载。</p>
+            <div className="prompt-models">
+              {modelPrompt.speech && <div><span><PackageOpen /><strong>{selectedModel?.name || '语音识别模型'}</strong></span><b>{formatBytes(selectedModel?.size_bytes)}</b><small>用于英语、印尼语等多语言语音文案提取</small></div>}
+              {modelPrompt.translation && <div><span><Languages /><strong>多语言 → 简体中文</strong></span><b>{formatBytes(runtime?.translation_model_size_bytes || 646109073)}</b><small>用于生成中文翻译和双语字幕</small></div>}
+            </div>
+            <button className="model-folder" type="button" onClick={chooseModelDirectory}><FolderOpen /><span>{runtime?.model_dir || '正在读取模型位置'}</span><em>更改位置</em></button>
+            {(modelBusy || translationBusy) && <div className="model-confirm-progress"><div><span>{modelProgress?.message || translationProgress.message}</span><b>{Math.round(modelProgress?.percent || translationProgress.percent)}%</b></div><div><i style={{ width: `${modelProgress?.percent || translationProgress.percent}%` }} /></div></div>}
+            <div className="modal-actions"><button type="button" onClick={skipModelSetup} disabled={modelBusy || translationBusy}>暂不使用 AI</button><button className="confirm" type="button" onClick={confirmModelSetup} disabled={modelBusy || translationBusy}>{modelBusy || translationBusy ? <LoaderCircle className="spin" /> : <Download />}下载并继续</button></div>
+          </section>
+        </div>
+      )}
 
       {accountOpen && (
         <div className="modal-backdrop" onMouseDown={() => setAccountOpen(false)}>
-          <section className="modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" onClick={() => setAccountOpen(false)}><X /></button><LogIn className="modal-mark" /><h2>平台官方登录</h2><p>公开内容不需要登录。遇到平台限制时，在官方窗口登录一次，会话只保存在本机。</p><div className="platform-grid">{LOGIN_PLATFORMS.map(([id, label]) => <button type="button" key={id} onClick={() => login(id)}><span>{label}</span><ChevronRight size={16} /></button>)}</div></section>
+          <section className="modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" onClick={() => setAccountOpen(false)}><X /></button><LogIn className="modal-mark" /><h2>平台官方登录</h2><p>公开内容默认免登录。遇到平台限制时，在官方窗口登录一次，会话只保存在本机。</p><div className="platform-grid">{LOGIN_PLATFORMS.map(([id, label]) => <button type="button" key={id} onClick={() => login(id)}><span>{label}</span><ChevronRight size={16} /></button>)}</div></section>
         </div>
       )}
 
       {modelsOpen && (
-        <div className="modal-backdrop" onMouseDown={() => !modelBusy && setModelsOpen(false)}>
-          <section className="modal model-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" onClick={() => !modelBusy && setModelsOpen(false)}><X /></button><Languages className="modal-mark" /><h2>多语言模型</h2><p>模型按需下载，不增加主安装包体积。支持自动识别中文、英语、印尼语等语言。</p>
-            <div className="destination model-location"><div><FolderOpen size={16} /><span>{runtime?.model_dir || '正在读取模型目录'}</span></div><button type="button" disabled={modelBusy || translationBusy} onClick={chooseModelDirectory}>选择模型位置</button></div>
-            {modelProgress && <div className="model-download"><div><span>{modelProgress.message}</span><b>{Math.round(modelProgress.percent)}%</b></div><div className="progress"><i style={{ width: `${modelProgress.percent}%` }} /></div><small>{formatBytes(modelProgress.downloaded)} / {formatBytes(modelProgress.total)}</small><button type="button" onClick={() => invoke('cancel_model_download')}>取消下载</button></div>}
-            {translationBusy && <div className="model-download"><div><span>{translationProgress.message || '正在准备中文翻译模型'}</span><b>{Math.round(translationProgress.percent)}%</b></div><div className="progress"><i style={{ width: `${translationProgress.percent}%` }} /></div><small>模型约 {formatBytes(runtime?.translation_model_size_bytes || 646109073)}，只在首次使用时下载到所选模型位置</small></div>}
-            <div className="model-list">{runtime?.models.map((model) => <article key={model.id}><div><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}{model.recommended ? ' · 默认推荐' : ''}</span></div>{model.installed ? <button type="button" className="danger" disabled={modelBusy} onClick={() => removeModel(model.id)}><Trash2 size={14} />删除</button> : <button type="button" disabled={modelBusy} onClick={() => installModel(model.id)}><Download size={14} />下载</button>}</article>)}</div>
-            <div className="model-list translation-model"><article><div><strong>多语言 → 简体中文</strong><span>量化 M2M100 · 100 种语言 · {formatBytes(runtime?.translation_model_size_bytes || 646109073)}</span></div>{translationCached ? <button type="button" className="danger" disabled={translationBusy} onClick={removeTranslationModel}><Trash2 size={14} />删除</button> : <button type="button" disabled={translationBusy} onClick={prepareTranslation}><Download size={14} />下载</button>}</article></div>
-            <div className="future-note"><Settings2 size={16} /><span>翻译在独立后台线程运行，不会阻塞下载队列或操作界面。</span></div>
+        <div className="modal-backdrop" onMouseDown={() => !modelBusy && !translationBusy && setModelsOpen(false)}>
+          <section className="modal model-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" onClick={() => !modelBusy && !translationBusy && setModelsOpen(false)}><X /></button><Languages className="modal-mark" /><h2>本地模型</h2><p>模型按需下载，不增加主安装包体积。首次使用时会先征得用户确认。</p>
+            <button className="model-folder" type="button" disabled={modelBusy || translationBusy} onClick={chooseModelDirectory}><FolderOpen /><span>{runtime?.model_dir || '正在读取模型目录'}</span><em>选择位置</em></button>
+            {modelProgress && <div className="model-confirm-progress"><div><span>{modelProgress.message}</span><b>{Math.round(modelProgress.percent)}%</b></div><div><i style={{ width: `${modelProgress.percent}%` }} /></div><small>{formatBytes(modelProgress.downloaded)} / {formatBytes(modelProgress.total)}</small><button type="button" onClick={() => invoke('cancel_model_download')}>取消下载</button></div>}
+            {translationBusy && <div className="model-confirm-progress"><div><span>{translationProgress.message || '正在准备中文翻译模型'}</span><b>{Math.round(translationProgress.percent)}%</b></div><div><i style={{ width: `${translationProgress.percent}%` }} /></div></div>}
+            <div className="model-list">{runtime?.models.map((model) => <article key={model.id}><div><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}{model.recommended ? ' · 推荐' : ''}</span></div>{model.installed ? <button type="button" className="danger" disabled={modelBusy} onClick={() => removeModel(model.id)}><Trash2 />删除</button> : <button type="button" disabled={modelBusy} onClick={() => installModel(model.id)}><Download />下载</button>}</article>)}</div>
+            <div className="model-list translation-model"><article><div><strong>多语言 → 简体中文</strong><span>{formatBytes(runtime?.translation_model_size_bytes || 646109073)} · 生成中文和双语字幕</span></div>{translationCached ? <button type="button" className="danger" disabled={translationBusy} onClick={removeTranslationModel}><Trash2 />删除</button> : <button type="button" disabled={translationBusy} onClick={prepareTranslation}><Download />下载</button>}</article></div>
           </section>
         </div>
       )}
