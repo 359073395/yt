@@ -4,8 +4,8 @@ import { listen } from '@tauri-apps/api/event'
 import { check, type Update } from '@tauri-apps/plugin-updater'
 import {
   AlertCircle,
+  Check,
   CheckSquare2,
-  ChevronDown,
   ChevronRight,
   CircleStop,
   ClipboardPaste,
@@ -115,6 +115,7 @@ function App() {
   const [pendingItems, setPendingItems] = React.useState<PendingItem[]>([])
   const [tasks, setTasks] = React.useState<DownloadTask[]>([])
   const [running, setRunning] = React.useState(false)
+  const [downloadStarting, setDownloadStarting] = React.useState(false)
   const [parsing, setParsing] = React.useState(false)
   const [message, setMessage] = React.useState<string | null>(null)
   const [accountOpen, setAccountOpen] = React.useState(false)
@@ -140,7 +141,16 @@ function App() {
     const info = await invoke<RuntimeInfo>('runtime_info')
     setRuntime(info)
     setDownloadDir((current) => current || window.localStorage.getItem('yinglian-download-dir') || info.default_download_dir)
-    setModelId((current) => window.localStorage.getItem('yinglian-model') || current || info.selected_model)
+    setModelId((current) => {
+      const saved = window.localStorage.getItem('yinglian-model')
+      const selected = [saved, current, info.selected_model]
+        .find((candidate) => candidate && info.models.some((model) => model.id === candidate && model.installed))
+        || info.selected_model
+      if (info.models.some((model) => model.id === selected && model.installed)) {
+        window.localStorage.setItem('yinglian-model', selected)
+      }
+      return selected
+    })
     setTranslationCached(info.translation_model_installed)
   }, [])
 
@@ -177,6 +187,7 @@ function App() {
   const toolsReady = Boolean(runtime?.yt_dlp_available && runtime?.ffmpeg_available)
   const completedCount = tasks.filter((task) => task.status === 'completed').length
   const activeTask = tasks.find((task) => ['queued', 'scanning', 'downloading', 'transcribing'].includes(task.status))
+  const visibleTask = activeTask || tasks[0]
   const estimatedSize = selectedItems.reduce((total, item) => total + (item.size_bytes || 0), 0)
 
   async function checkForUpdates(silent = false) {
@@ -261,8 +272,11 @@ function App() {
     setModelProgress({ model_id: selected, percent: 0, downloaded: 0, total: 0, message: '正在连接模型仓库' })
     try {
       await invoke('download_model', { modelId: selected })
+      window.localStorage.setItem('yinglian-model', selected)
+      setModelId(selected)
       await refreshRuntime()
-      setMessage('多语言语音模型已准备好。')
+      const name = runtime?.models.find((model) => model.id === selected)?.name || '多语言语音模型'
+      setMessage(`${name}已下载并设为当前模型。`)
     } finally {
       setModelBusy(false)
       setModelProgress(null)
@@ -271,7 +285,18 @@ function App() {
 
   async function removeModel(selected: string) {
     await invoke('delete_model', { modelId: selected })
+    if (window.localStorage.getItem('yinglian-model') === selected) {
+      window.localStorage.removeItem('yinglian-model')
+    }
     await refreshRuntime()
+  }
+
+  function selectModel(selected: string) {
+    const model = runtime?.models.find((item) => item.id === selected)
+    if (!model?.installed) return
+    window.localStorage.setItem('yinglian-model', selected)
+    setModelId(selected)
+    setMessage(`已选用 ${model.name}，后续 AI 语音识别将使用此模型。`)
   }
 
   async function prepareTranslation() {
@@ -419,6 +444,7 @@ function App() {
   }
 
   async function startSelectedDownloads() {
+    if (downloadStarting || running) return
     if (!selectedItems.length) {
       setMessage('请先解析并勾选至少一条作品。')
       return
@@ -427,8 +453,19 @@ function App() {
       setMessage('当前版本下载任务必须包含视频文件。')
       return
     }
-    if (requiredModels(true)) return
-    await executeSelectedDownloads()
+    setDownloadStarting(true)
+    setMessage('正在创建本地下载任务…')
+    try {
+      if (requiredModels(true)) {
+        setMessage('请先确认所需模型，确认后会自动继续下载。')
+        return
+      }
+      await executeSelectedDownloads()
+    } catch (error) {
+      setMessage(`无法启动下载：${String(error)}`)
+    } finally {
+      setDownloadStarting(false)
+    }
   }
 
   async function executeSelectedDownloads(modelsPrepared = false) {
@@ -623,11 +660,14 @@ function App() {
 
           <section className="setting-section ai-section">
             <div className="section-row"><div><h2>AI 提取文案</h2><p>优先平台字幕，没有时识别语音</p></div><label className="switch"><input type="checkbox" checked={transcriptMode !== 'none'} onChange={(event) => requestTranscriptMode(event.target.checked ? 'auto' : 'none')} /><i /></label></div>
-            {transcriptMode !== 'none' && <>
-              <label className="select-field"><span>提取方式</span><select value={transcriptMode} onChange={(event) => requestTranscriptMode(event.target.value as TranscriptMode)}><option value="auto">字幕优先，AI 兜底</option><option value="ai">始终 AI 识别语音</option><option value="native">仅平台字幕</option></select></label>
-              <label className="select-field"><span>来源语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="auto">自动检测</option><option value="zh">中文</option><option value="en">英语</option><option value="id">印尼语</option><option value="ja">日语</option><option value="ko">韩语</option><option value="es">西班牙语</option></select></label>
-            </>}
-            <label className="select-field"><span>翻译为</span><select value={translationTarget} onChange={(event) => requestTranslation(event.target.value as 'none' | 'zh')}><option value="none">不翻译</option><option value="zh">中文（原文 + 中文 + 双语字幕）</option></select></label>
+            <div className="ai-options-grid">
+              {transcriptMode !== 'none' && <>
+                <label className="select-field"><span>提取方式</span><select value={transcriptMode} onChange={(event) => requestTranscriptMode(event.target.value as TranscriptMode)}><option value="auto">字幕优先，AI 兜底</option><option value="ai">始终 AI 识别语音</option><option value="native">仅平台字幕</option></select></label>
+                <label className="select-field"><span>来源语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="auto">自动检测</option><option value="zh">中文</option><option value="en">英语</option><option value="id">印尼语</option><option value="ja">日语</option><option value="ko">韩语</option><option value="es">西班牙语</option></select></label>
+                <label className="select-field"><span>识别模型</span><select value={modelId} onChange={(event) => selectModel(event.target.value)}>{runtime?.models.filter((model) => model.installed).map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</select></label>
+              </>}
+              <label className="select-field"><span>翻译为</span><select value={translationTarget} onChange={(event) => requestTranslation(event.target.value as 'none' | 'zh')}><option value="none">不翻译</option><option value="zh">中文 + 双语字幕</option></select></label>
+            </div>
           </section>
 
           <section className="setting-section save-section">
@@ -636,10 +676,12 @@ function App() {
             <div className="space-row"><span>已选 {selectedItems.length} 项</span><b>{estimatedSize ? `约 ${formatBytes(estimatedSize)}` : '大小下载时确认'}</b></div>
           </section>
 
-          <button className="download-selected" type="button" onClick={startSelectedDownloads} disabled={running || parsing || !selectedItems.length || !toolsReady}>
-            {running ? <LoaderCircle className="spin" /> : <Download />}
-            {running ? `正在下载 ${Math.min(completedCount + 1, tasks.length)} / ${tasks.length}` : `下载已选 ${selectedItems.length} 项`}
-            <ChevronDown />
+          {visibleTask && <div className={`download-status ${visibleTask.status}`} aria-live="polite"><div><span>{visibleTask.status === 'failed' ? '下载失败' : visibleTask.status === 'completed' ? '下载完成' : visibleTask.message}</span><b>{Math.round(visibleTask.percent)}%</b></div><div><i style={{ width: `${visibleTask.percent}%` }} /></div>{visibleTask.status === 'failed' && <small title={visibleTask.message}>{visibleTask.message}</small>}</div>}
+
+          <button className="download-selected" type="button" onClick={() => void startSelectedDownloads()} disabled={downloadStarting || running || parsing || !selectedItems.length || !toolsReady} aria-live="polite">
+            {downloadStarting || running ? <LoaderCircle className="spin" /> : <Download />}
+            <span>{downloadStarting && !running ? '正在创建任务…' : running ? `正在下载 ${Math.min(completedCount + 1, tasks.length)} / ${tasks.length}` : `下载已选 ${selectedItems.length} 项`}</span>
+            <b>{running ? `${Math.round(activeTask?.percent || 0)}%` : `${selectedItems.length} 项`}</b>
           </button>
         </aside>
       </div>
@@ -695,12 +737,14 @@ function App() {
 
       {modelsOpen && (
         <div className="modal-backdrop" onMouseDown={() => !modelBusy && !translationBusy && setModelsOpen(false)}>
-          <section className="modal model-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" onClick={() => !modelBusy && !translationBusy && setModelsOpen(false)}><X /></button><Languages className="modal-mark" /><h2>本地模型</h2><p>模型按需下载，不增加主安装包体积。首次使用时会先征得用户确认。</p>
+          <section className="modal model-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" onClick={() => !modelBusy && !translationBusy && setModelsOpen(false)}><X /></button><Languages className="modal-mark" /><h2>本地模型</h2><p>语音识别模型可自由切换；中文翻译模型是单独能力，不计入识别模型数量。</p>
             <button className="model-folder" type="button" disabled={modelBusy || translationBusy} onClick={chooseModelDirectory}><FolderOpen /><span>{runtime?.model_dir || '正在读取模型目录'}</span><em>选择位置</em></button>
             {modelProgress && <div className="model-confirm-progress"><div><span>{modelProgress.message}</span><b>{Math.round(modelProgress.percent)}%</b></div><div><i style={{ width: `${modelProgress.percent}%` }} /></div><small>{formatBytes(modelProgress.downloaded)} / {formatBytes(modelProgress.total)}</small><button type="button" onClick={() => invoke('cancel_model_download')}>取消下载</button></div>}
             {translationBusy && <div className="model-confirm-progress"><div><span>{translationProgress.message || '正在准备中文翻译模型'}</span><b>{Math.round(translationProgress.percent)}%</b></div><div><i style={{ width: `${translationProgress.percent}%` }} /></div></div>}
-            <div className="model-list">{runtime?.models.map((model) => <article key={model.id}><div><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}{model.recommended ? ' · 推荐' : ''}</span></div>{model.installed ? <button type="button" className="danger" disabled={modelBusy} onClick={() => removeModel(model.id)}><Trash2 />删除</button> : <button type="button" disabled={modelBusy} onClick={() => installModel(model.id)}><Download />下载</button>}</article>)}</div>
-            <div className="model-list translation-model"><article><div><strong>多语言 → 简体中文</strong><span>{formatBytes(runtime?.translation_model_size_bytes || 646109073)} · 生成中文和双语字幕</span></div>{translationCached ? <button type="button" className="danger" disabled={translationBusy} onClick={removeTranslationModel}><Trash2 />删除</button> : <button type="button" disabled={translationBusy} onClick={prepareTranslation}><Download />下载</button>}</article></div>
+            <h3 className="model-group-title">语音识别模型</h3>
+            <div className="model-list">{runtime?.models.map((model) => <article className={model.id === modelId && model.installed ? 'selected' : ''} key={model.id}><div><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}{model.recommended ? ' · 推荐' : ''}</span></div><div className="model-actions">{model.installed && <button type="button" className={model.id === modelId ? 'current' : 'use'} disabled={modelBusy || model.id === modelId} onClick={() => selectModel(model.id)}>{model.id === modelId ? <Check /> : null}{model.id === modelId ? '使用中' : '选用'}</button>}{model.installed ? <button type="button" className="danger icon-only" aria-label={`删除 ${model.name}`} disabled={modelBusy} onClick={() => removeModel(model.id)}><Trash2 /></button> : <button type="button" disabled={modelBusy} onClick={() => installModel(model.id)}><Download />下载</button>}</div></article>)}</div>
+            <h3 className="model-group-title translation-title">中文翻译模型</h3>
+            <div className="model-list translation-model"><article><div><strong>多语言 → 简体中文</strong><span>{formatBytes(runtime?.translation_model_size_bytes || 646109073)} · 生成中文和双语字幕</span></div>{translationCached ? <div className="model-actions"><span className="installed-badge"><Check />已安装</span><button type="button" className="danger icon-only" aria-label="删除中文翻译模型" disabled={translationBusy} onClick={removeTranslationModel}><Trash2 /></button></div> : <button type="button" disabled={translationBusy} onClick={prepareTranslation}><Download />下载</button>}</article></div>
           </section>
         </div>
       )}
