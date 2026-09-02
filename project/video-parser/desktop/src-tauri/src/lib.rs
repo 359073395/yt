@@ -95,6 +95,7 @@ struct RuntimeInfo {
 struct DownloadOptions {
     download_dir: String,
     quality: String,
+    include_video: bool,
     include_thumbnail: bool,
     include_description: bool,
     transcript_mode: String,
@@ -536,19 +537,19 @@ fn launch_login(app: tauri::AppHandle, platform: String) -> Result<String, Strin
 }
 
 fn add_cookie_args(app: &tauri::AppHandle, command: &mut Command) {
-    if login_profile_exists(app) {
+    if let Some(cookie_file) = public_edge_profile_dir(app)
+        .ok()
+        .map(|profile| profile.join("yinglian-public-cookies.txt"))
+        .filter(|path| path.is_file())
+    {
+        command.arg("--cookies").arg(cookie_file);
+    } else if login_profile_exists(app) {
         let Some(profile) = edge_profile_dir(app).ok() else {
             return;
         };
         command
             .arg("--cookies-from-browser")
             .arg(format!("edge:{}", profile.join("Default").display()));
-    } else if let Some(cookie_file) = public_edge_profile_dir(app)
-        .ok()
-        .map(|profile| profile.join("yinglian-public-cookies.txt"))
-        .filter(|path| path.is_file())
-    {
-        command.arg("--cookies").arg(cookie_file);
     }
 }
 
@@ -621,7 +622,7 @@ fn public_session_fresh(profile: &Path) -> bool {
         .and_then(|metadata| metadata.modified())
         .ok()
         .and_then(|modified| modified.elapsed().ok())
-        .map(|age| age < Duration::from_secs(15 * 60))
+        .map(|age| age < Duration::from_secs(90))
         .unwrap_or(false)
 }
 
@@ -715,7 +716,13 @@ fn export_douyin_cookies<S: Read + Write>(
         let temporary = profile.join("yinglian-public-cookies.tmp");
         fs::write(&temporary, output).map_err(|error| format!("公开会话保存失败：{error}"))?;
         let _ = fs::remove_file(&target);
-        fs::rename(temporary, target).map_err(|error| format!("公开会话保存失败：{error}"))?;
+        if let Err(rename_error) = fs::rename(&temporary, &target) {
+            fs::copy(&temporary, &target).map_err(|copy_error| {
+                format!("公开会话保存失败：{rename_error}；复制回退也失败：{copy_error}")
+            })?;
+            fs::remove_file(&temporary)
+                .map_err(|error| format!("公开会话临时文件清理失败：{error}"))?;
+        }
         return Ok(());
     }
 }
@@ -780,7 +787,12 @@ fn scan_profile_with_edge(
                             items.iter().find_map(|item| {
                                 let page_url =
                                     item.get("url").and_then(Value::as_str).unwrap_or_default();
-                                if page_url.starts_with("http") {
+                                let page_type =
+                                    item.get("type").and_then(Value::as_str).unwrap_or_default();
+                                if page_type == "page"
+                                    && (page_url.contains("douyin.com")
+                                        || page_url.contains("iesdouyin.com"))
+                                {
                                     item.get("webSocketDebuggerUrl")
                                         .and_then(Value::as_str)
                                         .map(str::to_string)
@@ -824,8 +836,8 @@ fn scan_profile_with_edge(
             let payload: Value =
                 serde_json::from_str(text.as_str()).map_err(|_| "官方公开页面返回了无效数据")?;
             if payload.get("id").and_then(Value::as_i64) == Some(97) {
-                if payload.get("error").is_some() {
-                    return Err("官方公开页面跳转失败".into());
+                if let Some(detail) = payload.pointer("/error/message").and_then(Value::as_str) {
+                    return Err(format!("官方公开页面跳转失败：{detail}"));
                 }
                 break;
             }
@@ -1252,6 +1264,7 @@ fn tiktok_media_url(value: &str) -> bool {
             let host = url.host_str().unwrap_or_default().to_lowercase();
             host.ends_with("-webapp-prime.tiktok.com")
                 || host == "webapp-prime.tiktok.com"
+                || (host.ends_with(".com") && host.contains(".tiktokcdn-"))
                 || [
                     "tiktokcdn.com",
                     "tiktokv.com",
@@ -1262,6 +1275,38 @@ fn tiktok_media_url(value: &str) -> bool {
                 .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
         })
         .unwrap_or(false)
+}
+
+fn tiktok_media_from_public_fallback(payload: &Value, video_id: &str) -> Option<String> {
+    if payload.get("code").and_then(Value::as_i64) != Some(0)
+        || payload.pointer("/data/id").and_then(Value::as_str) != Some(video_id)
+    {
+        return None;
+    }
+    ["/data/hdplay", "/data/play"]
+        .into_iter()
+        .filter_map(|pointer| payload.pointer(pointer).and_then(Value::as_str))
+        .find(|candidate| tiktok_media_url(candidate))
+        .map(str::to_string)
+}
+
+fn tiktok_media_with_public_fallback(
+    client: &reqwest::blocking::Client,
+    page_url: &str,
+    video_id: &str,
+) -> Result<String, String> {
+    let body = client
+        .post("https://www.tikwm.com/api/")
+        .header(reqwest::header::USER_AGENT, BROWSER_USER_AGENT)
+        .form(&[("url", page_url), ("hd", "1")])
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .and_then(reqwest::blocking::Response::text)
+        .map_err(|error| format!("TikTok 公开解析回退失败：{error}"))?;
+    let payload: Value = serde_json::from_str(&body)
+        .map_err(|error| format!("TikTok 公开解析回退数据无效：{error}"))?;
+    tiktok_media_from_public_fallback(&payload, video_id)
+        .ok_or_else(|| "TikTok 公开解析回退没有返回安全的视频地址".into())
 }
 
 fn tiktok_embed_state(html: &str) -> Result<Value, String> {
@@ -1399,7 +1444,9 @@ fn tiktok_media_with_edge(
                     websocket = tabs.as_array().and_then(|items| {
                         items.iter().find_map(|item| {
                             let page_url = item.get("url").and_then(Value::as_str)?;
-                            if page_url.starts_with("https://www.tiktok.com/") {
+                            if item.get("type").and_then(Value::as_str) == Some("page")
+                                && page_url.starts_with("https://www.tiktok.com/")
+                            {
                                 item.get("webSocketDebuggerUrl")
                                     .and_then(Value::as_str)
                                     .map(str::to_string)
@@ -1581,6 +1628,7 @@ fn prepare_tiktok_info_json(
     }
     let video_id = video_id.ok_or("没有从 TikTok 链接识别出作品 ID")?;
     let embed_url = format!("https://www.tiktok.com/embed/v2/{video_id}");
+    let player_url = format!("https://www.tiktok.com/player/v1/{video_id}?autoplay=1&loop=1");
     let html = client
         .get(&embed_url)
         .header(reqwest::header::USER_AGENT, BROWSER_USER_AGENT)
@@ -1627,8 +1675,16 @@ fn prepare_tiktok_info_json(
     let (media_url, cookie_file, media_referer) = if let Some(media_url) = embedded_media_url {
         (media_url.to_string(), None, embed_url.clone())
     } else if browser_fallback {
-        let (media_url, cookie_file) = tiktok_media_with_edge(app, &canonical, &embed_url)?;
-        (media_url, Some(cookie_file), embed_url.clone())
+        match tiktok_media_with_public_fallback(&client, &canonical, &video_id) {
+            Ok(media_url) => (media_url, None, "https://www.tiktok.com/".into()),
+            Err(public_error) => {
+                let (media_url, cookie_file) = tiktok_media_with_edge(app, &canonical, &player_url)
+                    .map_err(|edge_error| {
+                        format!("{public_error}；官方播放器回退也失败：{edge_error}")
+                    })?;
+                (media_url, Some(cookie_file), player_url)
+            }
+        }
     } else {
         return Err("TikTok 官方页面没有返回安全的视频地址".into());
     };
@@ -1715,11 +1771,17 @@ fn validate_url(raw: &str) -> Result<String, String> {
 
 fn quality_selector(value: &str) -> &'static str {
     match value {
-        "2160" => "bv*[height<=2160]+ba/b[height<=2160]",
-        "1440" => "bv*[height<=1440]+ba/b[height<=1440]",
-        "1080" => "bv*[height<=1080]+ba/b[height<=1080]",
-        "720" => "bv*[height<=720]+ba/b[height<=720]",
-        "480" => "bv*[height<=480]+ba/b[height<=480]",
+        "2160" => {
+            "bv*[height<=2160]+ba/b[height<=2160]/bv*[width<=2160]+ba/b[width<=2160]/bv*+ba/b"
+        }
+        "1440" => {
+            "bv*[height<=1440]+ba/b[height<=1440]/bv*[width<=1440]+ba/b[width<=1440]/bv*+ba/b"
+        }
+        "1080" => {
+            "bv*[height<=1080]+ba/b[height<=1080]/bv*[width<=1080]+ba/b[width<=1080]/bv*+ba/b"
+        }
+        "720" => "bv*[height<=720]+ba/b[height<=720]/bv*[width<=720]+ba/b[width<=720]/bv*+ba/b",
+        "480" => "bv*[height<=480]+ba/b[height<=480]/bv*[width<=480]+ba/b[width<=480]/bv*+ba/b",
         _ => "bv*+ba/b",
     }
 }
@@ -2300,7 +2362,7 @@ fn execute_download(
         "正在读取视频信息",
     );
 
-    if is_douyin_url(&url) && !login_profile_exists(&app) {
+    if is_douyin_url(&url) {
         let profile = public_edge_profile_dir(&app)?;
         if !public_session_fresh(&profile) {
             emit_progress(
@@ -2340,6 +2402,8 @@ fn execute_download(
 
     let mut command = Command::new(yt_dlp);
     command
+        .arg("--encoding")
+        .arg("utf-8")
         .arg("--newline")
         .arg("--no-color")
         .arg("--no-playlist")
@@ -2452,13 +2516,10 @@ fn execute_download(
             Err(error) => warning = Some(format!("视频已下载，AI 文案未生成：{error}")),
         }
     }
-    emit_progress(
-        &app,
-        &request.job_id,
-        "completed",
-        100.0,
-        "视频、封面和文案已保存",
-    );
+    if !request.options.include_video {
+        fs::remove_file(&media_file).map_err(|error| format!("无法移除临时视频文件：{error}"))?;
+    }
+    emit_progress(&app, &request.job_id, "completed", 100.0, "所选内容已保存");
     Ok(DownloadResult {
         output_dir: job_dir.to_string_lossy().into_owned(),
         title,
@@ -2799,6 +2860,9 @@ mod tests {
         assert!(tiktok_media_url(
             "https://v19.tiktokcdn.com/video/tos/example"
         ));
+        assert!(tiktok_media_url(
+            "https://v16m.tiktokcdn-us.com/video/tos/example"
+        ));
         assert!(!tiktok_media_url(
             "https://v16-webapp-prime.tiktok.com.evil.example/video"
         ));
@@ -2808,5 +2872,30 @@ mod tests {
         assert!(!tiktok_media_url(
             "https://www.tiktok.com/aweme/v1/play/?item_id=123&tk=tt_chain_token"
         ));
+    }
+
+    #[test]
+    fn tiktok_public_fallback_requires_matching_id_and_safe_cdn() {
+        let payload = serde_json::json!({
+            "code": 0,
+            "data": {
+                "id": "1234567890123456789",
+                "hdplay": "https://v16m.tiktokcdn-us.com/video/tos/example",
+                "play": "https://untrusted.example/video.mp4"
+            }
+        });
+        assert_eq!(
+            tiktok_media_from_public_fallback(&payload, "1234567890123456789").as_deref(),
+            Some("https://v16m.tiktokcdn-us.com/video/tos/example")
+        );
+        assert!(tiktok_media_from_public_fallback(&payload, "9876543210123456789").is_none());
+    }
+
+    #[test]
+    fn limited_quality_keeps_portrait_and_best_fallbacks() {
+        let selector = quality_selector("480");
+        assert!(selector.contains("height<=480"));
+        assert!(selector.contains("width<=480"));
+        assert!(selector.ends_with("/bv*+ba/b"));
     }
 }

@@ -28,6 +28,7 @@ export interface ModelInfo {
 export interface DownloadOptions {
   download_dir: string
   quality: string
+  include_video: boolean
   include_thumbnail: boolean
   include_description: boolean
   transcript_mode: TranscriptMode
@@ -89,6 +90,7 @@ export interface ProgressEvent {
 
 export interface DownloadTask {
   id: string
+  queueItemId: string
   url: string
   title: string
   platform: string
@@ -96,6 +98,7 @@ export interface DownloadTask {
   percent: number
   message: string
   outputDir?: string
+  sourceLanguage?: string
 }
 
 export interface ModelProgress {
