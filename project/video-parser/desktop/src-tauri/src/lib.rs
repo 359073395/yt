@@ -2184,80 +2184,99 @@ fn transcribe(
     if !model.is_file() {
         return Err(format!("尚未下载 {} 模型", request.options.model_id));
     }
-    let audio = job_dir.join(".yinglian-transcribe.wav");
-    emit_progress(app, &request.job_id, "transcribing", 2.0, "正在提取音轨");
-    let mut ffmpeg_command = Command::new(ffmpeg);
-    hidden(&mut ffmpeg_command)
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-y")
-        .arg("-i")
-        .arg(media_file)
-        .arg("-vn")
-        .arg("-ar")
-        .arg("16000")
-        .arg("-ac")
-        .arg("1")
-        .arg("-c:a")
-        .arg("pcm_s16le")
-        .arg(&audio);
-    let status = ffmpeg_command
-        .status()
-        .map_err(|error| format!("音轨提取启动失败：{error}"))?;
-    if !status.success() {
-        return Err("无法从视频中提取语音".into());
-    }
-
-    emit_progress(
-        app,
-        &request.job_id,
-        "transcribing",
-        8.0,
-        "正在识别视频语言和语音",
-    );
-    let output_base = job_dir.join("语音识别");
-    let mut whisper_command = Command::new(whisper);
-    whisper_command
-        .arg("-m")
-        .arg(model)
-        .arg("-f")
-        .arg(&audio)
-        .arg("-otxt")
-        .arg("-osrt")
-        .arg("-of")
-        .arg(&output_base)
-        .arg("-l")
-        .arg(if request.options.language.trim().is_empty() {
-            "auto"
-        } else {
-            request.options.language.as_str()
-        })
-        .arg("-np");
-    let result = run_streaming(
-        app,
-        state,
-        &request.job_id,
-        "transcribing",
-        &mut whisper_command,
-    );
-    let _ = fs::remove_file(&audio);
-    let result = result?;
-    let _ = fs::rename(
-        output_base.with_extension("txt"),
-        job_dir.join("语音识别文案.txt"),
-    );
-    let _ = fs::rename(
-        output_base.with_extension("srt"),
-        job_dir.join("语音识别字幕.srt"),
-    );
-    Ok(detect_whisper_language(&result.lines).unwrap_or_else(|| {
-        if request.options.language == "auto" {
-            "unknown".into()
-        } else {
-            request.options.language.clone()
+    let scratch_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let scratch = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| error.to_string())?
+        .join("transcribe")
+        .join(format!("{}-{scratch_id}", process::id()));
+    fs::create_dir_all(&scratch).map_err(|error| format!("无法创建语音识别临时目录：{error}"))?;
+    let result = (|| {
+        let audio = scratch.join("audio.wav");
+        emit_progress(app, &request.job_id, "transcribing", 2.0, "正在提取音轨");
+        let mut ffmpeg_command = Command::new(ffmpeg);
+        hidden(&mut ffmpeg_command)
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-y")
+            .arg("-i")
+            .arg(media_file)
+            .arg("-vn")
+            .arg("-ar")
+            .arg("16000")
+            .arg("-ac")
+            .arg("1")
+            .arg("-c:a")
+            .arg("pcm_s16le")
+            .arg(&audio);
+        let status = ffmpeg_command
+            .status()
+            .map_err(|error| format!("音轨提取启动失败：{error}"))?;
+        if !status.success() {
+            return Err("无法从视频中提取语音".into());
         }
-    }))
+
+        emit_progress(
+            app,
+            &request.job_id,
+            "transcribing",
+            8.0,
+            "正在识别视频语言和语音",
+        );
+        let output_base = scratch.join("result");
+        let mut whisper_command = Command::new(whisper);
+        whisper_command
+            .arg("-m")
+            .arg(model)
+            .arg("-f")
+            .arg(&audio)
+            .arg("-otxt")
+            .arg("-osrt")
+            .arg("-of")
+            .arg(&output_base)
+            .arg("-l")
+            .arg(if request.options.language.trim().is_empty() {
+                "auto"
+            } else {
+                request.options.language.as_str()
+            });
+        let process_output = run_streaming(
+            app,
+            state,
+            &request.job_id,
+            "transcribing",
+            &mut whisper_command,
+        )?;
+        let text = output_base.with_extension("txt");
+        let subtitle = output_base.with_extension("srt");
+        if !text.is_file() || !subtitle.is_file() {
+            return Err("语音识别完成但没有生成文案或字幕".into());
+        }
+        let transcript_text =
+            fs::read(&text).map_err(|error| format!("无法读取语音识别文案：{error}"))?;
+        fs::write(job_dir.join("语音识别文案.txt"), transcript_text)
+            .map_err(|error| format!("无法保存语音识别文案：{error}"))?;
+        let subtitle_text =
+            fs::read(&subtitle).map_err(|error| format!("无法读取语音识别字幕：{error}"))?;
+        fs::write(job_dir.join("语音识别字幕.srt"), subtitle_text)
+            .map_err(|error| format!("无法保存语音识别字幕：{error}"))?;
+        Ok(
+            detect_whisper_language(&process_output.lines).unwrap_or_else(|| {
+                if request.options.language == "auto" {
+                    "unknown".into()
+                } else {
+                    request.options.language.clone()
+                }
+            }),
+        )
+    })();
+    let _ = fs::remove_dir_all(&scratch);
+    result
 }
 
 fn execute_download(
@@ -2478,8 +2497,12 @@ async fn download_item(
         Ok(download) => runtime_log(
             &log_app,
             format!(
-                "download_complete job={job_id} platform={} output={}",
-                download.platform, download.output_dir
+                "download_complete job={job_id} platform={} transcript={} language={} warning={} output={}",
+                download.platform,
+                download.transcript_available,
+                download.source_language,
+                download.warning.as_deref().unwrap_or("none"),
+                download.output_dir
             ),
         ),
         Err(error) => runtime_log(

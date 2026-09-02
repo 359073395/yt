@@ -105,13 +105,16 @@ function App() {
   const [profileLimit, setProfileLimit] = React.useState(50)
   const [downloadDir, setDownloadDir] = React.useState('')
   const [quality] = React.useState('1080')
-  const [transcriptMode, setTranscriptMode] = React.useState<TranscriptMode>('none')
+  const [transcriptMode, setTranscriptMode] = React.useState<TranscriptMode>(() => {
+    const saved = window.localStorage.getItem('yinglian-transcript-mode')
+    return saved === 'auto' || saved === 'ai' || saved === 'native' ? saved : 'none'
+  })
   const [language, setLanguage] = React.useState('auto')
   const [modelId, setModelId] = React.useState('small')
   const includeVideo = true
   const [includeThumbnail, setIncludeThumbnail] = React.useState(true)
   const [includeDescription, setIncludeDescription] = React.useState(true)
-  const [includeSubtitle, setIncludeSubtitle] = React.useState(false)
+  const [includeSubtitle, setIncludeSubtitle] = React.useState(() => window.localStorage.getItem('yinglian-transcript-mode') !== null && window.localStorage.getItem('yinglian-transcript-mode') !== 'none')
   const [pendingItems, setPendingItems] = React.useState<PendingItem[]>([])
   const [tasks, setTasks] = React.useState<DownloadTask[]>([])
   const [running, setRunning] = React.useState(false)
@@ -123,7 +126,7 @@ function App() {
   const [modelPrompt, setModelPrompt] = React.useState<ModelPromptState | null>(null)
   const [modelProgress, setModelProgress] = React.useState<ModelProgress | null>(null)
   const [modelBusy, setModelBusy] = React.useState(false)
-  const [translationTarget, setTranslationTarget] = React.useState<'none' | 'zh'>('none')
+  const [translationTarget, setTranslationTarget] = React.useState<'none' | 'zh'>(() => window.localStorage.getItem('yinglian-translation-target') === 'zh' ? 'zh' : 'none')
   const [translationBusy, setTranslationBusy] = React.useState(false)
   const [translationProgress, setTranslationProgress] = React.useState({ percent: 0, message: '' })
   const [translationCached, setTranslationCached] = React.useState(false)
@@ -390,6 +393,7 @@ function App() {
   }
 
   function requestTranscriptMode(next: TranscriptMode) {
+    window.localStorage.setItem('yinglian-transcript-mode', next)
     setTranscriptMode(next)
     setIncludeSubtitle(next !== 'none')
     if ((next === 'auto' || next === 'ai') && !installedModel) {
@@ -398,9 +402,11 @@ function App() {
   }
 
   function requestTranslation(next: 'none' | 'zh') {
+    window.localStorage.setItem('yinglian-translation-target', next)
     setTranslationTarget(next)
     if (next === 'zh') {
       if (transcriptMode === 'none') {
+        window.localStorage.setItem('yinglian-transcript-mode', 'auto')
         setTranscriptMode('auto')
         setIncludeSubtitle(true)
       }
@@ -435,10 +441,14 @@ function App() {
 
   function skipModelSetup() {
     if (modelPrompt?.speech) {
+      window.localStorage.setItem('yinglian-transcript-mode', 'none')
       setTranscriptMode('none')
       setIncludeSubtitle(false)
     }
-    if (modelPrompt?.translation) setTranslationTarget('none')
+    if (modelPrompt?.translation) {
+      window.localStorage.setItem('yinglian-translation-target', 'none')
+      setTranslationTarget('none')
+    }
     setModelPrompt(null)
     setMessage('已跳过模型下载，仍可正常下载视频、封面和平台文案。')
   }
@@ -507,13 +517,16 @@ function App() {
           const request: DownloadRequest = { job_id: task.id, url: task.url, options }
           const result = await invoke<DownloadResult>('download_item', { request })
           let finalMessage = result.warning || '视频、封面和文案已保存'
-          if (translationTarget === 'zh' && result.transcript_available) {
-            const sourceLanguage = toTranslationLanguage(result.source_language)
-            if (sourceLanguage === 'zh') {
-              finalMessage = `${finalMessage}；语音文案已经是中文`
-            } else if (!sourceLanguage) {
-              finalMessage = `${finalMessage}；未能确定原文语言，中文翻译已跳过`
+          if (translationTarget === 'zh') {
+            if (!result.transcript_available) {
+              finalMessage = `${finalMessage}；没有生成可翻译的字幕，中文翻译已跳过`
             } else {
+              const sourceLanguage = toTranslationLanguage(result.source_language)
+              if (sourceLanguage === 'zh') {
+                finalMessage = `${finalMessage}；语音文案已经是中文`
+              } else if (!sourceLanguage) {
+                finalMessage = `${finalMessage}；未能确定原文语言，中文翻译已跳过`
+              } else {
               setTasks((current) => current.map((item) => item.id === task.id
                 ? { ...item, title: result.title, platform: result.platform || item.platform, status: 'transcribing', percent: 0, outputDir: result.output_dir, message: '正在翻译为中文' }
                 : item))
@@ -536,6 +549,7 @@ function App() {
                 finalMessage = `${finalMessage}；中文翻译和双语字幕已保存`
               } catch (error) {
                 finalMessage = `${finalMessage}；中文翻译失败：${String(error)}`
+              }
               }
             }
           }
@@ -676,7 +690,7 @@ function App() {
             <div className="space-row"><span>已选 {selectedItems.length} 项</span><b>{estimatedSize ? `约 ${formatBytes(estimatedSize)}` : '大小下载时确认'}</b></div>
           </section>
 
-          {visibleTask && <div className={`download-status ${visibleTask.status}`} aria-live="polite"><div><span>{visibleTask.status === 'failed' ? '下载失败' : visibleTask.status === 'completed' ? '下载完成' : visibleTask.message}</span><b>{Math.round(visibleTask.percent)}%</b></div><div><i style={{ width: `${visibleTask.percent}%` }} /></div>{visibleTask.status === 'failed' && <small title={visibleTask.message}>{visibleTask.message}</small>}</div>}
+          {visibleTask && <div className={`download-status ${visibleTask.status}`} aria-live="polite"><div><span>{visibleTask.status === 'failed' ? '下载失败' : visibleTask.status === 'completed' ? '下载完成' : visibleTask.message}</span><b>{Math.round(visibleTask.percent)}%</b></div><div><i style={{ width: `${visibleTask.percent}%` }} /></div>{(visibleTask.status === 'failed' || visibleTask.status === 'completed') && <small title={visibleTask.message}>{visibleTask.message}</small>}</div>}
 
           <button className="download-selected" type="button" onClick={() => void startSelectedDownloads()} disabled={downloadStarting || running || parsing || !selectedItems.length || !toolsReady} aria-live="polite">
             {downloadStarting || running ? <LoaderCircle className="spin" /> : <Download />}
