@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "影链工坊",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "identifier": "org.yinglian.desktop",
   "build": {
     "beforeDevCommand": "npm run dev:web",
@@ -30,12 +30,24 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "useLocalToolsDir": true,
     "resources": ["resources/bin/**/*"],
     "windows": {
       "nsis": {
         "installMode": "currentUser",
         "displayLanguageSelector": false
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI1NjJDOTAxMTg3NTJFRDYKUldUV0xuVVlBY2xpdFR4Y0dLTDdkTkpSUWVkOUkraEUzZEpvVWREdzAzSFpoYTZ0L1dId1pUY1oK",
+      "endpoints": [
+        "https://github.com/359073395/yt/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

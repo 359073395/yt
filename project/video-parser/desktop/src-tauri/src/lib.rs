@@ -2281,6 +2281,7 @@ fn delete_translation_model(app: tauri::AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let model_root = Arc::new(RwLock::new(model_dir(app.handle())?));
             let model_server_url = start_model_server(model_root.clone())?;

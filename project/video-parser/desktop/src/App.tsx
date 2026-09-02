@@ -1,6 +1,7 @@
 import React from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { check, type Update } from '@tauri-apps/plugin-updater'
 import {
   AlertCircle,
   CheckSquare2,
@@ -24,6 +25,7 @@ import {
   RefreshCw,
   Search,
   Settings2,
+  ShieldCheck,
   Square,
   Subtitles,
   Trash2,
@@ -73,6 +75,12 @@ interface ModelPromptState {
   resumeDownload: boolean
 }
 
+interface UpdatePromptState {
+  currentVersion: string
+  version: string
+  body: string
+}
+
 function formatBytes(value?: number | null) {
   if (!value) return '大小待确认'
   if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} GB`
@@ -118,7 +126,15 @@ function App() {
   const [translationBusy, setTranslationBusy] = React.useState(false)
   const [translationProgress, setTranslationProgress] = React.useState({ percent: 0, message: '' })
   const [translationCached, setTranslationCached] = React.useState(false)
+  const [updatePrompt, setUpdatePrompt] = React.useState<UpdatePromptState | null>(null)
+  const [updateOpen, setUpdateOpen] = React.useState(false)
+  const [updateChecking, setUpdateChecking] = React.useState(false)
+  const [updateInstalling, setUpdateInstalling] = React.useState(false)
+  const [updateProgress, setUpdateProgress] = React.useState({ percent: 0, downloaded: 0, total: 0 })
+  const [updateError, setUpdateError] = React.useState<string | null>(null)
   const parseToken = React.useRef(0)
+  const updateRef = React.useRef<Update | null>(null)
+  const updateCheckBusy = React.useRef(false)
 
   const refreshRuntime = React.useCallback(async () => {
     const info = await invoke<RuntimeInfo>('runtime_info')
@@ -149,6 +165,11 @@ function App() {
     }
   }, [refreshRuntime])
 
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => void checkForUpdates(true), 4000)
+    return () => window.clearTimeout(timer)
+  }, [])
+
   const urls = React.useMemo(() => extractSharedUrls(input), [input])
   const selectedItems = React.useMemo(() => pendingItems.filter((item) => item.selected), [pendingItems])
   const selectedModel = runtime?.models.find((model) => model.id === modelId)
@@ -157,6 +178,65 @@ function App() {
   const completedCount = tasks.filter((task) => task.status === 'completed').length
   const activeTask = tasks.find((task) => ['queued', 'scanning', 'downloading', 'transcribing'].includes(task.status))
   const estimatedSize = selectedItems.reduce((total, item) => total + (item.size_bytes || 0), 0)
+
+  async function checkForUpdates(silent = false) {
+    if (updateCheckBusy.current) return
+    if (updateRef.current && updatePrompt) {
+      setUpdateOpen(true)
+      return
+    }
+    updateCheckBusy.current = true
+    setUpdateChecking(true)
+    try {
+      const update = await check({ timeout: 15000 })
+      if (!update) {
+        if (!silent) setMessage(`当前已是最新版本 ${runtime?.version || ''}`.trim())
+        return
+      }
+      if (updateRef.current) await updateRef.current.close()
+      updateRef.current = update
+      setUpdatePrompt({
+        currentVersion: update.currentVersion,
+        version: update.version,
+        body: update.body?.trim() || '性能、稳定性与下载体验改进。',
+      })
+      setUpdateProgress({ percent: 0, downloaded: 0, total: 0 })
+      setUpdateError(null)
+      setUpdateOpen(true)
+    } catch (error) {
+      if (!silent) setMessage(`检查更新失败：${String(error)}`)
+    } finally {
+      updateCheckBusy.current = false
+      setUpdateChecking(false)
+    }
+  }
+
+  async function installAvailableUpdate() {
+    const update = updateRef.current
+    if (!update || updateInstalling) return
+    setUpdateInstalling(true)
+    setUpdateError(null)
+    setUpdateProgress({ percent: 0, downloaded: 0, total: 0 })
+    let downloaded = 0
+    let total = 0
+    try {
+      await update.downloadAndInstall((event) => {
+        if (event.event === 'Started') {
+          total = event.data.contentLength || 0
+          setUpdateProgress({ percent: 0, downloaded: 0, total })
+        } else if (event.event === 'Progress') {
+          downloaded += event.data.chunkLength
+          const percent = total ? Math.min(99, (downloaded / total) * 100) : 0
+          setUpdateProgress({ percent, downloaded, total })
+        } else {
+          setUpdateProgress({ percent: 100, downloaded: total || downloaded, total })
+        }
+      }, { restartAfterInstall: true })
+    } catch (error) {
+      setUpdateError(`升级失败，旧版本未被替换：${String(error)}`)
+      setUpdateInstalling(false)
+    }
+  }
 
   async function chooseDirectory() {
     const selected = await invoke<string | null>('choose_download_dir')
@@ -476,6 +556,7 @@ function App() {
           <button className="parse-button" type="submit" disabled={parsing || running || !toolsReady} aria-label="解析内容">{parsing ? <LoaderCircle className="spin" size={18} /> : <ChevronRight size={21} />}</button>
         </form>
         <div className="header-actions">
+          <button className={`update-button ${updatePrompt ? 'available' : ''}`} type="button" disabled={updateChecking} onClick={() => void checkForUpdates(false)} title="检查更新"><RefreshCw className={updateChecking ? 'spin' : ''} size={17} /><span>{updatePrompt ? `升级 ${updatePrompt.version}` : '更新'}</span>{updatePrompt && <i />}</button>
           <button type="button" onClick={() => setModelsOpen(true)}><Languages size={17} /><span>模型</span></button>
           <button type="button" onClick={() => setAccountOpen(true)} className="account-button"><UserRound size={18} />{runtime?.login_profile_available && <i />}</button>
           <button type="button" onClick={() => setModelsOpen(true)}><Settings2 size={18} /></button>
@@ -587,6 +668,21 @@ function App() {
             <button className="model-folder" type="button" onClick={chooseModelDirectory}><FolderOpen /><span>{runtime?.model_dir || '正在读取模型位置'}</span><em>更改位置</em></button>
             {(modelBusy || translationBusy) && <div className="model-confirm-progress"><div><span>{modelProgress?.message || translationProgress.message}</span><b>{Math.round(modelProgress?.percent || translationProgress.percent)}%</b></div><div><i style={{ width: `${modelProgress?.percent || translationProgress.percent}%` }} /></div></div>}
             <div className="modal-actions"><button type="button" onClick={skipModelSetup} disabled={modelBusy || translationBusy}>暂不使用 AI</button><button className="confirm" type="button" onClick={confirmModelSetup} disabled={modelBusy || translationBusy}>{modelBusy || translationBusy ? <LoaderCircle className="spin" /> : <Download />}下载并继续</button></div>
+          </section>
+        </div>
+      )}
+
+      {updateOpen && updatePrompt && (
+        <div className="modal-backdrop" onMouseDown={() => !updateInstalling && setUpdateOpen(false)}>
+          <section className="modal update-modal" onMouseDown={(event) => event.stopPropagation()}>
+            {!updateInstalling && <button className="modal-close" type="button" onClick={() => setUpdateOpen(false)}><X /></button>}
+            <div className="update-mark"><ShieldCheck /></div>
+            <h2>发现新版本 {updatePrompt.version}</h2>
+            <p>当前版本 {updatePrompt.currentVersion}。更新包会先完成官方签名校验，再自动安装并重启。</p>
+            <div className="update-notes"><strong>本次更新</strong><p>{updatePrompt.body}</p></div>
+            {updateInstalling && <div className="update-progress"><div><span>{updateProgress.percent >= 100 ? '正在安装并准备重启' : '正在安全下载更新'}</span><b>{updateProgress.total ? `${Math.round(updateProgress.percent)}%` : '请稍候'}</b></div><div><i style={{ width: `${updateProgress.percent}%` }} /></div>{updateProgress.total > 0 && <small>{formatBytes(updateProgress.downloaded)} / {formatBytes(updateProgress.total)}</small>}</div>}
+            {updateError && <div className="update-error"><AlertCircle />{updateError}</div>}
+            <div className="modal-actions"><button type="button" onClick={() => setUpdateOpen(false)} disabled={updateInstalling}>稍后更新</button><button className="confirm" type="button" onClick={installAvailableUpdate} disabled={updateInstalling}>{updateInstalling ? <LoaderCircle className="spin" /> : <Download />} {updateInstalling ? '升级中' : updateError ? '重新升级' : '立即升级'}</button></div>
           </section>
         </div>
       )}
