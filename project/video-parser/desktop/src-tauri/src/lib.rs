@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
@@ -16,7 +16,7 @@ use std::{
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tiny_http::{Header, Response, Server, StatusCode};
-use tungstenite::{connect, Message};
+use tungstenite::{connect, stream::MaybeTlsStream, Message};
 use url::Url;
 
 const MODEL_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
@@ -35,6 +35,28 @@ const TRANSLATION_MODEL_FILES: [(&str, u64); 9] = [
     ("onnx/decoder_model_merged_quantized.onnx", 344_128_178),
 ];
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36";
+
+fn runtime_log(app: &tauri::AppHandle, event: impl AsRef<str>) {
+    let Ok(directory) = app.path().app_log_dir() else {
+        return;
+    };
+    if fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(directory.join("yinglian.log"))
+    else {
+        return;
+    };
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let event = event.as_ref().replace(['\r', '\n'], " ");
+    let _ = writeln!(file, "{timestamp}\t{event}");
+}
 
 #[derive(Clone)]
 struct RuntimeState {
@@ -1317,10 +1339,16 @@ fn tiktok_media_with_edge(
     let mut command = Command::new(edge);
     hidden(&mut command)
         .arg("--headless=new")
+        .arg("--edge-skip-compat-layer-relaunch")
         .arg("--disable-gpu")
         .arg("--disable-extensions")
+        .arg("--disable-background-networking")
+        .arg("--disable-component-update")
+        .arg("--disable-sync")
+        .arg("--disable-default-apps")
         .arg("--disable-blink-features=AutomationControlled")
         .arg("--no-first-run")
+        .arg("--no-default-browser-check")
         .arg("--remote-debugging-port=0")
         .arg("--remote-allow-origins=*")
         .arg("--window-size=720,960")
@@ -1333,6 +1361,7 @@ fn tiktok_media_with_edge(
         .spawn()
         .map_err(|error| format!("TikTok 官方播放器启动失败：{error}"))?;
 
+    let mut browser_socket = None;
     let result = (|| {
         let mut port = None;
         for _ in 0..60 {
@@ -1389,14 +1418,21 @@ fn tiktok_media_with_edge(
         let websocket = websocket.ok_or("无法连接 TikTok 官方播放器")?;
         let (mut socket, _) = connect(websocket.as_str())
             .map_err(|error| format!("TikTok 播放器读取通道失败：{error}"))?;
+        if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(4)))
+                .map_err(|error| format!("TikTok 播放器读取超时设置失败：{error}"))?;
+            stream
+                .set_write_timeout(Some(Duration::from_secs(4)))
+                .map_err(|error| format!("TikTok 播放器写入超时设置失败：{error}"))?;
+        }
+        browser_socket = Some(socket);
+        let socket = browser_socket
+            .as_mut()
+            .ok_or("TikTok 播放器读取通道不可用")?;
         let mut playback_session = false;
         for id in 1..=60 {
-            let payload = cdp_call(
-                &mut socket,
-                id,
-                "Network.getAllCookies",
-                serde_json::json!({}),
-            )?;
+            let payload = cdp_call(socket, id, "Network.getAllCookies", serde_json::json!({}))?;
             playback_session = payload
                 .pointer("/result/cookies")
                 .and_then(Value::as_array)
@@ -1414,7 +1450,7 @@ fn tiktok_media_with_edge(
             return Err("TikTok 官方页面没有建立播放会话".into());
         }
         cdp_call(
-            &mut socket,
+            socket,
             70,
             "Page.navigate",
             serde_json::json!({ "url": embed_url }),
@@ -1423,7 +1459,7 @@ fn tiktok_media_with_edge(
         let mut media_url = None;
         for id in 100..=160 {
             let payload = cdp_call(
-                &mut socket,
+                socket,
                 id,
                 "Runtime.evaluate",
                 serde_json::json!({
@@ -1446,12 +1482,7 @@ fn tiktok_media_with_edge(
             thread::sleep(Duration::from_millis(250));
         }
         let media_url = media_url.ok_or("TikTok 官方播放器没有生成视频地址")?;
-        let payload = cdp_call(
-            &mut socket,
-            200,
-            "Network.getAllCookies",
-            serde_json::json!({}),
-        )?;
+        let payload = cdp_call(socket, 200, "Network.getAllCookies", serde_json::json!({}))?;
         let mut cookie_file = String::from("# Netscape HTTP Cookie File\n");
         let cookie_lines = payload
             .pointer("/result/cookies")
@@ -1482,13 +1513,16 @@ fn tiktok_media_with_edge(
             return Err("TikTok 官方播放器没有建立匿名会话".into());
         }
         cookie_file.push_str(&cookie_lines.concat());
+        Ok((media_url, cookie_file))
+    })();
+    if let Some(socket) = browser_socket.as_mut() {
         let _ = socket.send(Message::Text(
-            serde_json::json!({"id": 99, "method": "Browser.close"})
+            serde_json::json!({"id": 9999, "method": "Browser.close"})
                 .to_string()
                 .into(),
         ));
-        Ok((media_url, cookie_file))
-    })();
+    }
+    drop(browser_socket);
     for _ in 0..20 {
         if child.try_wait().ok().flatten().is_some() {
             break;
@@ -1497,12 +1531,28 @@ fn tiktok_media_with_edge(
     }
     let _ = child.kill();
     let _ = child.wait();
-    for _ in 0..20 {
+    let mut removed = false;
+    for _ in 0..40 {
         match fs::remove_dir_all(&profile) {
-            Ok(()) => break,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Ok(()) => {
+                removed = true;
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                removed = true;
+                break;
+            }
             Err(_) => thread::sleep(Duration::from_millis(100)),
         }
+    }
+    if !removed {
+        runtime_log(
+            app,
+            format!(
+                "tiktok_session_cleanup_failed profile={}",
+                profile.display()
+            ),
+        );
     }
     result
 }
@@ -2407,9 +2457,37 @@ async fn download_item(
     request: DownloadRequest,
 ) -> Result<DownloadResult, String> {
     let runtime = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || execute_download(app, runtime, request))
-        .await
-        .map_err(|error| error.to_string())?
+    let log_app = app.clone();
+    let job_id = request.job_id.clone();
+    let platform = if is_tiktok_url(&request.url) {
+        "tiktok"
+    } else if is_douyin_url(&request.url) {
+        "douyin"
+    } else {
+        "other"
+    };
+    runtime_log(
+        &log_app,
+        format!("download_start job={job_id} platform={platform}"),
+    );
+    let result =
+        tauri::async_runtime::spawn_blocking(move || execute_download(app, runtime, request))
+            .await
+            .map_err(|error| error.to_string())?;
+    match &result {
+        Ok(download) => runtime_log(
+            &log_app,
+            format!(
+                "download_complete job={job_id} platform={} output={}",
+                download.platform, download.output_dir
+            ),
+        ),
+        Err(error) => runtime_log(
+            &log_app,
+            format!("download_failed job={job_id} platform={platform} error={error}"),
+        ),
+    }
+    result
 }
 
 #[tauri::command]
