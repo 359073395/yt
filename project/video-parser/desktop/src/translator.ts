@@ -1,3 +1,5 @@
+import { invoke } from '@tauri-apps/api/core'
+
 type ProgressHandler = (percent: number, message: string) => void
 type Pending = { resolve: (value: string[]) => void; reject: (reason: Error) => void; progress?: ProgressHandler }
 
@@ -48,6 +50,21 @@ export function preloadTranslationModel(modelBaseUrl: string, progress?: Progres
 
 export function translateToChinese(texts: string[], source: string, modelBaseUrl: string, progress?: ProgressHandler) {
   return requestWorker('translate', texts, source, modelBaseUrl, progress)
+}
+
+export async function translateWithAi(texts: string[], source: string, progress?: ProgressHandler) {
+  const translations: string[] = []
+  const batchSize = 12
+  for (let index = 0; index < texts.length; index += batchSize) {
+    const chunk = texts.slice(index, index + batchSize)
+    const translated = await invoke<string[]>('translate_with_ai', {
+      request: { texts: chunk, source_language: source },
+    })
+    if (translated.length !== chunk.length) throw new Error('AI 接口返回的翻译条数不一致')
+    translations.push(...translated)
+    progress?.(Math.round((translations.length / texts.length) * 100), 'AI 接口正在翻译为中文')
+  }
+  return translations
 }
 
 export function clearTranslationModel() {

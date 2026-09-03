@@ -7,17 +7,20 @@ import {
   Check,
   CheckSquare2,
   CircleStop,
+  Cloud,
   Download,
   FileText,
   FolderOpen,
   Image,
+  KeyRound,
   Languages,
   Link2,
   ListChecks,
   LoaderCircle,
   PackageOpen,
   RefreshCw,
-  Settings2,
+  Save,
+  Server,
   ShieldCheck,
   Square,
   Subtitles,
@@ -37,12 +40,14 @@ import {
   type ProfileItem,
   type ProgressEvent,
   type RuntimeInfo,
+  type AiTranslationSettings,
   type TranscriptMode,
+  type TranslationProvider,
   type TranslationInput,
   extractSharedUrls,
   platformName,
 } from './core'
-import { clearTranslationModel, preloadTranslationModel, toTranslationLanguage, translateToChinese } from './translator'
+import { clearTranslationModel, preloadTranslationModel, toTranslationLanguage, translateToChinese, translateWithAi } from './translator'
 
 interface PendingItem extends MediaPreview {
   id: string
@@ -61,6 +66,12 @@ interface UpdatePromptState {
   currentVersion: string
   version: string
   body: string
+}
+
+interface AiSettingsDraft {
+  baseUrl: string
+  model: string
+  apiKey: string
 }
 
 function formatBytes(value?: number | null) {
@@ -121,6 +132,15 @@ function App() {
   const [modelProgress, setModelProgress] = React.useState<ModelProgress | null>(null)
   const [modelBusy, setModelBusy] = React.useState(false)
   const [translationTarget, setTranslationTarget] = React.useState<'none' | 'zh'>(() => window.localStorage.getItem('yinglian-translation-target') === 'zh' ? 'zh' : 'none')
+  const [translationProvider, setTranslationProvider] = React.useState<TranslationProvider>(() => window.localStorage.getItem('yinglian-translation-provider') === 'api' ? 'api' : 'local')
+  const [settingsProvider, setSettingsProvider] = React.useState<TranslationProvider>('local')
+  const [aiSettings, setAiSettings] = React.useState<AiTranslationSettings>({ base_url: '', model: '', api_key_saved: false })
+  const [aiDraft, setAiDraft] = React.useState<AiSettingsDraft>({ baseUrl: '', model: '', apiKey: '' })
+  const [aiSettingsBusy, setAiSettingsBusy] = React.useState(false)
+  const [aiSettingsStatus, setAiSettingsStatus] = React.useState<string | null>(null)
+  const [availableAiModels, setAvailableAiModels] = React.useState<string[]>([])
+  const [aiModelManual, setAiModelManual] = React.useState(true)
+  const [aiModelsBusy, setAiModelsBusy] = React.useState(false)
   const [translationBusy, setTranslationBusy] = React.useState(false)
   const [translationProgress, setTranslationProgress] = React.useState({ percent: 0, message: '' })
   const [translationCached, setTranslationCached] = React.useState(false)
@@ -151,8 +171,15 @@ function App() {
     setTranslationCached(info.translation_model_installed)
   }, [])
 
+  const refreshAiSettings = React.useCallback(async () => {
+    const settings = await invoke<AiTranslationSettings>('get_ai_settings')
+    setAiSettings(settings)
+    setAiDraft((current) => ({ ...current, baseUrl: settings.base_url, model: settings.model }))
+  }, [])
+
   React.useEffect(() => {
     refreshRuntime().catch((error) => setMessage(String(error)))
+    refreshAiSettings().catch((error) => setMessage(String(error)))
     const cleanups = [
       listen<ProgressEvent>('job-progress', ({ payload }) => {
         setTasks((current) => current.map((task) => task.id === payload.job_id
@@ -170,7 +197,7 @@ function App() {
     return () => {
       void Promise.all(cleanups).then((items) => items.forEach((cleanup) => cleanup()))
     }
-  }, [refreshRuntime])
+  }, [refreshAiSettings, refreshRuntime])
 
   React.useEffect(() => {
     const timer = window.setTimeout(() => void checkForUpdates(true), 4000)
@@ -187,6 +214,7 @@ function App() {
   const activeTask = tasks.find((task) => ['queued', 'scanning', 'downloading', 'transcribing'].includes(task.status))
   const estimatedSize = selectedItems.reduce((total, item) => total + (item.size_bytes || 0), 0)
   const selectedOutputCount = [includeVideo, includeThumbnail, includeDescription, includeSubtitle].filter(Boolean).length
+  const aiConfigured = Boolean(aiSettings.base_url && aiSettings.model)
 
   async function checkForUpdates(silent = false) {
     if (updateCheckBusy.current) return
@@ -252,6 +280,101 @@ function App() {
     if (selected) {
       setDownloadDir(selected)
       window.localStorage.setItem('yinglian-download-dir', selected)
+    }
+  }
+
+  function openModels() {
+    setAiDraft({ baseUrl: aiSettings.base_url, model: aiSettings.model, apiKey: '' })
+    setSettingsProvider(translationProvider)
+    setAiSettingsStatus(null)
+    setAvailableAiModels([])
+    setModelsOpen(true)
+  }
+
+  function chooseTranslationProvider(next: TranslationProvider) {
+    setSettingsProvider(next)
+    setAiSettingsStatus(null)
+  }
+
+  async function saveAiTranslationSettings(testConnection = false) {
+    if (settingsProvider !== 'api') {
+      setTranslationProvider('local')
+      window.localStorage.setItem('yinglian-translation-provider', 'local')
+      setAiSettingsStatus('已切换为本地翻译模型。')
+      setMessage('中文翻译将使用本地模型。')
+      return
+    }
+    setAiSettingsBusy(true)
+    setAiSettingsStatus(testConnection ? '正在保存并测试连接…' : '正在保存设置…')
+    try {
+      const saved = await invoke<AiTranslationSettings>('save_ai_settings', {
+        request: {
+          base_url: aiDraft.baseUrl,
+          model: aiDraft.model,
+          api_key: aiDraft.apiKey,
+          clear_api_key: false,
+        },
+      })
+      setAiSettings(saved)
+      setAiDraft((current) => ({ ...current, apiKey: '' }))
+      if (testConnection) {
+        const result = await invoke<string>('test_ai_translation')
+        setAiSettingsStatus(result)
+      } else {
+        setAiSettingsStatus('AI 接口设置已安全保存。')
+        setMessage('设置已保存，中文翻译将使用 AI 接口。')
+      }
+      setTranslationProvider('api')
+      window.localStorage.setItem('yinglian-translation-provider', 'api')
+    } catch (error) {
+      setAiSettingsStatus(String(error))
+    } finally {
+      setAiSettingsBusy(false)
+    }
+  }
+
+  async function clearSavedAiKey() {
+    setAiSettingsBusy(true)
+    setAiSettingsStatus('正在清除已保存的 API Key…')
+    try {
+      const saved = await invoke<AiTranslationSettings>('save_ai_settings', {
+        request: {
+          base_url: aiDraft.baseUrl,
+          model: aiDraft.model,
+          api_key: '',
+          clear_api_key: true,
+        },
+      })
+      setAiSettings(saved)
+      setAiSettingsStatus('已清除 API Key。')
+    } catch (error) {
+      setAiSettingsStatus(String(error))
+    } finally {
+      setAiSettingsBusy(false)
+    }
+  }
+
+  async function loadAiModels() {
+    if (!aiDraft.baseUrl.trim()) {
+      setAiSettingsStatus('请先填写 AI 接口 URL。')
+      return
+    }
+    setAiModelsBusy(true)
+    setAiSettingsStatus('正在从上游读取模型列表…')
+    try {
+      const models = await invoke<string[]>('list_ai_models', {
+        request: { base_url: aiDraft.baseUrl, api_key: aiDraft.apiKey },
+      })
+      setAvailableAiModels(models)
+      setAiDraft((current) => ({ ...current, model: models.includes(current.model) ? current.model : models[0] }))
+      setAiModelManual(false)
+      setAiSettingsStatus(`已获取 ${models.length} 个上游模型，可以直接选择。`)
+    } catch (error) {
+      setAvailableAiModels([])
+      setAiModelManual(true)
+      setAiSettingsStatus(`${String(error)}；仍可手动填写模型名称。`)
+    } finally {
+      setAiModelsBusy(false)
     }
   }
 
@@ -413,15 +536,23 @@ function App() {
         setTranscriptMode('auto')
         setIncludeSubtitle(true)
       }
-      if (!translationCached || !installedModel) {
-        setModelPrompt({ speech: !installedModel, translation: !translationCached, resumeDownload: false })
+      if (translationProvider === 'api' && !aiConfigured) {
+        openModels()
+        setAiSettingsStatus('请先填写 AI 接口 URL 和模型名称。')
+      } else if ((translationProvider === 'local' && !translationCached) || !installedModel) {
+        setModelPrompt({ speech: !installedModel, translation: translationProvider === 'local' && !translationCached, resumeDownload: false })
       }
     }
   }
 
   function requiredModels(resumeDownload: boolean) {
     const speech = (transcriptMode === 'auto' || transcriptMode === 'ai') && !installedModel
-    const translation = translationTarget === 'zh' && !translationCached
+    if (translationTarget === 'zh' && translationProvider === 'api' && !aiConfigured) {
+      openModels()
+      setAiSettingsStatus('请先完成 AI 接口设置，再开始翻译。')
+      return true
+    }
+    const translation = translationTarget === 'zh' && translationProvider === 'local' && !translationCached
     if (speech || translation) {
       setModelPrompt({ speech, translation, resumeDownload })
       return true
@@ -470,7 +601,9 @@ function App() {
     setMessage('正在创建本地下载任务…')
     try {
       if (requiredModels(true)) {
-        setMessage('请先确认所需模型，确认后会自动继续下载。')
+        setMessage(translationProvider === 'api' && !aiConfigured
+          ? '请先完成 AI 接口设置，保存后即可继续。'
+          : '请先确认所需模型，确认后会自动继续下载。')
         return
       }
       await executeSelectedDownloads()
@@ -500,7 +633,7 @@ function App() {
     setTasks((current) => [...created, ...current.filter((task) => !chosenUrls.has(task.url))].slice(0, 200))
     setRunning(true)
     let translationReady: Promise<void> | null = null
-    if (translationTarget === 'zh') {
+    if (translationTarget === 'zh' && translationProvider === 'local') {
       translationReady = modelsPrepared ? Promise.resolve() : prepareTranslation()
       void translationReady.catch(() => undefined)
     }
@@ -537,18 +670,17 @@ function App() {
                 ? { ...item, title: result.title, platform: result.platform || item.platform, status: 'transcribing', percent: 0, outputDir: result.output_dir, sourceLanguage: result.source_language, message: '正在翻译为中文' }
                 : item))
               try {
-                await translationReady
+                if (translationProvider === 'local') await translationReady
                 const translationInput = await invoke<TranslationInput>('translation_input', {
                   request: { output_dir: result.output_dir, source_language: result.source_language },
                 })
-                const translations = await translateToChinese(
-                  translationInput.segments.map((segment) => segment.text),
-                  sourceLanguage,
-                  runtime!.model_server_url,
-                  (percent, detail) => setTasks((current) => current.map((item) => item.id === task.id
-                    ? { ...item, status: 'transcribing', percent, message: detail }
-                    : item)),
-                )
+                const translationProgressHandler = (percent: number, detail: string) => setTasks((current) => current.map((item) => item.id === task.id
+                  ? { ...item, status: 'transcribing', percent, message: detail }
+                  : item))
+                const sourceTexts = translationInput.segments.map((segment) => segment.text)
+                const translations = translationProvider === 'api'
+                  ? await translateWithAi(sourceTexts, sourceLanguage, translationProgressHandler)
+                  : await translateToChinese(sourceTexts, sourceLanguage, runtime!.model_server_url, translationProgressHandler)
                 await invoke('save_translation', {
                   request: { output_dir: result.output_dir, segments: translationInput.segments, translations },
                 })
@@ -625,8 +757,7 @@ function App() {
         <div className="brand"><span><Link2 size={19} /></span><strong>影链工坊</strong></div>
         <div className="header-actions">
           <button className={`update-button ${updatePrompt ? 'available' : ''}`} type="button" disabled={updateChecking} onClick={() => void checkForUpdates(false)} title="检查更新"><RefreshCw className={updateChecking ? 'spin' : ''} size={17} /><span>{updatePrompt ? `升级 ${updatePrompt.version}` : '更新'}</span>{updatePrompt && <i />}</button>
-          <button type="button" onClick={() => setModelsOpen(true)}><Languages size={17} /><span>模型</span></button>
-          <button type="button" onClick={chooseDirectory}><Settings2 size={17} /><span>设置</span></button>
+          <button type="button" onClick={openModels}><Languages size={17} /><span>模型</span></button>
         </div>
       </header>
 
@@ -719,12 +850,12 @@ function App() {
           </section>
 
           <section className="setting-section ai-section">
-            <div className="section-row"><div><h2>识别模型</h2><p>已安装模型可以随时切换</p></div><button className="manage-models" type="button" onClick={() => setModelsOpen(true)}>管理模型</button></div>
+            <div className="section-row"><div><h2>识别模型</h2><p>已安装模型可以随时切换</p></div><button className="manage-models" type="button" onClick={openModels}>管理模型</button></div>
             <div className="model-cards">{runtime?.models.map((model) => <button type="button" className={model.id === modelId ? 'selected' : ''} key={model.id} onClick={() => chooseModelFromPanel(model.id)}><i>{model.id === modelId && <Check />}</i><strong>{model.name.replace(' · ', ' ')}</strong><span className={model.installed ? 'installed' : ''}>{model.installed ? '已安装' : '未下载'}</span></button>)}</div>
             <div className="ai-options-grid">
               <label className="select-field"><span>提取方式</span><select value={transcriptMode} onChange={(event) => requestTranscriptMode(event.target.value as TranscriptMode)}><option value="none">不提取语音文案</option><option value="auto">字幕优先，AI 兜底</option><option value="ai">始终 AI 识别语音</option><option value="native">仅平台字幕</option></select></label>
               <label className="select-field"><span>来源语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="auto">自动检测</option><option value="zh">中文</option><option value="en">英语</option><option value="id">印尼语</option><option value="ja">日语</option><option value="ko">韩语</option><option value="es">西班牙语</option></select></label>
-              <label className="select-field full-field"><span>翻译为</span><select value={translationTarget} onChange={(event) => requestTranslation(event.target.value as 'none' | 'zh')}><option value="none">不翻译</option><option value="zh">中文（生成译文 + 双语字幕）</option></select></label>
+              <label className="select-field full-field"><span>翻译为 · {translationProvider === 'api' ? 'AI 接口' : '本地模型'}</span><select value={translationTarget} onChange={(event) => requestTranslation(event.target.value as 'none' | 'zh')}><option value="none">不翻译</option><option value="zh">中文（生成译文 + 双语字幕）</option></select><small>翻译方式可在顶部“模型”中切换</small></label>
             </div>
           </section>
 
@@ -746,7 +877,7 @@ function App() {
               {modelPrompt.speech && <div><span><PackageOpen /><strong>{selectedModel?.name || '语音识别模型'}</strong></span><b>{formatBytes(selectedModel?.size_bytes)}</b><small>用于英语、印尼语等多语言语音文案提取</small></div>}
               {modelPrompt.translation && <div><span><Languages /><strong>多语言 → 简体中文</strong></span><b>{formatBytes(runtime?.translation_model_size_bytes || 646109073)}</b><small>用于生成中文翻译和双语字幕</small></div>}
             </div>
-            <button className="model-folder" type="button" onClick={chooseModelDirectory}><FolderOpen /><span>{runtime?.model_dir || '正在读取模型位置'}</span><em>更改位置</em></button>
+            <button className="model-folder path-readable" type="button" onClick={chooseModelDirectory}><FolderOpen /><span title={runtime?.model_dir}>{runtime?.model_dir || '正在读取模型位置'}</span><em>更改位置</em></button>
             {(modelBusy || translationBusy) && <div className="model-confirm-progress"><div><span>{modelProgress?.message || translationProgress.message}</span><b>{Math.round(modelProgress?.percent || translationProgress.percent)}%</b></div><div><i style={{ width: `${modelProgress?.percent || translationProgress.percent}%` }} /></div></div>}
             <div className="modal-actions"><button type="button" onClick={skipModelSetup} disabled={modelBusy || translationBusy}>暂不使用 AI</button><button className="confirm" type="button" onClick={confirmModelSetup} disabled={modelBusy || translationBusy}>{modelBusy || translationBusy ? <LoaderCircle className="spin" /> : <Download />}下载并继续</button></div>
           </section>
@@ -769,15 +900,33 @@ function App() {
       )}
 
       {modelsOpen && (
-        <div className="modal-backdrop" onMouseDown={() => !modelBusy && !translationBusy && setModelsOpen(false)}>
-          <section className="modal model-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" onClick={() => !modelBusy && !translationBusy && setModelsOpen(false)}><X /></button><Languages className="modal-mark" /><h2>本地模型</h2><p>语音识别模型可自由切换；中文翻译模型是单独能力，不计入识别模型数量。</p>
-            <button className="model-folder" type="button" disabled={modelBusy || translationBusy} onClick={chooseModelDirectory}><FolderOpen /><span>{runtime?.model_dir || '正在读取模型目录'}</span><em>选择位置</em></button>
+        <div className="modal-backdrop" onMouseDown={() => !modelBusy && !translationBusy && !aiSettingsBusy && !aiModelsBusy && setModelsOpen(false)}>
+          <section className="modal model-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" disabled={aiSettingsBusy || aiModelsBusy} onClick={() => !modelBusy && !translationBusy && !aiSettingsBusy && !aiModelsBusy && setModelsOpen(false)}><X /></button><Languages className="modal-mark" /><h2>模型</h2><p>管理语音识别模型，并选择本地模型或兼容 OpenAI 格式的 AI 接口完成中文翻译。</p>
+            <button className="model-folder path-readable" type="button" disabled={modelBusy || translationBusy} onClick={chooseModelDirectory}><FolderOpen /><span title={runtime?.model_dir}>{runtime?.model_dir || '正在读取模型目录'}</span><em>选择位置</em></button>
             {modelProgress && <div className="model-confirm-progress"><div><span>{modelProgress.message}</span><b>{Math.round(modelProgress.percent)}%</b></div><div><i style={{ width: `${modelProgress.percent}%` }} /></div><small>{formatBytes(modelProgress.downloaded)} / {formatBytes(modelProgress.total)}</small><button type="button" onClick={() => invoke('cancel_model_download')}>取消下载</button></div>}
             {translationBusy && <div className="model-confirm-progress"><div><span>{translationProgress.message || '正在准备中文翻译模型'}</span><b>{Math.round(translationProgress.percent)}%</b></div><div><i style={{ width: `${translationProgress.percent}%` }} /></div></div>}
-            <h3 className="model-group-title">语音识别模型</h3>
-            <div className="model-list">{runtime?.models.map((model) => <article className={model.id === modelId && model.installed ? 'selected' : ''} key={model.id}><div><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}{model.recommended ? ' · 推荐' : ''}</span></div><div className="model-actions">{model.installed && <button type="button" className={model.id === modelId ? 'current' : 'use'} disabled={modelBusy || model.id === modelId} onClick={() => selectModel(model.id)}>{model.id === modelId ? <Check /> : null}{model.id === modelId ? '使用中' : '选用'}</button>}{model.installed ? <button type="button" className="danger icon-only" aria-label={`删除 ${model.name}`} disabled={modelBusy} onClick={() => removeModel(model.id)}><Trash2 /></button> : <button type="button" disabled={modelBusy} onClick={() => installModel(model.id)}><Download />下载</button>}</div></article>)}</div>
-            <h3 className="model-group-title translation-title">中文翻译模型</h3>
-            <div className="model-list translation-model"><article><div><strong>多语言 → 简体中文</strong><span>{formatBytes(runtime?.translation_model_size_bytes || 646109073)} · 生成中文和双语字幕</span></div>{translationCached ? <div className="model-actions"><span className="installed-badge"><Check />已安装</span><button type="button" className="danger icon-only" aria-label="删除中文翻译模型" disabled={translationBusy} onClick={removeTranslationModel}><Trash2 /></button></div> : <button type="button" disabled={translationBusy} onClick={prepareTranslation}><Download />下载</button>}</article></div>
+            <h3 className="model-group-title">语音识别模型 · 来源 Whisper 官方上游</h3>
+            <div className="model-list speech-model-list">{runtime?.models.map((model) => <article className={model.id === modelId && model.installed ? 'selected' : ''} key={model.id}><div><strong>{model.name}</strong><span>{formatBytes(model.size_bytes)}{model.recommended ? ' · 推荐' : ''}</span></div><div className="model-actions">{model.installed && <button type="button" className={model.id === modelId ? 'current' : 'use'} disabled={modelBusy || model.id === modelId} onClick={() => selectModel(model.id)}>{model.id === modelId ? <Check /> : null}{model.id === modelId ? '使用中' : '选用'}</button>}{model.installed ? <button type="button" className="danger icon-only" aria-label={`删除 ${model.name}`} disabled={modelBusy} onClick={() => removeModel(model.id)}><Trash2 /></button> : <button type="button" disabled={modelBusy} onClick={() => installModel(model.id)}><Download />下载</button>}</div></article>)}</div>
+            <div className="translation-provider-settings">
+              <h3 className="model-group-title translation-title">中文翻译方式</h3>
+              <div className="provider-switch">
+                <button className={settingsProvider === 'local' ? 'selected' : ''} type="button" onClick={() => chooseTranslationProvider('local')}><Server /><span><strong>本地模型</strong><small>离线运行，不需要 Key</small></span></button>
+                <button className={settingsProvider === 'api' ? 'selected' : ''} type="button" onClick={() => chooseTranslationProvider('api')}><Cloud /><span><strong>AI 接口</strong><small>无需下载翻译模型</small></span></button>
+              </div>
+
+              {settingsProvider === 'local' ? <div className="model-list translation-model"><article><div><strong>多语言 → 简体中文</strong><span>{formatBytes(runtime?.translation_model_size_bytes || 646109073)} · 生成中文和双语字幕</span></div>{translationCached ? <div className="model-actions"><span className="installed-badge"><Check />已安装</span><button type="button" className="danger icon-only" aria-label="删除中文翻译模型" disabled={translationBusy} onClick={removeTranslationModel}><Trash2 /></button></div> : <button type="button" disabled={translationBusy} onClick={prepareTranslation}><Download />下载</button>}</article></div> : <div className="api-settings-form">
+                <label><span>接口 URL</span><input type="url" value={aiDraft.baseUrl} onChange={(event) => { setAiDraft((current) => ({ ...current, baseUrl: event.target.value })); setAvailableAiModels([]); setAiModelManual(true) }} placeholder="https://api.openai.com/v1" /></label>
+                <label className="api-model-field"><span>AI 模型</span><div><select aria-label="选择上游模型" value={aiModelManual ? '__manual__' : aiDraft.model} onChange={(event) => { if (event.target.value === '__manual__') { setAiModelManual(true) } else { setAiModelManual(false); setAiDraft((current) => ({ ...current, model: event.target.value })) } }}>{availableAiModels.map((model) => <option value={model} key={model}>{model}</option>)}<option value="__manual__">{availableAiModels.length ? '手动填写其他模型…' : '手动填写模型名称'}</option></select><button type="button" disabled={aiModelsBusy} onClick={() => void loadAiModels()}>{aiModelsBusy ? <LoaderCircle className="spin" /> : <RefreshCw />}获取模型</button></div>{aiModelManual && <input className="manual-model-input" type="text" value={aiDraft.model} onChange={(event) => setAiDraft((current) => ({ ...current, model: event.target.value }))} placeholder="例如 gpt-4o-mini" />}</label>
+                <label className="api-key-field"><span>API Key <small>本地接口可留空</small></span><div><KeyRound /><input type="password" autoComplete="off" value={aiDraft.apiKey} onChange={(event) => { setAiDraft((current) => ({ ...current, apiKey: event.target.value })); setAvailableAiModels([]); setAiModelManual(true) }} placeholder={aiSettings.api_key_saved ? '已安全保存，留空不会替换' : 'sk-…'} /></div></label>
+                {aiSettings.api_key_saved && <div className="saved-key-row"><ShieldCheck /><span>API Key 已使用 Windows 加密保存在本机</span><button type="button" disabled={aiSettingsBusy} onClick={() => void clearSavedAiKey()}>清除</button></div>}
+                <p className="api-hint">支持服务根地址、以 /v1 结尾的地址，或完整 /chat/completions 地址。</p>
+              </div>}
+              {aiSettingsStatus && <div className="settings-status"><AlertCircle />{aiSettingsStatus}</div>}
+              <div className="model-provider-actions">
+                {settingsProvider === 'api' && <button type="button" disabled={aiSettingsBusy || aiModelsBusy} onClick={() => void saveAiTranslationSettings(true)}>{aiSettingsBusy ? <LoaderCircle className="spin" /> : <RefreshCw />}测试连接</button>}
+                <button className="confirm" type="button" disabled={aiSettingsBusy || aiModelsBusy} onClick={() => void saveAiTranslationSettings(false)}>{aiSettingsBusy ? <LoaderCircle className="spin" /> : <Save />}保存翻译方式</button>
+              </div>
+            </div>
           </section>
         </div>
       )}

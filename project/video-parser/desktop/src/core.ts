@@ -109,6 +109,14 @@ export interface ModelProgress {
   message: string
 }
 
+export type TranslationProvider = 'local' | 'api'
+
+export interface AiTranslationSettings {
+  base_url: string
+  model: string
+  api_key_saved: boolean
+}
+
 const URL_PATTERN = /https?:\/\/[^\s<>"'，。！？、；：）】}]+/giu
 
 export function extractSharedUrls(value: string): string[] {

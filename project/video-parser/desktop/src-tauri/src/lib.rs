@@ -18,6 +18,13 @@ use tauri_plugin_dialog::DialogExt;
 use tiny_http::{Header, Response, Server, StatusCode};
 use tungstenite::{connect, stream::MaybeTlsStream, Message};
 use url::Url;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::{
+    Foundation::LocalFree,
+    Security::Cryptography::{
+        CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+    },
+};
 
 const MODEL_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 const TRANSLATION_BASE_URL: &str =
@@ -174,6 +181,40 @@ struct SaveTranslationRequest {
     translations: Vec<String>,
 }
 
+#[derive(Default, Serialize, Deserialize)]
+struct AiSettingsFile {
+    base_url: String,
+    model: String,
+    encrypted_api_key: String,
+}
+
+#[derive(Serialize)]
+struct AiSettings {
+    base_url: String,
+    model: String,
+    api_key_saved: bool,
+}
+
+#[derive(Deserialize)]
+struct SaveAiSettingsRequest {
+    base_url: String,
+    model: String,
+    api_key: String,
+    clear_api_key: bool,
+}
+
+#[derive(Deserialize)]
+struct AiTranslateRequest {
+    texts: Vec<String>,
+    source_language: String,
+}
+
+#[derive(Deserialize)]
+struct ListAiModelsRequest {
+    base_url: String,
+    api_key: String,
+}
+
 #[derive(Clone, Serialize)]
 struct ProgressEvent {
     job_id: String,
@@ -253,6 +294,318 @@ fn translation_model_installed(app: &tauri::AppHandle) -> bool {
             .map(|item| item.len() >= *minimum)
             .unwrap_or(false)
     })
+}
+
+fn ai_settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("ai-translation.json"))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn hex_decode(value: &str) -> Result<Vec<u8>, String> {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err("AI 接口密钥数据已损坏".into());
+    }
+    pairs
+        .iter()
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).map_err(|_| "AI 接口密钥数据已损坏")?;
+            u8::from_str_radix(text, 16).map_err(|_| "AI 接口密钥数据已损坏".into())
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn protect_secret(secret: &str) -> Result<String, String> {
+    let mut source = secret.as_bytes().to_vec();
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: source.len() as u32,
+        pbData: source.as_mut_ptr(),
+    };
+    let mut output = CRYPT_INTEGER_BLOB::default();
+    let protected = unsafe {
+        CryptProtectData(
+            &input,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+    if protected == 0 {
+        return Err(format!(
+            "无法安全保存 API Key：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let encrypted =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    unsafe {
+        LocalFree(output.pbData.cast());
+    }
+    Ok(hex_encode(&encrypted))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn protect_secret(_secret: &str) -> Result<String, String> {
+    Err("当前系统不支持安全保存 API Key".into())
+}
+
+#[cfg(target_os = "windows")]
+fn unprotect_secret(value: &str) -> Result<String, String> {
+    let mut encrypted = hex_decode(value)?;
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: encrypted.len() as u32,
+        pbData: encrypted.as_mut_ptr(),
+    };
+    let mut output = CRYPT_INTEGER_BLOB::default();
+    let unprotected = unsafe {
+        CryptUnprotectData(
+            &input,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+    if unprotected == 0 {
+        return Err(format!(
+            "无法读取已保存的 API Key：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let secret =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    unsafe {
+        LocalFree(output.pbData.cast());
+    }
+    String::from_utf8(secret).map_err(|_| "已保存的 API Key 无法识别".into())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn unprotect_secret(_value: &str) -> Result<String, String> {
+    Err("当前系统不支持读取 API Key".into())
+}
+
+fn read_ai_settings(app: &tauri::AppHandle) -> Result<AiSettingsFile, String> {
+    let path = ai_settings_path(app)?;
+    if !path.is_file() {
+        return Ok(AiSettingsFile::default());
+    }
+    let content =
+        fs::read_to_string(path).map_err(|error| format!("无法读取 AI 接口设置：{error}"))?;
+    serde_json::from_str(&content).map_err(|error| format!("AI 接口设置已损坏：{error}"))
+}
+
+fn public_ai_settings(settings: &AiSettingsFile) -> AiSettings {
+    AiSettings {
+        base_url: settings.base_url.clone(),
+        model: settings.model.clone(),
+        api_key_saved: !settings.encrypted_api_key.is_empty(),
+    }
+}
+
+fn normalize_ai_endpoint(base_url: &str) -> Result<String, String> {
+    let base_url = base_url.trim().trim_end_matches('/');
+    let parsed = Url::parse(base_url).map_err(|_| "请输入有效的 AI 接口 URL")?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("AI 接口 URL 只支持 http 或 https".into());
+    }
+    if base_url.ends_with("/chat/completions") {
+        Ok(base_url.to_string())
+    } else if base_url.ends_with("/v1") {
+        Ok(format!("{base_url}/chat/completions"))
+    } else {
+        Ok(format!("{base_url}/v1/chat/completions"))
+    }
+}
+
+fn normalize_ai_models_endpoint(base_url: &str) -> Result<String, String> {
+    let base_url = base_url.trim().trim_end_matches('/');
+    let parsed = Url::parse(base_url).map_err(|_| "请输入有效的 AI 接口 URL")?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("AI 接口 URL 只支持 http 或 https".into());
+    }
+    if base_url.ends_with("/models") {
+        Ok(base_url.to_string())
+    } else if let Some(prefix) = base_url.strip_suffix("/chat/completions") {
+        Ok(format!("{prefix}/models"))
+    } else if base_url.ends_with("/v1") {
+        Ok(format!("{base_url}/models"))
+    } else {
+        Ok(format!("{base_url}/v1/models"))
+    }
+}
+
+fn validate_ai_settings(base_url: &str, model: &str) -> Result<(), String> {
+    if base_url.len() > 2048 || model.len() > 200 {
+        return Err("AI 接口设置内容过长".into());
+    }
+    normalize_ai_endpoint(base_url)?;
+    if model.trim().is_empty() {
+        return Err("请填写 AI 模型名称".into());
+    }
+    Ok(())
+}
+
+fn parse_ai_translations(content: &str, expected: usize) -> Result<Vec<String>, String> {
+    let cleaned = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let parsed = serde_json::from_str::<Value>(cleaned)
+        .or_else(|_| {
+            let start = cleaned
+                .find(['{', '['])
+                .ok_or_else(|| serde_json::Error::io(std::io::Error::other("missing json")))?;
+            let end = cleaned
+                .rfind(['}', ']'])
+                .ok_or_else(|| serde_json::Error::io(std::io::Error::other("missing json")))?;
+            serde_json::from_str::<Value>(&cleaned[start..=end])
+        })
+        .map_err(|_| "AI 返回内容不是有效的翻译 JSON")?;
+    let items = parsed
+        .get("translations")
+        .and_then(Value::as_array)
+        .or_else(|| parsed.as_array())
+        .ok_or("AI 返回内容缺少 translations 数组")?;
+    let translations = items
+        .iter()
+        .map(|item| item.as_str().unwrap_or_default().trim().to_string())
+        .collect::<Vec<_>>();
+    if translations.len() != expected || translations.iter().any(|item| item.is_empty()) {
+        return Err(format!(
+            "AI 返回了 {} 条翻译，但任务需要 {expected} 条",
+            translations.len()
+        ));
+    }
+    Ok(translations)
+}
+
+fn ai_error_detail(payload: &Value) -> &str {
+    payload
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("error").and_then(Value::as_str))
+        .or_else(|| payload.get("message").and_then(Value::as_str))
+        .unwrap_or("接口拒绝了请求")
+}
+
+fn call_ai_translation(
+    base_url: &str,
+    model: &str,
+    api_key: &str,
+    texts: &[String],
+    source_language: &str,
+) -> Result<Vec<String>, String> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let endpoint = normalize_ai_endpoint(base_url)?;
+    let input = serde_json::to_string(texts).map_err(|error| error.to_string())?;
+    let body = serde_json::json!({
+        "model": model.trim(),
+        "temperature": 0.1,
+        "messages": [
+            {
+                "role": "system",
+                "content": "你是专业字幕翻译器。把输入数组逐条翻译成自然、准确的简体中文，保持原顺序和条数，不解释、不合并、不删减。只返回 JSON：{\"translations\":[\"译文1\",\"译文2\"]}。"
+            },
+            {
+                "role": "user",
+                "content": format!("原文语言：{source_language}\n输入 JSON：{input}")
+            }
+        ]
+    });
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|error| format!("无法创建 AI 接口连接：{error}"))?;
+    let mut request = client
+        .post(endpoint)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body.to_string());
+    if !api_key.trim().is_empty() {
+        request = request.bearer_auth(api_key.trim());
+    }
+    let response = request
+        .send()
+        .map_err(|error| format!("AI 接口连接失败：{error}"))?;
+    let status = response.status();
+    let payload = response
+        .text()
+        .map_err(|error| format!("无法读取 AI 接口响应：{error}"))?;
+    let parsed: Value = serde_json::from_str(&payload)
+        .map_err(|_| format!("AI 接口返回了无法识别的响应（HTTP {status}）"))?;
+    if !status.is_success() {
+        let detail = ai_error_detail(&parsed);
+        return Err(format!("AI 接口错误（HTTP {status}）：{detail}"));
+    }
+    let content = parsed
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .ok_or("AI 接口响应缺少 choices[0].message.content")?;
+    parse_ai_translations(content, texts.len())
+}
+
+fn fetch_ai_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
+    let endpoint = normalize_ai_models_endpoint(base_url)?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("无法创建 AI 接口连接：{error}"))?;
+    let mut request = client.get(endpoint);
+    if !api_key.trim().is_empty() {
+        request = request.bearer_auth(api_key.trim());
+    }
+    let response = request
+        .send()
+        .map_err(|error| format!("获取上游模型失败：{error}"))?;
+    let status = response.status();
+    let payload = response
+        .text()
+        .map_err(|error| format!("无法读取上游模型列表：{error}"))?;
+    let parsed: Value = serde_json::from_str(&payload)
+        .map_err(|_| format!("上游返回了无法识别的响应（HTTP {status}）"))?;
+    if !status.is_success() {
+        let detail = ai_error_detail(&parsed);
+        return Err(format!("获取上游模型失败（HTTP {status}）：{detail}"));
+    }
+    let mut models = parsed
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or("上游响应缺少 data 模型列表")?
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    models.sort();
+    models.dedup();
+    if models.is_empty() {
+        return Err("上游没有返回可用模型".into());
+    }
+    Ok(models)
 }
 
 fn start_model_server(model_root: Arc<RwLock<PathBuf>>) -> Result<String, String> {
@@ -466,6 +819,118 @@ fn choose_model_dir(
         .map_err(|error| format!("无法保存模型位置：{error}"))?;
     *state.model_root.write().map_err(|_| "无法更新模型目录")? = path.clone();
     Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+fn get_ai_settings(app: tauri::AppHandle) -> Result<AiSettings, String> {
+    read_ai_settings(&app).map(|settings| public_ai_settings(&settings))
+}
+
+#[tauri::command]
+fn save_ai_settings(
+    app: tauri::AppHandle,
+    request: SaveAiSettingsRequest,
+) -> Result<AiSettings, String> {
+    validate_ai_settings(&request.base_url, &request.model)?;
+    if request.api_key.len() > 8192 {
+        return Err("API Key 内容过长".into());
+    }
+    let current = read_ai_settings(&app)?;
+    let encrypted_api_key = if request.clear_api_key {
+        String::new()
+    } else if request.api_key.trim().is_empty() {
+        current.encrypted_api_key
+    } else {
+        protect_secret(request.api_key.trim())?
+    };
+    let settings = AiSettingsFile {
+        base_url: request.base_url.trim().trim_end_matches('/').to_string(),
+        model: request.model.trim().to_string(),
+        encrypted_api_key,
+    };
+    let path = ai_settings_path(&app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("无法创建设置目录：{error}"))?;
+    }
+    let payload = serde_json::to_vec_pretty(&settings)
+        .map_err(|error| format!("无法生成 AI 接口设置：{error}"))?;
+    fs::write(path, payload).map_err(|error| format!("无法保存 AI 接口设置：{error}"))?;
+    Ok(public_ai_settings(&settings))
+}
+
+fn saved_ai_credentials(app: &tauri::AppHandle) -> Result<(String, String, String), String> {
+    let settings = read_ai_settings(app)?;
+    validate_ai_settings(&settings.base_url, &settings.model)?;
+    let api_key = if settings.encrypted_api_key.is_empty() {
+        String::new()
+    } else {
+        unprotect_secret(&settings.encrypted_api_key)?
+    };
+    Ok((settings.base_url, settings.model, api_key))
+}
+
+#[tauri::command]
+async fn test_ai_translation(app: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (base_url, model, api_key) = saved_ai_credentials(&app)?;
+        let result = call_ai_translation(
+            &base_url,
+            &model,
+            &api_key,
+            &["Hello, this is a connection test.".into()],
+            "en",
+        )?;
+        Ok(format!("连接成功：{}", result[0]))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn list_ai_models(
+    app: tauri::AppHandle,
+    request: ListAiModelsRequest,
+) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if request.api_key.len() > 8192 {
+            return Err("API Key 内容过长".into());
+        }
+        let api_key = if request.api_key.trim().is_empty() {
+            let settings = read_ai_settings(&app)?;
+            if settings.encrypted_api_key.is_empty() {
+                String::new()
+            } else {
+                unprotect_secret(&settings.encrypted_api_key)?
+            }
+        } else {
+            request.api_key.trim().to_string()
+        };
+        fetch_ai_models(&request.base_url, &api_key)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn translate_with_ai(
+    app: tauri::AppHandle,
+    request: AiTranslateRequest,
+) -> Result<Vec<String>, String> {
+    if request.texts.len() > 24 {
+        return Err("单次 AI 翻译最多处理 24 段字幕".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let (base_url, model, api_key) = saved_ai_credentials(&app)?;
+        call_ai_translation(
+            &base_url,
+            &model,
+            &api_key,
+            &request.texts,
+            &request.source_language,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2810,6 +3275,11 @@ pub fn run() {
             runtime_info,
             choose_download_dir,
             choose_model_dir,
+            get_ai_settings,
+            save_ai_settings,
+            test_ai_translation,
+            list_ai_models,
+            translate_with_ai,
             open_directory,
             launch_login,
             scan_profile,
@@ -2831,6 +3301,127 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_endpoint_accepts_common_openai_urls() {
+        assert_eq!(
+            normalize_ai_endpoint("https://api.openai.com/v1").unwrap(),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_ai_endpoint("https://example.com").unwrap(),
+            "https://example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_ai_endpoint("http://127.0.0.1:11434/v1/chat/completions").unwrap(),
+            "http://127.0.0.1:11434/v1/chat/completions"
+        );
+        assert!(normalize_ai_endpoint("file:///tmp/model").is_err());
+        assert_eq!(
+            normalize_ai_models_endpoint("https://api.openai.com/v1").unwrap(),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(
+            normalize_ai_models_endpoint("https://example.com/v1/chat/completions").unwrap(),
+            "https://example.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn ai_translation_response_preserves_segment_count() {
+        let translations =
+            parse_ai_translations("```json\n{\"translations\":[\"你好\",\"欢迎\"]}\n```", 2)
+                .unwrap();
+        assert_eq!(translations, ["你好", "欢迎"]);
+        assert!(parse_ai_translations("{\"translations\":[\"只有一条\"]}", 2).is_err());
+    }
+
+    #[test]
+    fn ai_error_detail_supports_common_response_shapes() {
+        assert_eq!(
+            ai_error_detail(&serde_json::json!({"error": "Invalid API key"})),
+            "Invalid API key"
+        );
+        assert_eq!(
+            ai_error_detail(&serde_json::json!({"error": {"message": "quota exceeded"}})),
+            "quota exceeded"
+        );
+        assert_eq!(
+            ai_error_detail(&serde_json::json!({"message": "model unavailable"})),
+            "model unavailable"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn api_key_is_protected_with_windows_dpapi() {
+        let encrypted = protect_secret("sk-local-test").unwrap();
+        assert!(!encrypted.contains("sk-local-test"));
+        assert_eq!(unprotect_secret(&encrypted).unwrap(), "sk-local-test");
+    }
+
+    #[test]
+    fn openai_compatible_translation_call_works() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 16_384];
+            let size = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..size]);
+            assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer unit-secret"));
+            let content = "{\"choices\":[{\"message\":{\"content\":\"{\\\"translations\\\":[\\\"你好\\\"]}\"}}]}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                content.len(),
+                content
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let translated = call_ai_translation(
+            &format!("http://{address}/v1"),
+            "unit-model",
+            "unit-secret",
+            &["hello".into()],
+            "en",
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(translated, ["你好"]);
+    }
+
+    #[test]
+    fn upstream_model_list_is_loaded_and_sorted() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let size = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..size]);
+            assert!(request.starts_with("GET /v1/models HTTP/1.1"));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer unit-secret"));
+            let content = "{\"data\":[{\"id\":\"model-z\"},{\"id\":\"model-a\"}]}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                content.len(),
+                content
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let models = fetch_ai_models(&format!("http://{address}/v1"), "unit-secret").unwrap();
+        server.join().unwrap();
+        assert_eq!(models, ["model-a", "model-z"]);
+    }
 
     #[test]
     fn preview_uses_public_metadata() {
