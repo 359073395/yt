@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -104,12 +105,10 @@ struct DownloadOptions {
     quality: String,
     include_video: bool,
     include_thumbnail: bool,
-    include_description: bool,
+    include_original_subtitle: bool,
     transcript_mode: String,
     language: String,
     model_id: String,
-    #[allow(dead_code)]
-    translation_target: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -124,8 +123,12 @@ struct DownloadResult {
     output_dir: String,
     title: String,
     platform: String,
+    thumbnail: Option<String>,
+    uploader: String,
+    duration: Option<f64>,
     transcript_available: bool,
     source_language: String,
+    segments: Vec<TranslationSegment>,
     warning: Option<String>,
 }
 
@@ -160,18 +163,6 @@ struct TranslationSegment {
     start: String,
     end: String,
     text: String,
-}
-
-#[derive(Serialize)]
-struct TranslationInput {
-    source_language: String,
-    segments: Vec<TranslationSegment>,
-}
-
-#[derive(Deserialize)]
-struct TranslationInputRequest {
-    output_dir: String,
-    source_language: String,
 }
 
 #[derive(Deserialize)]
@@ -1621,6 +1612,53 @@ fn preview_from_payload(source: String, payload: Value) -> MediaPreview {
     }
 }
 
+fn thumbnail_data(bytes: &[u8]) -> Option<String> {
+    if bytes.len() > 2 * 1024 * 1024 {
+        return None;
+    }
+    let mime = if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        "image/webp"
+    } else {
+        return None;
+    };
+    Some(format!("data:{mime};base64,{}", BASE64.encode(bytes)))
+}
+
+fn inline_thumbnail(mut preview: MediaPreview) -> MediaPreview {
+    let image = (|| {
+        let url = preview.thumbnail.as_ref()?;
+        if !url.starts_with("https://") {
+            return None;
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(6))
+            .build()
+            .ok()?;
+        let response = client
+            .get(url)
+            .header(reqwest::header::USER_AGENT, BROWSER_USER_AGENT)
+            .header(reqwest::header::REFERER, &preview.url)
+            .send()
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        let mut bytes = Vec::new();
+        response
+            .take(2 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        thumbnail_data(&bytes)
+    })();
+    if image.is_some() {
+        preview.thumbnail = image;
+    }
+    preview
+}
+
 fn inspect_item(app: &tauri::AppHandle, yt_dlp: &Path, source: String) -> MediaPreview {
     let fallback = |message: String| MediaPreview {
         platform: platform_from_preview(&source, &Value::Null),
@@ -1670,7 +1708,7 @@ fn inspect_item(app: &tauri::AppHandle, yt_dlp: &Path, source: String) -> MediaP
             });
         let _ = fs::remove_file(path);
         return match result {
-            Ok(payload) => preview_from_payload(url, payload),
+            Ok(payload) => inline_thumbnail(preview_from_payload(url, payload)),
             Err(error) => fallback(error),
         };
     }
@@ -1690,7 +1728,7 @@ fn inspect_item(app: &tauri::AppHandle, yt_dlp: &Path, source: String) -> MediaP
         return fallback(user_error(&String::from_utf8_lossy(&output.stderr)));
     }
     match serde_json::from_slice::<Value>(&output.stdout) {
-        Ok(payload) => preview_from_payload(url, payload),
+        Ok(payload) => inline_thumbnail(preview_from_payload(url, payload)),
         Err(_) => fallback("平台没有返回可识别的视频信息".into()),
     }
 }
@@ -2166,7 +2204,8 @@ fn prepare_tiktok_info_json(
             }
         }
     } else {
-        return Err("TikTok 官方页面没有返回安全的视频地址".into());
+        // Preview only needs metadata/cover, not a playable download URL.
+        (String::new(), None, embed_url.clone())
     };
     let metadata = video.get("videoMeta").unwrap_or(&Value::Null);
     let title = item
@@ -2419,71 +2458,6 @@ fn user_error(detail: &str) -> String {
     }
 }
 
-fn make_platform_text(info: &Value) -> String {
-    let title = info
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or("未命名视频");
-    let uploader = info
-        .get("uploader")
-        .or_else(|| info.get("channel"))
-        .and_then(Value::as_str)
-        .unwrap_or("未知作者");
-    let source = info
-        .get("webpage_url")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let description = info
-        .get("description")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let tags = info
-        .get("tags")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(|tag| format!("#{tag}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .unwrap_or_default();
-    format!("标题：{title}\n作者：{uploader}\n来源：{source}\n\n{description}\n\n{tags}\n")
-}
-
-fn strip_subtitle(path: &Path) -> Result<String, String> {
-    let source = fs::read_to_string(path).map_err(|error| format!("无法读取字幕：{error}"))?;
-    let mut output = Vec::new();
-    let mut previous = String::new();
-    for raw in source.lines() {
-        let line = raw.trim();
-        if line.is_empty()
-            || line == "WEBVTT"
-            || line.chars().all(|character| character.is_ascii_digit())
-            || line.contains("-->")
-        {
-            continue;
-        }
-        let mut clean = String::new();
-        let mut in_tag = false;
-        for character in line.chars() {
-            match character {
-                '<' => in_tag = true,
-                '>' => in_tag = false,
-                _ if !in_tag => clean.push(character),
-                _ => {}
-            }
-        }
-        let clean = clean.trim();
-        if !clean.is_empty() && clean != previous {
-            output.push(clean.to_string());
-            previous = clean.to_string();
-        }
-    }
-    Ok(output.join("\n"))
-}
-
 fn parse_srt(path: &Path) -> Result<Vec<TranslationSegment>, String> {
     let source = fs::read_to_string(path).map_err(|error| format!("无法读取字幕：{error}"))?;
     let normalized = source.replace("\r\n", "\n");
@@ -2554,60 +2528,6 @@ fn detect_whisper_language(lines: &[String]) -> Option<String> {
 }
 
 #[tauri::command]
-fn translation_input(request: TranslationInputRequest) -> Result<TranslationInput, String> {
-    let output_dir = PathBuf::from(request.output_dir);
-    if !output_dir.is_dir() {
-        return Err("任务输出目录不存在".into());
-    }
-    let preferred = ["字幕.srt", "语音识别字幕.srt"];
-    let subtitle = preferred
-        .iter()
-        .map(|name| output_dir.join(name))
-        .find(|path| path.is_file())
-        .or_else(|| {
-            fs::read_dir(&output_dir)
-                .ok()?
-                .flatten()
-                .map(|entry| entry.path())
-                .find(|path| {
-                    path.extension()
-                        .and_then(|value| value.to_str())
-                        .map(|value| value.eq_ignore_ascii_case("srt"))
-                        .unwrap_or(false)
-                })
-        });
-    let segments = if let Some(path) = subtitle {
-        parse_srt(&path)?
-    } else {
-        let text_path = ["语音识别文案.txt", "字幕文案.txt"]
-            .iter()
-            .map(|name| output_dir.join(name))
-            .find(|path| path.is_file())
-            .ok_or("没有找到可翻译的语音文案")?;
-        fs::read_to_string(text_path)
-            .map_err(|error| format!("无法读取语音文案：{error}"))?
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .enumerate()
-            .map(|(index, text)| TranslationSegment {
-                index: index + 1,
-                start: String::new(),
-                end: String::new(),
-                text: text.to_string(),
-            })
-            .collect()
-    };
-    if segments.is_empty() {
-        return Err("文案内容为空，无法翻译".into());
-    }
-    Ok(TranslationInput {
-        source_language: request.source_language,
-        segments,
-    })
-}
-
-#[tauri::command]
 fn save_translation(request: SaveTranslationRequest) -> Result<(), String> {
     if request.segments.is_empty()
         || request.segments.len() != request.translations.len()
@@ -2622,66 +2542,27 @@ fn save_translation(request: SaveTranslationRequest) -> Result<(), String> {
     if !output_dir.is_dir() {
         return Err("任务输出目录不存在".into());
     }
-    let chinese = request.translations.join("\n");
     let bilingual = request
         .segments
         .iter()
         .zip(&request.translations)
-        .map(|(segment, translated)| format!("{}\n{}", segment.text, translated))
+        .map(|(segment, translated)| {
+            if segment.text.trim() == translated.trim() {
+                segment.text.clone()
+            } else {
+                format!("{}\n{}", segment.text, translated)
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n\n");
-    fs::write(output_dir.join("中文翻译.txt"), chinese)
-        .map_err(|error| format!("无法保存中文翻译：{error}"))?;
     fs::write(output_dir.join("双语文案.txt"), bilingual)
         .map_err(|error| format!("无法保存双语文案：{error}"))?;
-
-    if request
-        .segments
-        .iter()
-        .all(|segment| !segment.start.is_empty() && !segment.end.is_empty())
-    {
-        let subtitles = request
-            .segments
-            .iter()
-            .zip(&request.translations)
-            .map(|(segment, translated)| {
-                format!(
-                    "{}\n{} --> {}\n{}\n{}",
-                    segment.index, segment.start, segment.end, segment.text, translated
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        fs::write(output_dir.join("双语字幕.srt"), format!("{subtitles}\n"))
-            .map_err(|error| format!("无法保存双语字幕：{error}"))?;
-        let chinese_subtitles = request
-            .segments
-            .iter()
-            .zip(&request.translations)
-            .map(|(segment, translated)| {
-                format!(
-                    "{}\n{} --> {}\n{}",
-                    segment.index, segment.start, segment.end, translated
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        fs::write(
-            output_dir.join("中文字幕.srt"),
-            format!("{chinese_subtitles}\n"),
-        )
-        .map_err(|error| format!("无法保存中文字幕：{error}"))?;
-    }
     Ok(())
 }
 
-fn postprocess_metadata(
-    job_dir: &Path,
-    include_description: bool,
-) -> Result<(String, String, Option<PathBuf>), String> {
+fn postprocess_metadata(job_dir: &Path) -> Result<(String, String), String> {
     let mut title = "未命名视频".to_string();
     let mut platform = "自动识别".to_string();
-    let mut native_subtitle = None;
     let entries = fs::read_dir(job_dir).map_err(|error| format!("无法读取下载目录：{error}"))?;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -2707,13 +2588,6 @@ fn postprocess_metadata(
                     .and_then(Value::as_str)
                     .unwrap_or(&platform)
                     .to_string();
-                if include_description {
-                    fs::write(
-                        job_dir.join("平台原文文案.txt"),
-                        make_platform_text(&payload),
-                    )
-                    .map_err(|error| format!("无法保存平台文案：{error}"))?;
-                }
             }
             let _ = fs::rename(&path, job_dir.join("视频信息.json"));
         } else if name.ends_with(".description") {
@@ -2729,11 +2603,9 @@ fn postprocess_metadata(
                 .and_then(|value| value.to_str())
                 .unwrap_or("jpg");
             let _ = fs::rename(&path, job_dir.join(format!("封面.{extension}")));
-        } else if (name.ends_with(".srt") || name.ends_with(".vtt")) && native_subtitle.is_none() {
-            native_subtitle = Some(path);
         }
     }
-    Ok((title, platform, native_subtitle))
+    Ok((title, platform))
 }
 
 fn transcribe(
@@ -2741,8 +2613,7 @@ fn transcribe(
     state: &RuntimeState,
     request: &DownloadRequest,
     media_file: &Path,
-    job_dir: &Path,
-) -> Result<String, String> {
+) -> Result<(String, Vec<TranslationSegment>), String> {
     let ffmpeg = find_tool(app, "ffmpeg.exe").ok_or("缺少 FFmpeg，无法提取语音")?;
     let whisper = find_tool(app, "whisper-cli.exe").ok_or("本地转写引擎尚未就绪")?;
     let model = model_path(app, &request.options.model_id)?;
@@ -2800,7 +2671,6 @@ fn transcribe(
             .arg(model)
             .arg("-f")
             .arg(&audio)
-            .arg("-otxt")
             .arg("-osrt")
             .arg("-of")
             .arg(&output_base)
@@ -2817,22 +2687,15 @@ fn transcribe(
             "transcribing",
             &mut whisper_command,
         )?;
-        let text = output_base.with_extension("txt");
         let subtitle = output_base.with_extension("srt");
-        if !text.is_file() || !subtitle.is_file() {
+        if !subtitle.is_file() {
             return Err("语音识别完成但没有生成文案或字幕".into());
         }
-        let transcript_text =
-            fs::read(&text).map_err(|error| format!("无法读取语音识别文案：{error}"))?;
-        fs::write(job_dir.join("语音识别文案.txt"), transcript_text)
-            .map_err(|error| format!("无法保存语音识别文案：{error}"))?;
-        let subtitle_text =
-            fs::read(&subtitle).map_err(|error| format!("无法读取语音识别字幕：{error}"))?;
-        fs::write(job_dir.join("字幕.srt"), &subtitle_text)
-            .map_err(|error| format!("无法保存当前字幕：{error}"))?;
-        fs::write(job_dir.join("语音识别字幕.srt"), subtitle_text)
-            .map_err(|error| format!("无法保存语音识别字幕：{error}"))?;
-        Ok(
+        let segments = parse_srt(&subtitle)?;
+        if segments.is_empty() {
+            return Err("没有识别到可用的语音文案".into());
+        }
+        Ok((
             detect_whisper_language(&process_output.lines).unwrap_or_else(|| {
                 if request.options.language == "auto" {
                     "unknown".into()
@@ -2840,7 +2703,8 @@ fn transcribe(
                     request.options.language.clone()
                 }
             }),
-        )
+            segments,
+        ))
     })();
     let _ = fs::remove_dir_all(&scratch);
     result
@@ -2941,6 +2805,106 @@ fn download_native_subtitle(
     Ok(path.is_file().then_some(path))
 }
 
+// Only this newly created task directory is disposable, never a previous download.
+struct DownloadWorkspace(PathBuf);
+
+impl DownloadWorkspace {
+    fn create(output_root: &Path, job_id: &str) -> Result<Self, String> {
+        if job_id.is_empty()
+            || job_id.len() > 80
+            || !job_id
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        {
+            return Err("任务标识无效".into());
+        }
+        let root = fs::canonicalize(output_root).map_err(|error| error.to_string())?;
+        let path = root.join(format!(".yinglian-{job_id}"));
+        fs::create_dir(&path).map_err(|error| format!("无法创建独立下载任务：{error}"))?;
+        Ok(Self(path))
+    }
+
+    fn publish(
+        &self,
+        media: &Path,
+        keep_video: bool,
+        subtitle: Option<&Path>,
+    ) -> Result<PathBuf, String> {
+        let job_dir = media.parent().ok_or("输出目录无效")?;
+        let relative = job_dir
+            .strip_prefix(&self.0)
+            .map_err(|_| "下载结果不在本次任务目录内")?;
+        let root = self.0.parent().ok_or("保存目录无效")?;
+        let destination = root.join(relative);
+        let parent = destination.parent().ok_or("任务目录无效")?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let name = destination
+            .file_name()
+            .ok_or("任务名称无效")?
+            .to_string_lossy();
+        // Re-downloading the same video gets its own folder; never overwrite old files.
+        let mut index = 1;
+        let destination = loop {
+            let candidate = if index == 1 {
+                destination.clone()
+            } else {
+                parent.join(format!("{name} ({index})"))
+            };
+            match fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => index += 1,
+                Err(error) => return Err(format!("无法创建成品目录：{error}")),
+            }
+        };
+        let mut files = Vec::new();
+        if keep_video {
+            files.push((
+                media.to_path_buf(),
+                media.file_name().ok_or("视频文件名无效")?.to_os_string(),
+            ));
+        }
+        for entry in fs::read_dir(job_dir)
+            .map_err(|error| error.to_string())?
+            .flatten()
+        {
+            let name = entry.file_name();
+            if matches!(
+                name.to_str(),
+                Some("封面.jpg" | "封面.jpeg" | "封面.png" | "封面.webp")
+            ) {
+                files.push((entry.path(), name));
+            }
+        }
+        if let Some(path) = subtitle {
+            files.push((path.to_path_buf(), "原版字幕.srt".into()));
+        }
+        for (source, name) in files {
+            fs::rename(source, destination.join(name))
+                .map_err(|error| format!("无法保存成品文件：{error}"))?;
+        }
+        Ok(destination)
+    }
+}
+
+impl Drop for DownloadWorkspace {
+    fn drop(&mut self) {
+        // Canonical parent and create_dir (not create_dir_all) above establish ownership.
+        // Refuse cleanup if the directory was replaced with a link/reparse point.
+        if fs::canonicalize(&self.0).ok().as_ref() == Some(&self.0) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
+fn visible_directory(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(&path).to_string()
+    }
+}
+
 fn execute_download(
     app: tauri::AppHandle,
     state: RuntimeState,
@@ -2952,6 +2916,7 @@ fn execute_download(
         return Err("请选择下载目录".into());
     }
     fs::create_dir_all(&output_root).map_err(|error| format!("无法创建下载目录：{error}"))?;
+    let workspace = DownloadWorkspace::create(&output_root, &request.job_id)?;
     let yt_dlp = find_tool(&app, "yt-dlp.exe").ok_or("下载引擎尚未就绪")?;
     let ffmpeg = find_tool(&app, "ffmpeg.exe").ok_or("媒体处理引擎尚未就绪")?;
     emit_progress(
@@ -3025,7 +2990,7 @@ fn execute_download(
         .arg("--print")
         .arg("after_move:__YINGLIAN_FILE__%(filepath)s")
         .arg("--paths")
-        .arg(&output_root)
+        .arg(&workspace.0)
         .arg("--output")
         .arg("%(uploader,uploader_id|未知作者)s/%(upload_date>%Y-%m-%d)s_%(title).80B_[%(id)s]/视频.%(ext)s");
     if request.options.include_thumbnail {
@@ -3033,9 +2998,6 @@ fn execute_download(
             .arg("--write-thumbnail")
             .arg("--convert-thumbnails")
             .arg("jpg");
-    }
-    if request.options.include_description {
-        command.arg("--write-description");
     }
     if let Some(prepared) = tiktok_info.as_ref() {
         if let Some(cookie_path) = prepared.cookie_path.as_ref() {
@@ -3066,13 +3028,28 @@ fn execute_download(
         .output_file
         .or_else(|| {
             tiktok_video_id(&url)
-                .and_then(|video_id| find_tiktok_media_file(&output_root, &video_id))
+                .and_then(|video_id| find_tiktok_media_file(&workspace.0, &video_id))
         })
         .ok_or("下载完成但没有找到输出文件")?;
     let job_dir = media_file.parent().ok_or("输出目录无效")?.to_path_buf();
-    let (title, platform, _) = postprocess_metadata(&job_dir, request.options.include_description)?;
+    let (title, platform) = postprocess_metadata(&job_dir)?;
+    let payload = fs::read(job_dir.join("视频信息.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or(Value::Null);
+    let mut preview = preview_from_payload(url.clone(), payload);
+    if let Some(image) = fs::read(job_dir.join("封面.jpg"))
+        .ok()
+        .and_then(|bytes| thumbnail_data(&bytes))
+    {
+        preview.thumbnail = Some(image);
+    } else {
+        preview = inline_thumbnail(preview);
+    }
     let mut warning = None;
-    let native_subtitle = if matches!(request.options.transcript_mode.as_str(), "native" | "auto") {
+    let mut native_subtitle = if request.options.include_original_subtitle
+        || matches!(request.options.transcript_mode.as_str(), "native" | "auto")
+    {
         match download_native_subtitle(&app, &state, &request, &job_dir) {
             Ok(path) => path,
             Err(error) => {
@@ -3091,18 +3068,12 @@ fn execute_download(
     } else {
         request.options.language.clone()
     };
-    let mut transcript_available = false;
+    let mut segments = Vec::new();
 
     if request.options.transcript_mode == "native" || request.options.transcript_mode == "auto" {
         if let Some(subtitle) = native_subtitle.as_ref() {
-            match strip_subtitle(subtitle) {
-                Ok(text) if !text.trim().is_empty() => {
-                    fs::copy(subtitle, job_dir.join("字幕.srt"))
-                        .map_err(|error| format!("无法保存当前字幕：{error}"))?;
-                    fs::write(job_dir.join("字幕文案.txt"), text)
-                        .map_err(|error| format!("无法保存字幕文案：{error}"))?;
-                    transcript_available = true;
-                }
+            match parse_srt(subtitle) {
+                Ok(parsed) if !parsed.is_empty() => segments = parsed,
                 Ok(_) => warning = Some("平台字幕内容为空".into()),
                 Err(error) => warning = Some(error),
             }
@@ -3111,26 +3082,51 @@ fn execute_download(
         }
     }
     let needs_ai = request.options.transcript_mode == "ai"
-        || (request.options.transcript_mode == "auto" && !transcript_available);
+        || (request.options.transcript_mode == "auto" && segments.is_empty());
     if needs_ai {
-        match transcribe(&app, &state, &request, &media_file, &job_dir) {
-            Ok(detected) => {
+        match transcribe(&app, &state, &request, &media_file) {
+            Ok((detected, parsed)) => {
                 source_language = detected;
-                transcript_available = true;
-                warning = None;
+                segments = parsed;
+                if !request.options.include_original_subtitle {
+                    warning = None;
+                }
             }
             Err(error) => warning = Some(format!("视频已下载，AI 文案未生成：{error}")),
         }
     }
-    if !request.options.include_video {
-        fs::remove_file(&media_file).map_err(|error| format!("无法移除临时视频文件：{error}"))?;
+    // If platform metadata did not identify the original language, use ASR's
+    // detected language to select one original track, not a translated track at random.
+    if request.options.include_original_subtitle
+        && native_subtitle.is_none()
+        && !segments.is_empty()
+        && source_language != "unknown"
+        && request.options.language == "auto"
+    {
+        let mut original_request = request.clone();
+        original_request.options.language = source_language.clone();
+        match download_native_subtitle(&app, &state, &original_request, &job_dir) {
+            Ok(path) => native_subtitle = path,
+            Err(error) => warning = Some(format!("原版字幕获取失败：{error}")),
+        }
     }
+    let output_dir = workspace.publish(
+        &media_file,
+        request.options.include_video,
+        native_subtitle
+            .as_deref()
+            .filter(|_| request.options.include_original_subtitle),
+    )?;
     Ok(DownloadResult {
-        output_dir: job_dir.to_string_lossy().into_owned(),
+        output_dir: visible_directory(&output_dir),
         title,
         platform,
-        transcript_available,
+        thumbnail: preview.thumbnail,
+        uploader: preview.uploader,
+        duration: preview.duration,
+        transcript_available: !segments.is_empty(),
         source_language,
+        segments,
         warning,
     })
 }
@@ -3431,7 +3427,6 @@ pub fn run() {
             cancel_model_download,
             delete_model,
             delete_translation_model,
-            translation_input,
             save_translation
         ])
         .run(tauri::generate_context!())
@@ -3467,7 +3462,7 @@ mod tests {
     }
 
     #[test]
-    fn translation_files_preserve_timing_and_reject_empty_results() {
+    fn translation_saves_only_bilingual_copy_and_rejects_empty_results() {
         let directory = std::env::temp_dir().join(format!(
             "yinglian-translation-test-{}-{}",
             process::id(),
@@ -3479,49 +3474,122 @@ mod tests {
         fs::create_dir(&directory).unwrap();
         let output_dir = directory.to_string_lossy().into_owned();
         fs::write(directory.join("字幕.srt"), "1\r\n00:00:00,000 --> 00:00:02,000\r\nHello\r\n\r\n2\r\n00:00:02,000 --> 00:00:04,000\r\nSelamat pagi\r\n").unwrap();
-        let input = translation_input(TranslationInputRequest {
-            output_dir: output_dir.clone(),
-            source_language: "en".into(),
-        })
-        .unwrap();
+        let segments = parse_srt(&directory.join("字幕.srt")).unwrap();
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[1].start, "00:00:02,000");
         let translated = vec!["你好".to_string(), "早上好".to_string()];
         save_translation(SaveTranslationRequest {
             output_dir: output_dir.clone(),
-            segments: input.segments.clone(),
+            segments: segments.clone(),
             translations: translated.clone(),
         })
         .unwrap();
-        let chinese = parse_srt(&directory.join("中文字幕.srt")).unwrap();
-        let bilingual = parse_srt(&directory.join("双语字幕.srt")).unwrap();
-        assert_eq!(chinese.len(), 2);
-        for (index, segment) in chinese.iter().enumerate() {
-            assert_eq!(segment.start, input.segments[index].start);
-            assert_eq!(segment.end, input.segments[index].end);
-            assert_eq!(segment.text, translated[index]);
-            assert!(bilingual[index].text.contains(&input.segments[index].text));
-            assert!(bilingual[index].text.contains(&translated[index]));
-        }
         assert_eq!(
-            fs::read_to_string(directory.join("中文翻译.txt")).unwrap(),
-            "你好\n早上好"
+            fs::read_to_string(directory.join("双语文案.txt")).unwrap(),
+            "Hello\n你好\n\nSelamat pagi\n早上好"
         );
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
         assert!(save_translation(SaveTranslationRequest {
             output_dir,
-            segments: input.segments,
+            segments,
             translations: vec!["".into(), "".into()]
         })
         .is_err());
         // Only this uniquely named test directory and its known outputs are removed.
-        for name in [
-            "字幕.srt",
-            "中文字幕.srt",
-            "双语字幕.srt",
-            "中文翻译.txt",
-            "双语文案.txt",
-        ] {
+        for name in ["字幕.srt", "双语文案.txt"] {
             fs::remove_file(directory.join(name)).unwrap();
         }
         fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn finished_folders_exclude_work_files_preserve_old_downloads_and_honor_choices() {
+        let root = std::env::temp_dir().join(format!(
+            "yinglian-output-test-{}-{}",
+            process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let old = root.join("作者/视频");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("旧文件.txt"), "keep").unwrap();
+        for (index, (video, cover, subtitle)) in [
+            (true, true, true),
+            (true, true, false),
+            (false, false, true),
+            (true, false, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let workspace = DownloadWorkspace::create(&root, &format!("test-{index}")).unwrap();
+            let staged = workspace.0.join("作者/视频");
+            fs::create_dir_all(&staged).unwrap();
+            fs::write(staged.join("视频.mp4"), "video").unwrap();
+            if cover {
+                fs::write(staged.join("封面.jpg"), "cover").unwrap();
+            }
+            fs::write(staged.join("视频.en.srt"), "original").unwrap();
+            fs::write(staged.join("视频.info.json"), "{}").unwrap();
+            fs::write(staged.join("中间文案.txt"), "work only").unwrap();
+            let native = staged.join("视频.en.srt");
+            let output = workspace
+                .publish(
+                    &staged.join("视频.mp4"),
+                    video,
+                    subtitle.then_some(native.as_path()),
+                )
+                .unwrap();
+            assert_ne!(output, old);
+            assert!(output
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(&format!("({})", index + 2)));
+            let names: HashSet<_> = fs::read_dir(&output)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                names.len(),
+                video as usize + cover as usize + subtitle as usize
+            );
+            assert_eq!(names.contains("视频.mp4"), video);
+            assert_eq!(names.contains("封面.jpg"), cover);
+            assert_eq!(names.contains("原版字幕.srt"), subtitle);
+            let scratch = workspace.0.clone();
+            drop(workspace);
+            assert!(!scratch.exists());
+            assert_eq!(fs::read_to_string(old.join("旧文件.txt")).unwrap(), "keep");
+            for entry in fs::read_dir(&output).unwrap() {
+                fs::remove_file(entry.unwrap().path()).unwrap();
+            }
+            // Keep the folder until all iterations finish, exercising duplicate naming.
+        }
+        assert!(DownloadWorkspace::create(&root, "../unsafe").is_err());
+        let unfinished = DownloadWorkspace::create(&root, "cancelled").unwrap();
+        let scratch = unfinished.0.clone();
+        fs::write(scratch.join("视频.part"), "partial").unwrap();
+        drop(unfinished);
+        assert!(!scratch.exists());
+        fs::remove_file(old.join("旧文件.txt")).unwrap();
+        for entry in fs::read_dir(root.join("作者")).unwrap() {
+            fs::remove_dir(entry.unwrap().path()).unwrap();
+        }
+        fs::remove_dir(root.join("作者")).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn thumbnail_inline_data_rejects_html_and_oversized_responses() {
+        assert!(thumbnail_data(b"<html>Access denied</html>").is_none());
+        assert!(thumbnail_data(&vec![0xff; 2 * 1024 * 1024 + 1]).is_none());
+        assert!(thumbnail_data(&[0xff, 0xd8, 0xff, 1])
+            .unwrap()
+            .starts_with("data:image/jpeg;base64,"));
     }
 
     #[test]

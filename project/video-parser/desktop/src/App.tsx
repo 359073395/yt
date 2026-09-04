@@ -54,6 +54,7 @@ interface PendingItem extends MediaPreview {
   selected: boolean
   quality: string
   loading: boolean
+  downloaded?: boolean
 }
 
 interface ModelPromptState {
@@ -113,14 +114,13 @@ function App() {
   const [quality, setQuality] = React.useState('1080')
   const [transcriptMode, setTranscriptMode] = React.useState<TranscriptMode>(() => {
     const saved = window.localStorage.getItem('yinglian-transcript-mode')
-    return saved === 'auto' || saved === 'ai' || saved === 'native' ? saved : 'none'
+    return saved === 'auto' || saved === 'ai' || saved === 'native' ? saved : 'auto'
   })
   const [language, setLanguage] = React.useState('auto')
   const [modelId, setModelId] = React.useState('small')
   const [includeVideo, setIncludeVideo] = React.useState(true)
   const [includeThumbnail, setIncludeThumbnail] = React.useState(true)
-  const [includeDescription, setIncludeDescription] = React.useState(true)
-  const [includeSubtitle, setIncludeSubtitle] = React.useState(() => window.localStorage.getItem('yinglian-transcript-mode') !== null && window.localStorage.getItem('yinglian-transcript-mode') !== 'none')
+  const [includeSubtitle, setIncludeSubtitle] = React.useState(true)
   const [pendingItems, setPendingItems] = React.useState<PendingItem[]>([])
   const [tasks, setTasks] = React.useState<DownloadTask[]>([])
   const [running, setRunning] = React.useState(false)
@@ -131,7 +131,8 @@ function App() {
   const [modelPrompt, setModelPrompt] = React.useState<ModelPromptState | null>(null)
   const [modelProgress, setModelProgress] = React.useState<ModelProgress | null>(null)
   const [modelBusy, setModelBusy] = React.useState(false)
-  const [translationTarget, setTranslationTarget] = React.useState<'none' | 'zh'>(() => window.localStorage.getItem('yinglian-translation-target') === 'zh' ? 'zh' : 'none')
+  const [translationTarget, setTranslationTarget] = React.useState<'none' | 'zh'>(() => window.localStorage.getItem('yinglian-translation-target') === 'none' ? 'none' : 'zh')
+  const includeCopy = translationTarget === 'zh'
   const [translationProvider, setTranslationProvider] = React.useState<TranslationProvider>(() => window.localStorage.getItem('yinglian-translation-provider') === 'api' ? 'api' : 'local')
   const [settingsProvider, setSettingsProvider] = React.useState<TranslationProvider>('local')
   const [aiSettings, setAiSettings] = React.useState<AiTranslationSettings>({ base_url: '', model: '', api_key_saved: false })
@@ -213,7 +214,7 @@ function App() {
   const completedCount = queueTasks.filter((task) => task.status === 'completed').length
   const activeTask = tasks.find((task) => ['queued', 'scanning', 'downloading', 'transcribing'].includes(task.status))
   const estimatedSize = selectedItems.reduce((total, item) => total + (item.size_bytes || 0), 0)
-  const selectedOutputCount = [includeVideo, includeThumbnail, includeDescription, includeSubtitle].filter(Boolean).length
+  const selectedOutputCount = [includeVideo, includeThumbnail, includeCopy, includeSubtitle].filter(Boolean).length
   const aiConfigured = Boolean(aiSettings.base_url && aiSettings.model)
 
   async function checkForUpdates(silent = false) {
@@ -472,7 +473,7 @@ function App() {
       const lookup = new Map(previews.map((item) => [item.url, item]))
       setPendingItems((current) => current.map((item) => {
         const preview = lookup.get(item.url)
-        return preview ? { ...item, ...preview, loading: false } : item
+        return preview && !item.downloaded ? { ...item, ...preview, loading: false } : item
       }))
     }
   }
@@ -521,8 +522,8 @@ function App() {
   function requestTranscriptMode(next: TranscriptMode) {
     window.localStorage.setItem('yinglian-transcript-mode', next)
     setTranscriptMode(next)
-    setIncludeSubtitle(next !== 'none')
-    if ((next === 'auto' || next === 'ai') && !installedModel) {
+    if (next === 'none') requestTranslation('none')
+    if (includeCopy && (next === 'auto' || next === 'ai') && !installedModel) {
       setModelPrompt({ speech: true, translation: false, resumeDownload: false })
     }
   }
@@ -534,7 +535,6 @@ function App() {
       if (transcriptMode === 'none') {
         window.localStorage.setItem('yinglian-transcript-mode', 'auto')
         setTranscriptMode('auto')
-        setIncludeSubtitle(true)
       }
       if (translationProvider === 'api' && !aiConfigured) {
         openModels()
@@ -546,7 +546,7 @@ function App() {
   }
 
   function requiredModels(resumeDownload: boolean) {
-    const speech = (transcriptMode === 'auto' || transcriptMode === 'ai') && !installedModel
+    const speech = includeCopy && (transcriptMode === 'auto' || transcriptMode === 'ai') && !installedModel
     if (translationTarget === 'zh' && translationProvider === 'api' && !aiConfigured) {
       openModels()
       setAiSettingsStatus('请先完成 AI 接口设置，再开始翻译。')
@@ -577,14 +577,14 @@ function App() {
     if (modelPrompt?.speech) {
       window.localStorage.setItem('yinglian-transcript-mode', 'none')
       setTranscriptMode('none')
-      setIncludeSubtitle(false)
+      requestTranslation('none')
     }
     if (modelPrompt?.translation) {
       window.localStorage.setItem('yinglian-translation-target', 'none')
       setTranslationTarget('none')
     }
     setModelPrompt(null)
-    setMessage('已跳过模型下载，仍可正常下载视频、封面和平台文案。')
+    setMessage('已跳过模型下载，仍可下载视频、封面和平台提供的原版字幕。')
   }
 
   async function startSelectedDownloads() {
@@ -647,16 +647,15 @@ function App() {
             quality: source.quality,
             include_video: includeVideo,
             include_thumbnail: includeThumbnail,
-            include_description: includeDescription,
-            transcript_mode: includeSubtitle ? transcriptMode : 'none',
+            include_original_subtitle: includeSubtitle,
+            transcript_mode: includeCopy ? transcriptMode : 'none',
             language,
             model_id: modelId,
-            translation_target: translationTarget === 'zh' ? 'zh' : null,
           }
           const request: DownloadRequest = { job_id: task.id, url: task.url, options }
           const result = await invoke<DownloadResult>('download_item', { request })
           setPendingItems((current) => current.map((item) => item.id === source.id
-            ? { ...item, title: result.title, platform: result.platform || item.platform, error: null }
+            ? { ...item, title: result.title, platform: result.platform || item.platform, thumbnail: result.thumbnail || item.thumbnail, uploader: result.uploader || item.uploader, duration: result.duration ?? item.duration, downloaded: true, loading: false, error: null }
             : item))
           const outcome = await finishTranslation(result, {
             target: translationTarget, provider: translationProvider,
@@ -688,6 +687,15 @@ function App() {
         : item))
     } catch (error) {
       setMessage(String(error))
+    }
+  }
+
+  async function openTaskFolder(task: DownloadTask) {
+    if (!task.outputDir) return
+    try {
+      await invoke('open_directory', { path: task.outputDir })
+    } catch (error) {
+      setMessage(`无法打开“${task.title}”的文件夹：${String(error)}`)
     }
   }
 
@@ -781,8 +789,8 @@ function App() {
                     <button className="select-box" type="button" onClick={() => setPendingItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, selected: !entry.selected } : entry))}>{item.selected ? <CheckSquare2 /> : <Square />}</button>
                     <div className="media-summary"><div className="media-thumb">{item.thumbnail ? <img src={item.thumbnail} alt="" onError={() => setPendingItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, thumbnail: null } : entry))} /> : <Video />}<span>{formatDuration(item.duration)}</span></div><div className="media-copy"><strong title={item.title}>{item.title}</strong><span>{item.platform} · {item.uploader}</span>{item.error && <small title={item.error}>预览受限，下载时会再次尝试</small>}</div></div>
                     <select value={item.quality} aria-label={`${item.title} 视频清晰度`} onChange={(event) => setPendingItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, quality: event.target.value } : entry))}><option value="best">最佳</option><option value="2160">4K</option><option value="1080">1080P</option><option value="720">720P</option><option value="480">480P</option></select>
-                    <div className="media-tags">{includeVideo && <span><Video />视频</span>}{includeThumbnail && <span><Image />封面</span>}{includeDescription && <span><FileText />平台文案</span>}{includeSubtitle && <span><Subtitles />字幕</span>}</div>
-                    <div className={`row-status ${task?.status || 'waiting'}`} title={task?.message}>{!task ? <><span>等待中</span></> : task.status === 'completed' ? <><strong><Check />已完成</strong></> : task.status === 'partial' ? <strong><AlertCircle />未全部完成</strong> : task.status === 'failed' ? <strong><AlertCircle />失败</strong> : task.status === 'cancelled' ? <><span>已取消</span></> : <><strong>{task.status === 'transcribing' ? (task.message.includes('翻译') ? '翻译中' : '提取文案') : task.status === 'queued' ? '排队中' : `下载中 ${Math.round(task.percent)}%`}</strong>{speed && <small>{speed}</small>}</>}</div>
+                    <div className="media-tags">{includeVideo && <span><Video />视频</span>}{includeThumbnail && <span><Image />封面</span>}{includeCopy && <span><FileText />双语文案</span>}{includeSubtitle && <span><Subtitles />原版字幕</span>}</div>
+                    <div className={`row-status ${task?.status || 'waiting'}`} title={task?.message}>{!task ? <><span>等待中</span></> : task.status === 'completed' ? <><strong><Check />已完成</strong></> : task.status === 'partial' ? <strong><AlertCircle />未全部完成</strong> : task.status === 'failed' ? <strong><AlertCircle />失败</strong> : task.status === 'cancelled' ? <><span>已取消</span></> : <><strong>{task.status === 'transcribing' ? (task.message.includes('翻译') ? '翻译中' : '提取文案') : task.status === 'queued' ? '排队中' : `下载中 ${Math.round(task.percent)}%`}</strong>{speed && <small>{speed}</small>}</>}{task?.outputDir && (task.status === 'completed' || task.status === 'partial') && <button className="open-task-folder" type="button" aria-label={`打开 ${task.title} 的文件夹`} title={task.outputDir} onClick={() => void openTaskFolder(task)}><FolderOpen />打开文件夹</button>}</div>
                     {task && (task.status === 'partial' || task.status === 'failed') && <p className="row-issue" role="status">{task.message}</p>}
                     {item.loading && <div className="row-loading"><LoaderCircle className="spin" />读取中</div>}
                   </article>
@@ -818,9 +826,10 @@ function App() {
             <div className="output-grid">
               <label><input type="checkbox" checked={includeVideo} onChange={(event) => setIncludeVideo(event.target.checked)} /><Video />视频</label>
               <label><input type="checkbox" checked={includeThumbnail} onChange={(event) => setIncludeThumbnail(event.target.checked)} /><Image />封面</label>
-              <label><input type="checkbox" checked={includeDescription} onChange={(event) => setIncludeDescription(event.target.checked)} /><FileText />平台文案</label>
-              <label><input type="checkbox" checked={includeSubtitle} onChange={(event) => { const checked = event.target.checked; setIncludeSubtitle(checked); if (!checked) { setTranscriptMode('none'); requestTranslation('none') } else if (transcriptMode === 'none') requestTranscriptMode('auto') }} /><Subtitles />字幕</label>
+              <label><input type="checkbox" checked={includeCopy} onChange={(event) => requestTranslation(event.target.checked ? 'zh' : 'none')} /><FileText />双语文案</label>
+              <label title="仅保存平台提供的原文字幕，没有则跳过"><input type="checkbox" checked={includeSubtitle} onChange={(event) => setIncludeSubtitle(event.target.checked)} /><Subtitles />原版字幕</label>
             </div>
+            <p className="output-note">原版字幕有则保存；不额外生成中文或双语字幕文件。</p>
           </section>
 
           <section className="setting-section ai-section">
@@ -829,14 +838,14 @@ function App() {
             <div className="ai-options-grid">
               <label className="select-field"><span>提取方式</span><select value={transcriptMode} onChange={(event) => requestTranscriptMode(event.target.value as TranscriptMode)}><option value="none">不提取语音文案</option><option value="auto">字幕优先，AI 兜底</option><option value="ai">始终 AI 识别语音</option><option value="native">仅平台字幕</option></select></label>
               <label className="select-field"><span>来源语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="auto">自动检测</option><option value="zh">中文</option><option value="en">英语</option><option value="id">印尼语</option><option value="ja">日语</option><option value="ko">韩语</option><option value="es">西班牙语</option></select></label>
-              <label className="select-field full-field"><span>翻译为 · {translationProvider === 'api' ? 'AI 接口' : '本地模型'}</span><select value={translationTarget} onChange={(event) => requestTranslation(event.target.value as 'none' | 'zh')}><option value="none">不翻译</option><option value="zh">中文（生成译文 + 双语字幕）</option></select><small>翻译方式可在顶部“模型”中切换</small></label>
+              <label className="select-field full-field"><span>文案输出 · {translationProvider === 'api' ? 'AI 接口' : '本地模型'}</span><select value={translationTarget} onChange={(event) => requestTranslation(event.target.value as 'none' | 'zh')}><option value="none">不生成双语文案</option><option value="zh">原文 + 中文（合并为一份双语文案）</option></select><small>翻译方式可在顶部“模型”中切换</small></label>
             </div>
           </section>
 
           <section className="setting-section save-section">
             <h2>保存位置</h2>
             <button className="folder-field" type="button" onClick={chooseDirectory}><span title={downloadDir}>{downloadDir || '正在读取下载目录'}</span><FolderOpen /><em>更改</em></button>
-            <div className="space-row"><span>视频、封面、文案和字幕保存到同一任务文件夹</span><b>{estimatedSize ? `约 ${formatBytes(estimatedSize)}` : ''}</b></div>
+            <div className="space-row"><span>每条视频独立保存，完成后可从队列打开文件夹</span><b>{estimatedSize ? `约 ${formatBytes(estimatedSize)}` : ''}</b></div>
           </section>
         </aside>
       </div>
@@ -849,7 +858,7 @@ function App() {
             <p>模型只下载一次，并保存在你选择的本地位置。没有得到确认前，影链工坊不会自动下载。</p>
             <div className="prompt-models">
               {modelPrompt.speech && <div><span><PackageOpen /><strong>{selectedModel?.name || '语音识别模型'}</strong></span><b>{formatBytes(selectedModel?.size_bytes)}</b><small>用于英语、印尼语等多语言语音文案提取</small></div>}
-              {modelPrompt.translation && <div><span><Languages /><strong>多语言 → 简体中文</strong></span><b>{formatBytes(runtime?.translation_model_size_bytes || 646109073)}</b><small>用于生成中文翻译和双语字幕</small></div>}
+              {modelPrompt.translation && <div><span><Languages /><strong>多语言 → 简体中文</strong></span><b>{formatBytes(runtime?.translation_model_size_bytes || 646109073)}</b><small>用于生成原文与中文对照的双语文案</small></div>}
             </div>
             <button className="model-folder path-readable" type="button" onClick={chooseModelDirectory}><FolderOpen /><span title={runtime?.model_dir}>{runtime?.model_dir || '正在读取模型位置'}</span><em>更改位置</em></button>
             {(modelBusy || translationBusy) && <div className="model-confirm-progress"><div><span>{modelProgress?.message || translationProgress.message}</span><b>{Math.round(modelProgress?.percent || translationProgress.percent)}%</b></div><div><i style={{ width: `${modelProgress?.percent || translationProgress.percent}%` }} /></div></div>}
@@ -888,7 +897,7 @@ function App() {
                 <button className={settingsProvider === 'api' ? 'selected' : ''} type="button" onClick={() => chooseTranslationProvider('api')}><Cloud /><span><strong>AI 接口</strong><small>无需下载翻译模型</small></span></button>
               </div>
 
-              {settingsProvider === 'local' ? <div className="model-list translation-model"><article><div><strong>多语言 → 简体中文</strong><span>{formatBytes(runtime?.translation_model_size_bytes || 646109073)} · 生成中文和双语字幕</span></div>{translationCached ? <div className="model-actions"><span className="installed-badge"><Check />已安装</span><button type="button" className="danger icon-only" aria-label="删除中文翻译模型" disabled={translationBusy} onClick={removeTranslationModel}><Trash2 /></button></div> : <button type="button" disabled={translationBusy} onClick={prepareTranslation}><Download />下载</button>}</article></div> : <div className="api-settings-form">
+              {settingsProvider === 'local' ? <div className="model-list translation-model"><article><div><strong>多语言 → 简体中文</strong><span>{formatBytes(runtime?.translation_model_size_bytes || 646109073)} · 生成双语文案</span></div>{translationCached ? <div className="model-actions"><span className="installed-badge"><Check />已安装</span><button type="button" className="danger icon-only" aria-label="删除中文翻译模型" disabled={translationBusy} onClick={removeTranslationModel}><Trash2 /></button></div> : <button type="button" disabled={translationBusy} onClick={prepareTranslation}><Download />下载</button>}</article></div> : <div className="api-settings-form">
                 <label><span>接口 URL</span><input type="url" value={aiDraft.baseUrl} onChange={(event) => { setAiDraft((current) => ({ ...current, baseUrl: event.target.value })); setAvailableAiModels([]); setAiModelManual(true) }} placeholder="https://api.openai.com/v1" /></label>
                 <label className="api-model-field"><span>AI 模型</span><div><select aria-label="选择上游模型" value={aiModelManual ? '__manual__' : aiDraft.model} onChange={(event) => { if (event.target.value === '__manual__') { setAiModelManual(true) } else { setAiModelManual(false); setAiDraft((current) => ({ ...current, model: event.target.value })) } }}>{availableAiModels.map((model) => <option value={model} key={model}>{model}</option>)}<option value="__manual__">{availableAiModels.length ? '手动填写其他模型…' : '手动填写模型名称'}</option></select><button type="button" disabled={aiModelsBusy} onClick={() => void loadAiModels()}>{aiModelsBusy ? <LoaderCircle className="spin" /> : <RefreshCw />}获取模型</button></div>{aiModelManual && <input className="manual-model-input" type="text" value={aiDraft.model} onChange={(event) => setAiDraft((current) => ({ ...current, model: event.target.value }))} placeholder="例如 gpt-4o-mini" />}</label>
                 <label className="api-key-field"><span>API Key <small>本地接口可留空</small></span><div><KeyRound /><input type="password" autoComplete="off" value={aiDraft.apiKey} onChange={(event) => { setAiDraft((current) => ({ ...current, apiKey: event.target.value })); setAvailableAiModels([]); setAiModelManual(true) }} placeholder={aiSettings.api_key_saved ? '已安全保存，留空不会替换' : 'sk-…'} /></div></label>

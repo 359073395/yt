@@ -84,6 +84,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .row-status strong { display: flex; align-items: center; gap: 4px; color: #ff5828; font-size: 11px; font-weight: 650; }
 .row-status strong svg { width: 13px; height: 13px; }
 .row-status.completed strong { color: #31a15c; }
+.open-task-folder { display: inline-flex; align-items: center; justify-self: start; gap: 4px; padding: 5px 0; border: 0; color: #505450; background: transparent; font-size: 11px; white-space: nowrap; }
+.open-task-folder:hover { color: #ff5828; }
+.open-task-folder svg { width: 13px; height: 13px; }
 .row-status.failed strong { color: #be4426; }
 .row-status.partial strong { color: #a56612; }
 .row-issue { grid-column: 2 / -1; margin: 0; padding: 8px 10px; border-radius: 6px; color: #98411e; background: #fff0e7; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
@@ -127,6 +130,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .output-grid label { height: 39px; display: flex; align-items: center; justify-content: center; gap: 5px; border: 1px solid #dedfdb; border-radius: 7px; color: #454945; background: #fff; cursor: pointer; font-size: 11px; white-space: nowrap; }
 .output-grid input { width: 13px; height: 13px; margin: 0; accent-color: #ff5828; }
 .output-grid svg { width: 12px; height: 12px; }
+.output-note { margin: 9px 0 0; color: #858a85; font-size: 11px; line-height: 1.5; }
 .section-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .section-row h2 { margin-bottom: 3px; }
 .section-row p { margin: 0; color: #777b77; font-size: 10px; }

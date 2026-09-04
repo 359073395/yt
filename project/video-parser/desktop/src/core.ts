@@ -30,11 +30,10 @@ export interface DownloadOptions {
   quality: string
   include_video: boolean
   include_thumbnail: boolean
-  include_description: boolean
+  include_original_subtitle: boolean
   transcript_mode: TranscriptMode
   language: string
   model_id: string
-  translation_target?: string | null
 }
 
 export interface DownloadRequest {
@@ -49,6 +48,10 @@ export interface DownloadResult {
   platform: string
   transcript_available: boolean
   source_language: string
+  segments: TranslationSegment[]
+  thumbnail?: string | null
+  uploader?: string
+  duration?: number | null
   warning?: string | null
 }
 
@@ -57,11 +60,6 @@ export interface TranslationSegment {
   start: string
   end: string
   text: string
-}
-
-export interface TranslationInput {
-  source_language: string
-  segments: TranslationSegment[]
 }
 
 export interface ProfileItem {
