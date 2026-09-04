@@ -1,6 +1,6 @@
 export type InputMode = 'single' | 'batch' | 'profile'
 export type TranscriptMode = 'none' | 'auto' | 'native' | 'ai'
-export type TaskStatus = 'queued' | 'scanning' | 'downloading' | 'transcribing' | 'completed' | 'failed' | 'cancelled'
+export type TaskStatus = 'queued' | 'scanning' | 'downloading' | 'transcribing' | 'completed' | 'partial' | 'failed' | 'cancelled'
 
 export interface RuntimeInfo {
   version: string
@@ -155,6 +155,7 @@ export function statusLabel(status: TaskStatus): string {
     downloading: '下载中',
     transcribing: '生成文案',
     completed: '已完成',
+    partial: '未全部完成',
     failed: '失败',
     cancelled: '已取消',
   }[status]

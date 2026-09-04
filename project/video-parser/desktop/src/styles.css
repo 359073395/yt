@@ -85,6 +85,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .row-status strong svg { width: 13px; height: 13px; }
 .row-status.completed strong { color: #31a15c; }
 .row-status.failed strong { color: #be4426; }
+.row-status.partial strong { color: #a56612; }
+.row-issue { grid-column: 2 / -1; margin: 0; padding: 8px 10px; border-radius: 6px; color: #98411e; background: #fff0e7; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
 .row-status small { overflow: hidden; color: #6d716d; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .row-loading { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: flex-end; gap: 5px; padding-right: 18px; color: #ff5828; background: rgba(255, 255, 255, .8); font-size: 10px; pointer-events: none; }
 .row-loading svg { width: 14px; }
@@ -130,13 +132,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .section-row p { margin: 0; color: #777b77; font-size: 10px; }
 .manage-models { padding: 0; border: 0; color: #e95121; background: transparent; cursor: pointer; font-size: 11px; }
 .model-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 13px; }
-.model-cards button { position: relative; min-width: 0; min-height: 66px; display: grid; align-content: center; justify-items: center; gap: 5px; padding: 8px 5px; border: 1px solid #d9dad6; border-radius: 7px; color: #464946; background: #fff; cursor: pointer; }
+.model-cards button { min-width: 0; min-height: 88px; display: grid; align-content: center; justify-items: center; gap: 5px; padding: 10px 6px; border: 1px solid #d9dad6; border-radius: 7px; color: #464946; background: #fff; cursor: pointer; }
 .model-cards button.selected { border-color: #ff754d; background: #fff8f4; }
-.model-cards button > i { position: absolute; top: 8px; left: 8px; width: 16px; height: 16px; display: grid; place-items: center; border: 1px solid #cfd1cd; border-radius: 50%; color: #fff; font-style: normal; }
-.model-cards button.selected > i { border-color: #ff5828; background: #ff5828; }
-.model-cards button svg { width: 10px; }
-.model-cards strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 650; }
-.model-cards span { color: #858985; font-size: 10px; }
+.model-card-heading { display: flex; align-items: center; justify-content: center; gap: 5px; }
+.model-card-heading > i { flex: 0 0 16px; width: 16px; height: 16px; display: grid; place-items: center; border: 1px solid #cfd1cd; border-radius: 50%; color: #fff; font-style: normal; }
+.model-cards button.selected i { border-color: #ff5828; background: #ff5828; }
+.model-cards button svg { width: 11px; height: 11px; }
+.model-cards strong { font-size: 13px; font-weight: 650; line-height: 18px; }
+.model-cards span { color: #727672; font-size: 12px; line-height: 17px; }
 .model-cards span.installed { color: #2c9a56; }
 .ai-options-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 9px; }
 .select-field { min-width: 0; display: grid; gap: 5px; margin-top: 12px; color: #4b4f4b; font-size: 11px; }
@@ -194,7 +197,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .api-hint { margin: 0; color: #747874; font-size: 10px; line-height: 1.55; }
 .settings-status { display: flex; align-items: flex-start; gap: 7px; padding: 9px 10px; border-radius: 7px; color: #844229; background: #fff2ec; font-size: 10px; line-height: 1.5; }
 .settings-status svg { flex: 0 0 auto; width: 14px; height: 14px; }
-.model-provider-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.model-provider-actions { position: sticky; bottom: -18px; z-index: 2; display: flex; justify-content: flex-end; gap: 8px; padding-block: 10px; border-top: 1px solid #e5e6e2; background: #fff; }
 .model-provider-actions button { height: 36px; display: flex; align-items: center; gap: 6px; padding: 0 11px; border: 1px solid #d9dad6; border-radius: 7px; color: #555955; background: #fff; cursor: pointer; font-size: 11px; }
 .model-provider-actions button.confirm { border-color: #ff5828; color: #fff; background: #ff5828; }
 .model-provider-actions button:disabled { opacity: .55; cursor: default; }

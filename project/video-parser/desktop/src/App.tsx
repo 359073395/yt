@@ -43,11 +43,11 @@ import {
   type AiTranslationSettings,
   type TranscriptMode,
   type TranslationProvider,
-  type TranslationInput,
   extractSharedUrls,
   platformName,
 } from './core'
-import { clearTranslationModel, preloadTranslationModel, toTranslationLanguage, translateToChinese, translateWithAi } from './translator'
+import { clearTranslationModel, preloadTranslationModel } from './translator'
+import { finishTranslation } from './translation-job'
 
 interface PendingItem extends MediaPreview {
   id: string
@@ -655,44 +655,17 @@ function App() {
           }
           const request: DownloadRequest = { job_id: task.id, url: task.url, options }
           const result = await invoke<DownloadResult>('download_item', { request })
-          let finalMessage = result.warning || '所选内容已保存'
-          if (translationTarget === 'zh') {
-            if (!result.transcript_available) {
-              finalMessage = `${finalMessage}；没有生成可翻译的字幕，中文翻译已跳过`
-            } else {
-              const sourceLanguage = toTranslationLanguage(result.source_language)
-              if (sourceLanguage === 'zh') {
-                finalMessage = `${finalMessage}；语音文案已经是中文`
-              } else if (!sourceLanguage) {
-                finalMessage = `${finalMessage}；未能确定原文语言，中文翻译已跳过`
-              } else {
-              setTasks((current) => current.map((item) => item.id === task.id
-                ? { ...item, title: result.title, platform: result.platform || item.platform, status: 'transcribing', percent: 0, outputDir: result.output_dir, sourceLanguage: result.source_language, message: '正在翻译为中文' }
-                : item))
-              try {
-                if (translationProvider === 'local') await translationReady
-                const translationInput = await invoke<TranslationInput>('translation_input', {
-                  request: { output_dir: result.output_dir, source_language: result.source_language },
-                })
-                const translationProgressHandler = (percent: number, detail: string) => setTasks((current) => current.map((item) => item.id === task.id
-                  ? { ...item, status: 'transcribing', percent, message: detail }
-                  : item))
-                const sourceTexts = translationInput.segments.map((segment) => segment.text)
-                const translations = translationProvider === 'api'
-                  ? await translateWithAi(sourceTexts, sourceLanguage, translationProgressHandler)
-                  : await translateToChinese(sourceTexts, sourceLanguage, runtime!.model_server_url, translationProgressHandler)
-                await invoke('save_translation', {
-                  request: { output_dir: result.output_dir, segments: translationInput.segments, translations },
-                })
-                finalMessage = `${finalMessage}；中文翻译和双语字幕已保存`
-              } catch (error) {
-                finalMessage = `${finalMessage}；中文翻译失败：${String(error)}`
-              }
-              }
-            }
-          }
+          setPendingItems((current) => current.map((item) => item.id === source.id
+            ? { ...item, title: result.title, platform: result.platform || item.platform, error: null }
+            : item))
+          const outcome = await finishTranslation(result, {
+            target: translationTarget, provider: translationProvider,
+            modelBaseUrl: runtime!.model_server_url, ready: translationReady,
+          }, (percent, detail) => setTasks((current) => current.map((item) => item.id === task.id
+            ? { ...item, title: result.title, platform: result.platform || item.platform, status: 'transcribing', percent, outputDir: result.output_dir, sourceLanguage: result.source_language, message: detail }
+            : item)))
           setTasks((current) => current.map((item) => item.id === task.id
-            ? { ...item, title: result.title, platform: result.platform || item.platform, status: 'completed', percent: 100, outputDir: result.output_dir, message: finalMessage }
+            ? { ...item, title: result.title, platform: result.platform || item.platform, ...outcome, percent: 100, outputDir: result.output_dir, sourceLanguage: result.source_language }
             : item))
         } catch (error) {
           const detail = String(error)
@@ -809,7 +782,8 @@ function App() {
                     <div className="media-summary"><div className="media-thumb">{item.thumbnail ? <img src={item.thumbnail} alt="" onError={() => setPendingItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, thumbnail: null } : entry))} /> : <Video />}<span>{formatDuration(item.duration)}</span></div><div className="media-copy"><strong title={item.title}>{item.title}</strong><span>{item.platform} · {item.uploader}</span>{item.error && <small title={item.error}>预览受限，下载时会再次尝试</small>}</div></div>
                     <select value={item.quality} aria-label={`${item.title} 视频清晰度`} onChange={(event) => setPendingItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, quality: event.target.value } : entry))}><option value="best">最佳</option><option value="2160">4K</option><option value="1080">1080P</option><option value="720">720P</option><option value="480">480P</option></select>
                     <div className="media-tags">{includeVideo && <span><Video />视频</span>}{includeThumbnail && <span><Image />封面</span>}{includeDescription && <span><FileText />平台文案</span>}{includeSubtitle && <span><Subtitles />字幕</span>}</div>
-                    <div className={`row-status ${task?.status || 'waiting'}`} title={task?.message}>{!task ? <><span>等待中</span></> : task.status === 'completed' ? <><strong><Check />已完成</strong></> : task.status === 'failed' ? <><strong><AlertCircle />失败</strong><small>查看提示</small></> : task.status === 'cancelled' ? <><span>已取消</span></> : <><strong>{task.status === 'transcribing' ? (task.message.includes('翻译') ? '翻译中' : '提取文案') : task.status === 'queued' ? '排队中' : `下载中 ${Math.round(task.percent)}%`}</strong>{speed && <small>{speed}</small>}</>}</div>
+                    <div className={`row-status ${task?.status || 'waiting'}`} title={task?.message}>{!task ? <><span>等待中</span></> : task.status === 'completed' ? <><strong><Check />已完成</strong></> : task.status === 'partial' ? <strong><AlertCircle />未全部完成</strong> : task.status === 'failed' ? <strong><AlertCircle />失败</strong> : task.status === 'cancelled' ? <><span>已取消</span></> : <><strong>{task.status === 'transcribing' ? (task.message.includes('翻译') ? '翻译中' : '提取文案') : task.status === 'queued' ? '排队中' : `下载中 ${Math.round(task.percent)}%`}</strong>{speed && <small>{speed}</small>}</>}</div>
+                    {task && (task.status === 'partial' || task.status === 'failed') && <p className="row-issue" role="status">{task.message}</p>}
                     {item.loading && <div className="row-loading"><LoaderCircle className="spin" />读取中</div>}
                   </article>
                 )
@@ -851,7 +825,7 @@ function App() {
 
           <section className="setting-section ai-section">
             <div className="section-row"><div><h2>识别模型</h2><p>已安装模型可以随时切换</p></div><button className="manage-models" type="button" onClick={openModels}>管理模型</button></div>
-            <div className="model-cards">{runtime?.models.map((model) => <button type="button" className={model.id === modelId ? 'selected' : ''} key={model.id} onClick={() => chooseModelFromPanel(model.id)}><i>{model.id === modelId && <Check />}</i><strong>{model.name.replace(' · ', ' ')}</strong><span className={model.installed ? 'installed' : ''}>{model.installed ? '已安装' : '未下载'}</span></button>)}</div>
+            <div className="model-cards">{runtime?.models.map((model) => <button type="button" className={model.id === modelId ? 'selected' : ''} aria-pressed={model.id === modelId} key={model.id} onClick={() => chooseModelFromPanel(model.id)}><div className="model-card-heading"><i aria-hidden="true">{model.id === modelId && <Check />}</i><strong>{model.name.split(' · ')[0]}</strong></div><span>{model.name.split(' · ')[1]}</span><span className={model.installed ? 'installed' : ''}>{model.installed ? '已安装' : '未下载'}</span></button>)}</div>
             <div className="ai-options-grid">
               <label className="select-field"><span>提取方式</span><select value={transcriptMode} onChange={(event) => requestTranscriptMode(event.target.value as TranscriptMode)}><option value="none">不提取语音文案</option><option value="auto">字幕优先，AI 兜底</option><option value="ai">始终 AI 识别语音</option><option value="native">仅平台字幕</option></select></label>
               <label className="select-field"><span>来源语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="auto">自动检测</option><option value="zh">中文</option><option value="en">英语</option><option value="id">印尼语</option><option value="ja">日语</option><option value="ko">韩语</option><option value="es">西班牙语</option></select></label>

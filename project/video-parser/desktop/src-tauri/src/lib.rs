@@ -921,13 +921,28 @@ async fn translate_with_ai(
     }
     tauri::async_runtime::spawn_blocking(move || {
         let (base_url, model, api_key) = saved_ai_credentials(&app)?;
-        call_ai_translation(
+        let started = std::time::Instant::now();
+        runtime_log(
+            &app,
+            format!("ai_translation_start segments={}", request.texts.len()),
+        );
+        let result = call_ai_translation(
             &base_url,
             &model,
             &api_key,
             &request.texts,
             &request.source_language,
-        )
+        );
+        runtime_log(
+            &app,
+            format!(
+                "ai_translation_finish success={} segments={} elapsed_ms={}",
+                result.is_ok(),
+                request.texts.len(),
+                started.elapsed().as_millis()
+            ),
+        );
+        result
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2544,7 +2559,7 @@ fn translation_input(request: TranslationInputRequest) -> Result<TranslationInpu
     if !output_dir.is_dir() {
         return Err("任务输出目录不存在".into());
     }
-    let preferred = ["语音识别字幕.srt", "字幕.srt"];
+    let preferred = ["字幕.srt", "语音识别字幕.srt"];
     let subtitle = preferred
         .iter()
         .map(|name| output_dir.join(name))
@@ -2594,7 +2609,13 @@ fn translation_input(request: TranslationInputRequest) -> Result<TranslationInpu
 
 #[tauri::command]
 fn save_translation(request: SaveTranslationRequest) -> Result<(), String> {
-    if request.segments.is_empty() || request.segments.len() != request.translations.len() {
+    if request.segments.is_empty()
+        || request.segments.len() != request.translations.len()
+        || request
+            .translations
+            .iter()
+            .any(|text| text.trim().is_empty())
+    {
         return Err("翻译结果数量不完整".into());
     }
     let output_dir = PathBuf::from(request.output_dir);
@@ -2633,6 +2654,23 @@ fn save_translation(request: SaveTranslationRequest) -> Result<(), String> {
             .join("\n\n");
         fs::write(output_dir.join("双语字幕.srt"), format!("{subtitles}\n"))
             .map_err(|error| format!("无法保存双语字幕：{error}"))?;
+        let chinese_subtitles = request
+            .segments
+            .iter()
+            .zip(&request.translations)
+            .map(|(segment, translated)| {
+                format!(
+                    "{}\n{} --> {}\n{}",
+                    segment.index, segment.start, segment.end, translated
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        fs::write(
+            output_dir.join("中文字幕.srt"),
+            format!("{chinese_subtitles}\n"),
+        )
+        .map_err(|error| format!("无法保存中文字幕：{error}"))?;
     }
     Ok(())
 }
@@ -2790,6 +2828,8 @@ fn transcribe(
             .map_err(|error| format!("无法保存语音识别文案：{error}"))?;
         let subtitle_text =
             fs::read(&subtitle).map_err(|error| format!("无法读取语音识别字幕：{error}"))?;
+        fs::write(job_dir.join("字幕.srt"), &subtitle_text)
+            .map_err(|error| format!("无法保存当前字幕：{error}"))?;
         fs::write(job_dir.join("语音识别字幕.srt"), subtitle_text)
             .map_err(|error| format!("无法保存语音识别字幕：{error}"))?;
         Ok(
@@ -2804,6 +2844,101 @@ fn transcribe(
     })();
     let _ = fs::remove_dir_all(&scratch);
     result
+}
+
+fn preferred_subtitle_language(info: &Value, requested: &str) -> Option<String> {
+    let native = info.get("subtitles").and_then(Value::as_object);
+    let automatic = info.get("automatic_captions").and_then(Value::as_object);
+    let usable = |key: &str| key != "live_chat";
+    let keys = native
+        .into_iter()
+        .flat_map(|map| map.keys())
+        .chain(automatic.into_iter().flat_map(|map| map.keys()))
+        .filter(|key| usable(key))
+        .collect::<Vec<_>>();
+    let original = keys.iter().find(|key| key.ends_with("-orig"));
+    let source = if requested != "auto" && !requested.is_empty() {
+        Some(requested)
+    } else {
+        info.get("language")
+            .and_then(Value::as_str)
+            .or_else(|| original.map(|key| key.trim_end_matches("-orig")))
+    };
+    if let Some(language) = source {
+        // A single track only: prefer an original-language track, never all translations.
+        return keys
+            .iter()
+            .find(|key| key.as_str() == format!("{language}-orig"))
+            .or_else(|| keys.iter().find(|key| key.as_str() == language))
+            .or_else(|| {
+                keys.iter()
+                    .find(|key| key.starts_with(&format!("{language}-")))
+            })
+            .map(|key| (*key).clone());
+    }
+    let native_keys = native
+        .into_iter()
+        .flat_map(|map| map.keys())
+        .filter(|key| usable(key))
+        .collect::<Vec<_>>();
+    // Without source-language metadata, multiple translated tracks are ambiguous.
+    // Let auto mode transcribe speech instead of choosing alphabetically (e.g. German).
+    (native_keys.len() == 1)
+        .then(|| native_keys[0].clone())
+        .or_else(|| (keys.len() == 1).then(|| keys[0].clone()))
+}
+
+fn download_native_subtitle(
+    app: &tauri::AppHandle,
+    state: &RuntimeState,
+    request: &DownloadRequest,
+    job_dir: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let info_path = job_dir.join("视频信息.json");
+    let info: Value =
+        serde_json::from_str(&fs::read_to_string(&info_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    let Some(language) = preferred_subtitle_language(&info, &request.options.language) else {
+        return Ok(None);
+    };
+    emit_progress(
+        app,
+        &request.job_id,
+        "transcribing",
+        0.0,
+        format!("正在获取 {language} 原文字幕"),
+    );
+    let mut command = Command::new(find_tool(app, "yt-dlp.exe").ok_or("下载引擎尚未就绪")?);
+    command
+        .args([
+            "--encoding",
+            "utf-8",
+            "--no-color",
+            "--skip-download",
+            "--write-subs",
+            "--write-auto-subs",
+            "--sub-langs",
+            &language,
+            "--convert-subs",
+            "srt",
+            "--socket-timeout",
+            "15",
+            "--retries",
+            "1",
+            "--ignore-config",
+        ])
+        .arg("--ffmpeg-location")
+        .arg(find_tool(app, "ffmpeg.exe").ok_or("媒体处理引擎尚未就绪")?)
+        .arg("--paths")
+        .arg(job_dir)
+        .arg("--output")
+        .arg("视频.%(ext)s")
+        .arg("--load-info-json")
+        .arg(&info_path);
+    add_cookie_args(app, &mut command);
+    run_streaming(app, state, &request.job_id, "transcribing", &mut command)?;
+    let path = job_dir.join(format!("视频.{language}.srt"));
+    Ok(path.is_file().then_some(path))
 }
 
 fn execute_download(
@@ -2872,6 +3007,7 @@ fn execute_download(
         .arg("--newline")
         .arg("--no-color")
         .arg("--no-playlist")
+        .args(["--ignore-config", "--socket-timeout", "20", "--retries", "2"])
         .arg("--continue")
         .arg("--windows-filenames")
         .arg("--trim-filenames")
@@ -2900,15 +3036,6 @@ fn execute_download(
     }
     if request.options.include_description {
         command.arg("--write-description");
-    }
-    if request.options.transcript_mode != "none" {
-        command
-            .arg("--write-subs")
-            .arg("--write-auto-subs")
-            .arg("--sub-langs")
-            .arg("all,-live_chat")
-            .arg("--convert-subs")
-            .arg("srt");
     }
     if let Some(prepared) = tiktok_info.as_ref() {
         if let Some(cookie_path) = prepared.cookie_path.as_ref() {
@@ -2943,9 +3070,19 @@ fn execute_download(
         })
         .ok_or("下载完成但没有找到输出文件")?;
     let job_dir = media_file.parent().ok_or("输出目录无效")?.to_path_buf();
-    let (title, platform, native_subtitle) =
-        postprocess_metadata(&job_dir, request.options.include_description)?;
+    let (title, platform, _) = postprocess_metadata(&job_dir, request.options.include_description)?;
     let mut warning = None;
+    let native_subtitle = if matches!(request.options.transcript_mode.as_str(), "native" | "auto") {
+        match download_native_subtitle(&app, &state, &request, &job_dir) {
+            Ok(path) => path,
+            Err(error) => {
+                warning = Some(format!("原文字幕获取失败：{error}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
     let mut source_language = if request.options.language == "auto" {
         native_subtitle
             .as_ref()
@@ -2959,24 +3096,28 @@ fn execute_download(
     if request.options.transcript_mode == "native" || request.options.transcript_mode == "auto" {
         if let Some(subtitle) = native_subtitle.as_ref() {
             match strip_subtitle(subtitle) {
-                Ok(text) => {
+                Ok(text) if !text.trim().is_empty() => {
+                    fs::copy(subtitle, job_dir.join("字幕.srt"))
+                        .map_err(|error| format!("无法保存当前字幕：{error}"))?;
                     fs::write(job_dir.join("字幕文案.txt"), text)
                         .map_err(|error| format!("无法保存字幕文案：{error}"))?;
                     transcript_available = true;
                 }
+                Ok(_) => warning = Some("平台字幕内容为空".into()),
                 Err(error) => warning = Some(error),
             }
         } else if request.options.transcript_mode == "native" {
-            warning = Some("平台没有提供原生字幕".into());
+            warning.get_or_insert_with(|| "平台没有提供可用的原文字幕".into());
         }
     }
     let needs_ai = request.options.transcript_mode == "ai"
-        || (request.options.transcript_mode == "auto" && native_subtitle.is_none());
+        || (request.options.transcript_mode == "auto" && !transcript_available);
     if needs_ai {
         match transcribe(&app, &state, &request, &media_file, &job_dir) {
             Ok(detected) => {
                 source_language = detected;
                 transcript_available = true;
+                warning = None;
             }
             Err(error) => warning = Some(format!("视频已下载，AI 文案未生成：{error}")),
         }
@@ -2984,7 +3125,6 @@ fn execute_download(
     if !request.options.include_video {
         fs::remove_file(&media_file).map_err(|error| format!("无法移除临时视频文件：{error}"))?;
     }
-    emit_progress(&app, &request.job_id, "completed", 100.0, "所选内容已保存");
     Ok(DownloadResult {
         output_dir: job_dir.to_string_lossy().into_owned(),
         title,
@@ -3301,6 +3441,88 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtitle_selection_uses_one_original_language_not_all_translations() {
+        let info = serde_json::json!({"language":"id", "subtitles":{"en":[{}]}, "automatic_captions":{"id-orig":[{}],"id":[{}],"en":[{}],"zh-Hans":[{}]}});
+        assert_eq!(
+            preferred_subtitle_language(&info, "auto").as_deref(),
+            Some("id-orig")
+        );
+        assert_eq!(
+            preferred_subtitle_language(&info, "en").as_deref(),
+            Some("en")
+        );
+        assert!(preferred_subtitle_language(&info, "ja").is_none());
+        assert!(preferred_subtitle_language(
+            &serde_json::json!({"subtitles":{"en":[{}],"de":[{}]}}),
+            "auto"
+        )
+        .is_none());
+        assert!(preferred_subtitle_language(
+            &serde_json::json!({"subtitles":{"live_chat":[{}]}}),
+            "auto"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn translation_files_preserve_timing_and_reject_empty_results() {
+        let directory = std::env::temp_dir().join(format!(
+            "yinglian-translation-test-{}-{}",
+            process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let output_dir = directory.to_string_lossy().into_owned();
+        fs::write(directory.join("字幕.srt"), "1\r\n00:00:00,000 --> 00:00:02,000\r\nHello\r\n\r\n2\r\n00:00:02,000 --> 00:00:04,000\r\nSelamat pagi\r\n").unwrap();
+        let input = translation_input(TranslationInputRequest {
+            output_dir: output_dir.clone(),
+            source_language: "en".into(),
+        })
+        .unwrap();
+        let translated = vec!["你好".to_string(), "早上好".to_string()];
+        save_translation(SaveTranslationRequest {
+            output_dir: output_dir.clone(),
+            segments: input.segments.clone(),
+            translations: translated.clone(),
+        })
+        .unwrap();
+        let chinese = parse_srt(&directory.join("中文字幕.srt")).unwrap();
+        let bilingual = parse_srt(&directory.join("双语字幕.srt")).unwrap();
+        assert_eq!(chinese.len(), 2);
+        for (index, segment) in chinese.iter().enumerate() {
+            assert_eq!(segment.start, input.segments[index].start);
+            assert_eq!(segment.end, input.segments[index].end);
+            assert_eq!(segment.text, translated[index]);
+            assert!(bilingual[index].text.contains(&input.segments[index].text));
+            assert!(bilingual[index].text.contains(&translated[index]));
+        }
+        assert_eq!(
+            fs::read_to_string(directory.join("中文翻译.txt")).unwrap(),
+            "你好\n早上好"
+        );
+        assert!(save_translation(SaveTranslationRequest {
+            output_dir,
+            segments: input.segments,
+            translations: vec!["".into(), "".into()]
+        })
+        .is_err());
+        // Only this uniquely named test directory and its known outputs are removed.
+        for name in [
+            "字幕.srt",
+            "中文字幕.srt",
+            "双语字幕.srt",
+            "中文翻译.txt",
+            "双语文案.txt",
+        ] {
+            fs::remove_file(directory.join(name)).unwrap();
+        }
+        fs::remove_dir(directory).unwrap();
+    }
 
     #[test]
     fn ai_endpoint_accepts_common_openai_urls() {
