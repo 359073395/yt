@@ -64,6 +64,23 @@ it('preserves segment order across multiple API batches', async () => {
   expect(mockedInvoke).toHaveBeenLastCalledWith('save_translation', { request: { output_dir: 'qa', segments, translations: segments.map(segment => `译文 ${segment.text}`) } })
 })
 
+it('does not start cancelled translations or write a late response', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  expect((await finishTranslation(result, { ...options, signal: controller.signal }, vi.fn())).status).toBe('cancelled')
+  expect(mockedInvoke).not.toHaveBeenCalled()
+  const during = new AbortController()
+  mockedInvoke.mockImplementation(async () => { during.abort(); return ['你好'] })
+  expect((await finishTranslation(result, { ...options, signal: during.signal }, vi.fn())).status).toBe('cancelled')
+  expect(mockedInvoke.mock.calls.some(call => call[0] === 'save_translation')).toBe(false)
+})
+
+it.each([[''], [null], null])('rejects empty or malformed translations %j', async value => {
+  mockedInvoke.mockResolvedValue(value)
+  expect((await finishTranslation(result, options, vi.fn())).status).toBe('partial')
+  expect(mockedInvoke.mock.calls.some(call => call[0] === 'save_translation')).toBe(false)
+})
+
 it('saves Chinese speech without an unnecessary translation API call', async () => {
   const chinese = { ...result, source_language: 'zh', segments: [{ ...result.segments[0], text: '你好' }] }
   expect((await finishTranslation(chinese, options, vi.fn())).status).toBe('completed')

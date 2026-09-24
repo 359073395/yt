@@ -11,3 +11,5 @@ src-tauri/icons/icon.icns
 src-tauri/resources/bin/*
 !src-tauri/resources/bin/README.txt
 !src-tauri/resources/bin/runtime-manifest.json
+!src-tauri/resources/bin/yt-dlp-plugins/
+__pycache__/

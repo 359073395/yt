@@ -55,8 +55,8 @@ function copyRuntimeFolder(sourceFile, requiredNames) {
 const manifest = { generatedAt: new Date().toISOString(), components: {} }
 
 const ytDlpPath = join(binDir, 'yt-dlp.exe')
-await download('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe', ytDlpPath)
-manifest.components.ytDlp = { source: 'https://github.com/yt-dlp/yt-dlp/releases/latest', bytes: statSync(ytDlpPath).size }
+await download('https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe', ytDlpPath)
+manifest.components.ytDlp = { source: 'https://github.com/yt-dlp/yt-dlp/releases/tag/2026.08.19', bytes: statSync(ytDlpPath).size }
 
 const ffmpegRelease = await json('https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest')
 const ffmpegAsset = ffmpegRelease.assets.find((asset) => asset.name === 'ffmpeg-master-latest-win64-lgpl-shared.zip')

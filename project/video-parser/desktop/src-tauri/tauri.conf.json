@@ -1,8 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "影链工坊",
-  "version": "1.1.8",
-  "identifier": "org.yinglian.desktop",
+  "productName": "跑量影链工坊",
+  "version": "1.10.0",
+  "identifier": "org.yinglian.desktop.preview",
+  "mainBinaryName": "paoliang-preview",
   "build": {
     "beforeDevCommand": "npm run dev:web",
     "devUrl": "http://localhost:1420",
@@ -13,11 +14,11 @@
     "windows": [
       {
         "label": "main",
-        "title": "影链工坊",
-        "width": 1240,
-        "height": 780,
-        "minWidth": 1000,
-        "minHeight": 720,
+        "title": "跑量影链工坊 1.10.0",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 720,
+        "minHeight": 480,
         "center": true,
         "resizable": true,
         "fullscreen": false
@@ -36,7 +37,9 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "displayLanguageSelector": false
+        "languages": ["SimpChinese"],
+        "displayLanguageSelector": false,
+        "compression": "lzma"
       }
     }
   },
@@ -44,7 +47,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI1NjJDOTAxMTg3NTJFRDYKUldUV0xuVVlBY2xpdFR4Y0dLTDdkTkpSUWVkOUkraEUzZEpvVWREdzAzSFpoYTZ0L1dId1pUY1oK",
       "endpoints": [
-        "https://github.com/359073395/yt/releases/latest/download/latest.json"
+        "https://github.com/359073395/yt/releases/latest/download/paoliang-latest.json"
       ],
       "windows": {
         "installMode": "passive"

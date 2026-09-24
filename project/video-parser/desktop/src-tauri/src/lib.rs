@@ -19,6 +19,18 @@ use tauri_plugin_dialog::DialogExt;
 use tiny_http::{Header, Response, Server, StatusCode};
 use tungstenite::{connect, stream::MaybeTlsStream, Message};
 use url::Url;
+mod team;
+mod library;
+mod automation;
+mod live;
+mod accounts;
+mod network;
+#[cfg(feature = "team-smoke")]
+pub use team::run_smoke as run_team_smoke;
+#[cfg(feature = "team-smoke")]
+pub use automation::run_smoke as run_automation_smoke;
+#[cfg(feature = "team-smoke")]
+pub use accounts::run_smoke as run_account_smoke;
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
     Foundation::LocalFree,
@@ -69,6 +81,7 @@ fn runtime_log(app: &tauri::AppHandle, event: impl AsRef<str>) {
 #[derive(Clone)]
 struct RuntimeState {
     processes: Arc<Mutex<HashMap<String, u32>>>,
+    cancelled: Arc<Mutex<HashSet<String>>>,
     cancel_model: Arc<AtomicBool>,
     model_root: Arc<RwLock<PathBuf>>,
     model_server_url: String,
@@ -85,7 +98,8 @@ struct ModelInfo {
 
 #[derive(Serialize)]
 struct RuntimeInfo {
-    version: &'static str,
+    version: String,
+    preview_build: bool,
     default_download_dir: String,
     yt_dlp_available: bool,
     ffmpeg_available: bool,
@@ -102,6 +116,8 @@ struct RuntimeInfo {
 #[derive(Clone, Deserialize)]
 struct DownloadOptions {
     download_dir: String,
+    #[serde(default)]
+    category: Option<String>,
     quality: String,
     include_video: bool,
     include_thumbnail: bool,
@@ -118,8 +134,8 @@ struct DownloadRequest {
     options: DownloadOptions,
 }
 
-#[derive(Serialize)]
-struct DownloadResult {
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DownloadResult {
     output_dir: String,
     title: String,
     platform: String,
@@ -138,7 +154,7 @@ struct ProfileRequest {
     limit: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ProfileItem {
     url: String,
     title: String,
@@ -723,15 +739,7 @@ fn edge_profile_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 fn login_profile_exists(app: &tauri::AppHandle) -> bool {
-    edge_profile_dir(app)
-        .map(|dir| {
-            dir.join("Default")
-                .join("Network")
-                .join("Cookies")
-                .is_file()
-                || dir.join("Default").join("Cookies").is_file()
-        })
-        .unwrap_or(false)
+    accounts::has_session(app, "douyin")
 }
 
 #[tauri::command]
@@ -760,7 +768,9 @@ fn runtime_info(
         .to_string();
 
     Ok(RuntimeInfo {
-        version: env!("CARGO_PKG_VERSION"),
+        version: app.package_info().version.to_string(),
+        // The storage identifier stays stable when promoting beta users to 1.10.
+        preview_build: app.package_info().version.pre.as_str().len() > 0,
         default_download_dir: default_download_dir(&app)?.to_string_lossy().into_owned(),
         yt_dlp_available: find_tool(&app, "yt-dlp.exe").is_some(),
         ffmpeg_available: find_tool(&app, "ffmpeg.exe").is_some(),
@@ -996,6 +1006,7 @@ fn launch_login(app: tauri::AppHandle, platform: String) -> Result<String, Strin
     let profile = edge_profile_dir(&app)?;
     fs::create_dir_all(&profile).map_err(|error| format!("无法创建登录会话目录：{error}"))?;
     let mut command = Command::new(edge);
+    network::browser(&mut command, url);
     hidden(&mut command)
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg("--no-first-run")
@@ -1004,24 +1015,25 @@ fn launch_login(app: tauri::AppHandle, platform: String) -> Result<String, Strin
     command
         .spawn()
         .map_err(|error| format!("官方登录窗口启动失败：{error}"))?;
-    Ok("官方登录窗口已打开；完成登录后直接关闭该窗口，软件会复用本地会话。".into())
+    Ok("官方登录窗口已打开；完成登录后请关闭窗口，账号页会自动检查并保存会话。登录窗口未关闭时可能占用会话文件。".into())
 }
 
-fn add_cookie_args(app: &tauri::AppHandle, command: &mut Command) {
+fn add_cookie_args(app: &tauri::AppHandle, command: &mut Command, source_url: &str) -> Option<accounts::CookieLease> {
+    network::yt(command, source_url);
+    // A per-command, per-platform snapshot avoids a locked browser DB breaking every platform.
+    if let Some(cookie) = accounts::for_download(app, source_url) {
+        command.arg("--cookies").arg(&cookie.0);
+        return Some(cookie);
+    }
+    if !is_douyin_url(source_url) { return None; }
     if let Some(cookie_file) = public_edge_profile_dir(app)
         .ok()
         .map(|profile| profile.join("yinglian-public-cookies.txt"))
         .filter(|path| path.is_file())
     {
         command.arg("--cookies").arg(cookie_file);
-    } else if login_profile_exists(app) {
-        let Some(profile) = edge_profile_dir(app).ok() else {
-            return;
-        };
-        command
-            .arg("--cookies-from-browser")
-            .arg(format!("edge:{}", profile.join("Default").display()));
     }
+    None
 }
 
 fn is_douyin_url(value: &str) -> bool {
@@ -1038,7 +1050,7 @@ fn is_douyin_url(value: &str) -> bool {
 }
 
 fn resolve_douyin_url(value: &str) -> Result<Url, String> {
-    let client = reqwest::blocking::Client::builder()
+    let client = network::client(value)
         .redirect(reqwest::redirect::Policy::limited(8))
         .timeout(Duration::from_secs(20))
         .build()
@@ -1204,10 +1216,13 @@ fn scan_profile_with_edge(
     target: &str,
     limit: usize,
 ) -> Result<Vec<ProfileItem>, String> {
+    static PROFILE_SCAN: Mutex<()> = Mutex::new(());
+    let _scan = PROFILE_SCAN.try_lock().map_err(|_| "另一个抖音主页正在检查，请稍后重试")?;
     fs::create_dir_all(profile).map_err(|error| format!("无法创建公开会话目录：{error}"))?;
     let active_port = profile.join("DevToolsActivePort");
     let _ = fs::remove_file(&active_port);
     let mut command = Command::new(edge);
+    network::browser(&mut command, target);
     hidden(&mut command)
         .arg("--disable-gpu")
         .arg("--disable-blink-features=AutomationControlled")
@@ -1243,11 +1258,11 @@ fn scan_profile_with_edge(
         }
         let port = port.ok_or("官方公开主页没有正常启动")?;
         let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(2))
             .build()
             .map_err(|error| error.to_string())?;
         let mut websocket = None;
-        for _ in 0..40 {
+        for _ in 0..10 {
             if let Ok(response) = client
                 .get(format!("http://127.0.0.1:{port}/json/list"))
                 .send()
@@ -1283,6 +1298,11 @@ fn scan_profile_with_edge(
         let websocket = websocket.ok_or("无法连接官方公开主页")?;
         let (mut socket, _) = connect(websocket.as_str())
             .map_err(|error| format!("公开主页读取通道失败：{error}"))?;
+        if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+            stream.set_read_timeout(Some(Duration::from_secs(90))).map_err(|e| e.to_string())?;
+            stream.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
         // Establish the same first-party visitor session as a normal homepage visit,
         // then navigate to the requested work/profile inside that browser context.
         thread::sleep(Duration::from_secs(5));
@@ -1298,6 +1318,7 @@ fn scan_profile_with_edge(
             ))
             .map_err(|error| format!("官方公开页面跳转失败：{error}"))?;
         loop {
+            if std::time::Instant::now() >= deadline { return Err("公开主页跳转超时，请检查平台验证或网络".into()); }
             let Message::Text(text) = socket
                 .read()
                 .map_err(|error| format!("官方公开页面跳转中断：{error}"))?
@@ -1365,6 +1386,7 @@ fn scan_profile_with_edge(
             .send(Message::Text(request.to_string().into()))
             .map_err(|error| format!("公开主页扫描启动失败：{error}"))?;
         loop {
+            if std::time::Instant::now() >= deadline { return Err("公开主页扫描超时，请检查平台验证或网络".into()); }
             let message = socket
                 .read()
                 .map_err(|error| format!("公开主页扫描中断：{error}"))?;
@@ -1456,12 +1478,17 @@ async fn scan_profile(
     app: tauri::AppHandle,
     request: ProfileRequest,
 ) -> Result<Vec<ProfileItem>, String> {
+    tauri::async_runtime::spawn_blocking(move || scan_profile_sync(&app, request))
+        .await.map_err(|error| error.to_string())?
+}
+
+fn scan_profile_sync(app: &tauri::AppHandle, request: ProfileRequest) -> Result<Vec<ProfileItem>, String> {
     if request.limit == 0 || request.limit > 500 {
         return Err("主页数量必须在 1 到 500 之间".into());
     }
     let url = validate_url(&request.url)?;
+    let _ = accounts::sync(app, false);
     let yt_dlp = find_tool(&app, "yt-dlp.exe").ok_or("下载引擎尚未就绪")?;
-    tauri::async_runtime::spawn_blocking(move || {
         if is_douyin_url(&url) {
             return scan_douyin_profile(&app, &url, request.limit);
         }
@@ -1473,10 +1500,9 @@ async fn scan_profile(
             .arg("--playlist-end")
             .arg(request.limit.to_string())
             .arg(url);
-        add_cookie_args(&app, &mut command);
-        let output = command
-            .output()
-            .map_err(|error| format!("主页扫描启动失败：{error}"))?;
+        let _cookies = add_cookie_args(&app, &mut command, &request.url);
+        command.args(["--socket-timeout", "15", "--retries", "1", "--extractor-retries", "1"]);
+        let output = live::capture(&mut command, Duration::from_secs(120), &AtomicBool::new(false))?;
         if !output.status.success() {
             return Err(user_error(&String::from_utf8_lossy(&output.stderr)));
         }
@@ -1525,9 +1551,6 @@ async fn scan_profile(
             );
         }
         Ok(items)
-    })
-    .await
-    .map_err(|error| error.to_string())?
 }
 
 fn platform_from_preview(source: &str, payload: &Value) -> String {
@@ -1634,7 +1657,7 @@ fn inline_thumbnail(mut preview: MediaPreview) -> MediaPreview {
         if !url.starts_with("https://") {
             return None;
         }
-        let client = reqwest::blocking::Client::builder()
+        let client = network::client(&preview.url)
             .timeout(Duration::from_secs(6))
             .build()
             .ok()?;
@@ -1674,6 +1697,7 @@ fn inspect_item(app: &tauri::AppHandle, yt_dlp: &Path, source: String) -> MediaP
         Ok(url) => url,
         Err(error) => return fallback(error),
     };
+    let _ = accounts::sync(app, false);
     if is_douyin_url(&url) && !login_profile_exists(app) {
         let profile = match public_edge_profile_dir(app) {
             Ok(profile) => profile,
@@ -1719,8 +1743,9 @@ fn inspect_item(app: &tauri::AppHandle, yt_dlp: &Path, source: String) -> MediaP
         .arg("--no-playlist")
         .arg("--no-warnings")
         .arg(&url);
-    add_cookie_args(app, &mut command);
-    let output = match command.output() {
+    let _cookies = add_cookie_args(app, &mut command, &url);
+    command.args(["--ignore-config", "--socket-timeout", "20", "--retries", "1", "--extractor-retries", "1"]);
+    let output = match live::capture(&mut command, Duration::from_secs(75), &AtomicBool::new(false)) {
         Ok(output) => output,
         Err(error) => return fallback(format!("解析启动失败：{error}")),
     };
@@ -1900,6 +1925,7 @@ fn tiktok_media_with_edge(
     let active_port = profile.join("DevToolsActivePort");
     let _ = fs::remove_file(&active_port);
     let mut command = Command::new(edge);
+    network::browser(&mut command, page_url);
     hidden(&mut command)
         .arg("--headless=new")
         .arg("--edge-skip-compat-layer-relaunch")
@@ -2128,7 +2154,7 @@ fn prepare_tiktok_info_json(
     destination: &Path,
     browser_fallback: bool,
 ) -> Result<PreparedTikTok, String> {
-    let client = reqwest::blocking::Client::builder()
+    let client = network::client(source)
         .redirect(reqwest::redirect::Policy::limited(8))
         .timeout(Duration::from_secs(25))
         .build()
@@ -2367,10 +2393,13 @@ fn parse_percent(line: &str) -> Option<f64> {
     let marker = line.find('%')?;
     let prefix = &line[..marker];
     let start = prefix
-        .rfind(|character: char| !(character.is_ascii_digit() || character == '.'))
-        .map(|index| index + 1)
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !(character.is_ascii_digit() || *character == '.'))
+        .map(|(index, character)| index + character.len_utf8())
         .unwrap_or(0);
-    prefix[start..].trim().parse().ok()
+    let value: f64 = prefix.get(start..)?.trim().parse().ok()?;
+    (value.is_finite() && (0.0..=100.0).contains(&value)).then_some(value)
 }
 
 fn run_streaming(
@@ -2380,6 +2409,7 @@ fn run_streaming(
     phase: &str,
     command: &mut Command,
 ) -> Result<ProcessOutput, String> {
+    if state.cancelled.lock().map_err(|_| "任务状态不可用")?.contains(job_id) { return Err("任务已取消".into()); }
     hidden(command)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -2407,7 +2437,26 @@ fn run_streaming(
     });
 
     let mut result = ProcessOutput::default();
-    for (is_error, line) in receiver {
+    let started = std::time::Instant::now();
+    loop {
+        let cancelled = state.cancelled.lock().map_err(|_| "任务状态不可用")?.contains(job_id);
+        if cancelled || started.elapsed() > Duration::from_secs(1800) {
+            let mut kill = Command::new("taskkill.exe");
+            let _ = hidden(&mut kill).args(["/PID", &child.id().to_string(), "/T", "/F"]).status();
+            let _ = child.kill();
+            let _ = child.wait();
+            state.processes.lock().map_err(|_| "任务状态不可用")?.remove(job_id);
+            return Err(if cancelled { "任务已取消" } else { "单阶段超过 30 分钟，已停止；可缩短任务后重试" }.into());
+        }
+        let (is_error, line) = match receiver.recv_timeout(Duration::from_millis(250)) {
+            Ok(line) => line,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if child.try_wait().map_err(|error| error.to_string())?.is_some() { break; }
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            },
+        };
         if let Some(path) = line.strip_prefix("__YINGLIAN_FILE__") {
             result.output_file = Some(PathBuf::from(path.trim()));
         }
@@ -2420,6 +2469,7 @@ fn run_streaming(
             }
             result.errors.push_back(line.clone());
         }
+        if result.lines.len() >= 300 { result.lines.remove(0); }
         result.lines.push(line);
     }
     let status = child
@@ -2431,6 +2481,7 @@ fn run_streaming(
         .map_err(|_| "任务状态不可用")?
         .remove(job_id);
     if !status.success() {
+        if state.cancelled.lock().map_err(|_| "任务状态不可用")?.contains(job_id) { return Err("任务已取消".into()); }
         let detail = result.errors.iter().cloned().collect::<Vec<_>>().join("\n");
         return Err(user_error(&detail));
     }
@@ -2439,14 +2490,24 @@ fn run_streaming(
 
 fn user_error(detail: &str) -> String {
     let lower = detail.to_lowercase();
-    if lower.contains("login") || lower.contains("cookies") || lower.contains("sign in") {
+    if lower.contains("could not copy") && lower.contains("cookie") || lower.contains("database is locked") {
+        "官方登录窗口正在占用会话文件，请关闭该窗口后在“账号”中刷新状态；这不是视频链接失效。".into()
+    } else if lower.contains("decrypt") && lower.contains("cookie") || lower.contains("dpapi") {
+        "浏览器会话解密失败，请在“账号”中重新同步；这不是视频下载权限不足。".into()
+    } else if lower.contains("429") || lower.contains("too many requests") {
+        "平台请求过于频繁（429），请暂停一段时间，不要反复登录或重试。".into()
+    } else if lower.contains("403") {
+        "平台拒绝请求（403），可能是验证、地区或访问权限限制；这不一定是 Cookie 失效。".into()
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "连接超时，请检查网络或代理后重试；已保存文件会保留。".into()
+    } else if lower.contains("login") || lower.contains("cookies") || lower.contains("sign in") {
         "平台要求登录或登录会话已经失效；请先打开对应平台的官方登录窗口。".into()
     } else if lower.contains("unsupported url") {
         "当前下载引擎暂不支持该链接；请确认粘贴的是公开作品或主页链接。".into()
     } else if lower.contains("private") || lower.contains("not available") {
         "该内容不是公开可用状态，或受到地区/账号权限限制。".into()
     } else if lower.contains("unable to extract") {
-        "平台页面已经变化，当前解析引擎暂时无法读取；请更新影链工坊后重试。".into()
+        "平台页面已经变化，当前解析引擎暂时无法读取；请更新跑量影链工坊后重试。".into()
     } else {
         detail
             .lines()
@@ -2650,12 +2711,7 @@ fn transcribe(
             .arg("-c:a")
             .arg("pcm_s16le")
             .arg(&audio);
-        let status = ffmpeg_command
-            .status()
-            .map_err(|error| format!("音轨提取启动失败：{error}"))?;
-        if !status.success() {
-            return Err("无法从视频中提取语音".into());
-        }
+        run_streaming(app, state, &request.job_id, "transcribing", &mut ffmpeg_command)?;
 
         emit_progress(
             app,
@@ -2799,7 +2855,7 @@ fn download_native_subtitle(
         .arg("视频.%(ext)s")
         .arg("--load-info-json")
         .arg(&info_path);
-    add_cookie_args(app, &mut command);
+    let _cookies = add_cookie_args(app, &mut command, &request.url);
     run_streaming(app, state, &request.job_id, "transcribing", &mut command)?;
     let path = job_dir.join(format!("视频.{language}.srt"));
     Ok(path.is_file().then_some(path))
@@ -2911,9 +2967,12 @@ fn execute_download(
     request: DownloadRequest,
 ) -> Result<DownloadResult, String> {
     let url = validate_url(&request.url)?;
-    let output_root = PathBuf::from(request.options.download_dir.trim());
+    let mut output_root = PathBuf::from(request.options.download_dir.trim());
     if output_root.as_os_str().is_empty() {
         return Err("请选择下载目录".into());
+    }
+    if let Some(category) = &request.options.category {
+        output_root = library::category_path(&output_root, category)?;
     }
     fs::create_dir_all(&output_root).map_err(|error| format!("无法创建下载目录：{error}"))?;
     let workspace = DownloadWorkspace::create(&output_root, &request.job_id)?;
@@ -2927,7 +2986,8 @@ fn execute_download(
         "正在读取视频信息",
     );
 
-    if is_douyin_url(&url) {
+    let _ = accounts::sync(&app, false);
+    if is_douyin_url(&url) && !login_profile_exists(&app) {
         let profile = public_edge_profile_dir(&app)?;
         if !public_session_fresh(&profile) {
             emit_progress(
@@ -2999,8 +3059,11 @@ fn execute_download(
             .arg("--convert-thumbnails")
             .arg("jpg");
     }
+    let _cookies;
     if let Some(prepared) = tiktok_info.as_ref() {
         if let Some(cookie_path) = prepared.cookie_path.as_ref() {
+            _cookies = None;
+            network::yt(&mut command, &url);
             command
                 .arg("--impersonate")
                 .arg("Edge-101:Windows-10")
@@ -3009,11 +3072,11 @@ fn execute_download(
                 .arg("--http-chunk-size")
                 .arg("1M");
         } else {
-            add_cookie_args(&app, &mut command);
+            _cookies = add_cookie_args(&app, &mut command, &url);
         }
         command.arg("--load-info-json").arg(&prepared.info_path);
     } else {
-        add_cookie_args(&app, &mut command);
+        _cookies = add_cookie_args(&app, &mut command, &url);
         command.arg(&url);
     }
     let download = run_streaming(&app, &state, &request.job_id, "downloading", &mut command);
@@ -3154,7 +3217,9 @@ async fn download_item(
     let result =
         tauri::async_runtime::spawn_blocking(move || execute_download(app, runtime, request))
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string());
+    if let Ok(mut cancelled) = state.cancelled.lock() { cancelled.remove(&job_id); }
+    let result = result?;
     match &result {
         Ok(download) => runtime_log(
             &log_app,
@@ -3177,13 +3242,14 @@ async fn download_item(
 
 #[tauri::command]
 fn cancel_job(state: State<'_, RuntimeState>, job_id: String) -> Result<(), String> {
+    state.cancelled.lock().map_err(|_| "任务状态不可用")?.insert(job_id.clone());
     let process_id = state
         .processes
         .lock()
         .map_err(|_| "任务状态不可用")?
         .get(&job_id)
-        .copied()
-        .ok_or("任务已经结束")?;
+        .copied();
+    let Some(process_id) = process_id else { return Ok(()); };
     let mut command = Command::new("taskkill.exe");
     hidden(&mut command)
         .arg("/PID")
@@ -3393,21 +3459,126 @@ fn delete_translation_model(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 pub fn run() {
+    #[allow(unused_mut)]
+    let mut context = tauri::generate_context!();
+    #[cfg(feature = "team-smoke")]
+    if std::env::var_os("PAOLIANG_NETWORK_QA").is_some() {
+        context.config_mut().identifier = format!("org.yinglian.network-qa-{}", process::id());
+        if let Some(window) = context.config_mut().app.windows.first_mut() {
+            window.title = "跑量影链工坊 · 代理验收（隔离配置）".into();
+        }
+    }
+    #[cfg(feature = "team-smoke")]
+    if std::env::var_os("YINGLIAN_PERSONAL_PREVIEW").is_some() {
+        context.config_mut().identifier = "org.yinglian.personal-preview".into();
+        if let Some(window) = context.config_mut().app.windows.first_mut() {
+            window.title = "跑量影链工坊 · 个人直连测试版（未安装）".into();
+        }
+    }
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Logical defaults can exceed a laptop's work area at 125–200% DPI.
+            // Reserve space for decorations/taskbar; never change system scaling.
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(Some(monitor)) = window.current_monitor() {
+                    let area = monitor.work_area();
+                    let scale = monitor.scale_factor();
+                    let width = (area.size.width as f64 / scale - 32.0).clamp(320.0, 1280.0);
+                    let height = (area.size.height as f64 / scale - 64.0).clamp(300.0, 800.0);
+                    let _ = window.set_min_size(Some(tauri::LogicalSize::new(width.min(720.0), height.min(480.0))));
+                    let _ = window.set_size(tauri::LogicalSize::new(width, height));
+                    // Center the *outer* window inside the work area, not the
+                    // full monitor: the taskbar may be on any edge.
+                    if let Ok(outer) = window.outer_size() {
+                        let x = area.position.x + area.size.width.saturating_sub(outer.width) as i32 / 2;
+                        let y = area.position.y + area.size.height.saturating_sub(outer.height) as i32 / 2;
+                        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+                    }
+                }
+            }
+            network::init(app.handle())?;
+            let panic_app = app.handle().clone();
+            std::panic::set_hook(Box::new(move |info| {
+                // Do not log arbitrary panic payloads: they can contain signed URLs or cookies.
+                if let Some(location) = info.location() {
+                    runtime_log(&panic_app, format!("panic file={} line={} column={}", location.file(), location.line(), location.column()));
+                }
+            }));
             let model_root = Arc::new(RwLock::new(model_dir(app.handle())?));
             let model_server_url = start_model_server(model_root.clone())?;
             app.manage(RuntimeState {
                 processes: Arc::new(Mutex::new(HashMap::new())),
+                cancelled: Arc::new(Mutex::new(HashSet::new())),
                 cancel_model: Arc::new(AtomicBool::new(false)),
                 model_root,
                 model_server_url,
             });
+            team::start(app.handle())?;
+            automation::start(app.handle())?;
+            let show =
+                tauri::menu::MenuItem::with_id(app, "show", "打开跑量影链工坊", true, None::<&str>)?;
+            let quit = tauri::menu::MenuItem::with_id(
+                app,
+                "quit",
+                "退出（停止收件、订阅和录制）",
+                true,
+                None::<&str>,
+            )?;
+            let menu = tauri::menu::Menu::with_items(app, &[&show, &quit])?;
+            let mut tray = tauri::tray::TrayIconBuilder::new()
+                .tooltip("跑量影链工坊 · 飞书视频收件")
+                .menu(&menu)
+                .on_menu_event(|app, event| {
+                    if event.id.as_ref() == "quit" {
+                        let app = app.clone();
+                        thread::spawn(move || { automation::shutdown(&app); app.exit(0); });
+                    } else if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                });
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.build(app)?;
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if team::enabled(window.app_handle()) || automation::enabled(window.app_handle()) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            automation::automation_snapshot,
+            automation::subscription_add,
+            automation::subscription_action,
+            automation::automation_ack,
+            automation::live_start,
+            automation::live_stop,
+            library::library_load,
+            library::library_save,
+            library::read_bilingual,
+            library::relocate_output,
+            team::team_snapshot,
+            team::team_register,
+            team::team_cancel_register,
+            team::team_open_registration,
+            team::team_confirm_pair,
+            team::team_save,
+            team::team_action,
+            team::team_prepare_text,
+            team::team_text_done,
             runtime_info,
             choose_download_dir,
             choose_model_dir,
@@ -3418,6 +3589,11 @@ pub fn run() {
             translate_with_ai,
             open_directory,
             launch_login,
+            accounts::account_statuses,
+            network::network_settings,
+            network::save_network_settings,
+            network::detect_local_proxy,
+            network::test_network_proxy,
             scan_profile,
             inspect_items,
             download_item,
@@ -3429,13 +3605,35 @@ pub fn run() {
             delete_translation_model,
             save_translation
         ])
-        .run(tauri::generate_context!())
-        .expect("影链工坊启动失败");
+        .run(context)
+        .expect("跑量影链工坊启动失败");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unicode_progress_never_slices_inside_a_character() {
+        for prefix in ["download:", "下载", "文件\u{a0}", "中文标题😃", "进度\u{3000}", "100％ "] {
+            assert_eq!(parse_percent(&format!("{prefix}42.5% 1MiB/s")), Some(42.5));
+            assert_eq!(parse_percent(&format!("{prefix}%")), None);
+        }
+        assert_eq!(parse_percent("download: 100.0%"), Some(100.0));
+        assert_eq!(parse_percent("1000%"), None);
+        assert_eq!(parse_percent("无进度"), None);
+        // Regression covers every UTF-8 scalar before the numeric token, including NBSP.
+        for c in (0..=0x10ffff).filter_map(char::from_u32).filter(|c| !c.is_ascii()) {
+            assert_eq!(parse_percent(&format!("{c}1%")), Some(1.0));
+        }
+    }
+
+    #[test]
+    fn cookie_lock_is_not_reported_as_bad_link_or_missing_login() {
+        let message = user_error("ERROR: Could not copy Chrome cookie database. See issue/7271");
+        assert!(message.contains("占用会话"));
+        assert!(!message.contains("会话已经失效"));
+        assert!(user_error("Failed to decrypt with DPAPI").contains("解密失败"));
+    }
 
     #[test]
     fn subtitle_selection_uses_one_original_language_not_all_translations() {

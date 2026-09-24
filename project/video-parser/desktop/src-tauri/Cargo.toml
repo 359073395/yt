@@ -1,6 +1,6 @@
 [package]
 name = "yinglian-desktop"
-version = "1.1.8"
+version = "1.10.0"
 description = "轻量、非阻塞的本地视频与多语言文案下载工具"
 authors = ["359073395"]
 edition = "2021"
@@ -9,21 +9,46 @@ edition = "2021"
 name = "yinglian_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+team-smoke = []
+
+[[example]]
+name = "team-smoke"
+required-features = ["team-smoke"]
+
+[[example]]
+name = "personal-preview"
+required-features = ["team-smoke"]
+
+[[example]]
+name = "automation-smoke"
+required-features = ["team-smoke"]
+
+[[example]]
+name = "account-smoke"
+required-features = ["team-smoke"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 base64 = "0.22"
+flate2 = "1"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2.11.0"
 tiny_http = "0.12"
 url = "2"
-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+tungstenite = { version = "0.28", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }
+prost = "0.14"
+regex = "1"
+uuid = { version = "1", features = ["v4"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem"] }
 
 [profile.release]
 codegen-units = 1

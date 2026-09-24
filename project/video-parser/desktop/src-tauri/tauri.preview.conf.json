@@ -1,0 +1,35 @@
+{
+  "productName": "跑量影链工坊试用版",
+  "mainBinaryName": "paoliang-preview",
+  "version": "1.1.8-beta.3",
+  "identifier": "org.yinglian.desktop.preview",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "跑量影链工坊 · 试用版 1.1.8-beta.3",
+        "width": 1440,
+        "height": 960,
+        "minWidth": 1000,
+        "minHeight": 720,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ]
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese"],
+        "displayLanguageSelector": false,
+        "compression": "lzma"
+      }
+    }
+  },
+  "plugins": {
+    "updater": { "endpoints": [] }
+  }
+}

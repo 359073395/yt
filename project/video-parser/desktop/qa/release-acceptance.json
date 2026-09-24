@@ -1,0 +1,15 @@
+{
+  "version": "1.1.8",
+  "sourceTrees": {},
+  "checks": {
+    "design": { "status": "passed", "evidence": "design-qa.md" },
+    "native-installer-migration": { "status": "not_tested" },
+    "four-platform-downloads": { "status": "not_tested" },
+    "local-and-api-transcription-translation": { "status": "not_tested" },
+    "feishu-two-users-two-machines": { "status": "not_tested" },
+    "cancel-resume-output-integrity": { "status": "partial" },
+    "live-recording-replay": { "status": "partial", "evidence": "qa/automation-acceptance-20260924.md" },
+    "subscriptions-images-comments": { "status": "partial", "evidence": "qa/automation-acceptance-20260924.md" },
+    "models-engine-update-security": { "status": "partial" }
+  }
+}

@@ -5,6 +5,15 @@ type Pending = { resolve: (value: string[]) => void; reject: (reason: Error) => 
 
 let worker: Worker | null = null
 const pending = new Map<string, Pending>()
+let workerQueue: Promise<unknown> = Promise.resolve()
+let generation = 0
+
+function stopWorker(message: string) {
+  worker?.terminate()
+  worker = null
+  for (const request of pending.values()) request.reject(new Error(message))
+  pending.clear()
+}
 
 function normalizeModelProgress(payload: Record<string, unknown>) {
   const raw = Number(payload.progress ?? 0)
@@ -15,6 +24,8 @@ function normalizeModelProgress(payload: Record<string, unknown>) {
 function getWorker() {
   if (worker) return worker
   worker = new Worker(new URL('./translation-worker.ts', import.meta.url), { type: 'module' })
+  worker.onerror = () => stopWorker('本地翻译引擎异常，已有视频保留，请重试或切换 AI 接口')
+  worker.onmessageerror = () => stopWorker('本地翻译返回数据损坏，请重试')
   worker.onmessage = (event: MessageEvent) => {
     const { requestId, type } = event.data as { requestId: string; type: string }
     const request = pending.get(requestId)
@@ -36,31 +47,53 @@ function getWorker() {
   return worker
 }
 
-function requestWorker(action: 'preload' | 'translate', texts: string[], source: string, modelBaseUrl: string, progress?: ProgressHandler) {
-  return new Promise<string[]>((resolve, reject) => {
-    const requestId = crypto.randomUUID()
-    pending.set(requestId, { resolve, reject, progress })
-    getWorker().postMessage({ requestId, action, texts, source, modelBaseUrl })
+function requestWorker(action: 'preload' | 'translate', texts: string[], source: string, modelBaseUrl: string, progress?: ProgressHandler, signal?: AbortSignal) {
+  const requestedGeneration = generation
+  // One model instance, one inference at a time, including Feishu tasks and preload.
+  const result = workerQueue.catch(() => undefined).then(() => {
+    if (signal?.aborted || requestedGeneration !== generation) throw new Error('翻译已取消')
+    return new Promise<string[]>((resolve, reject) => {
+      const requestId = crypto.randomUUID()
+      let idleTimer: ReturnType<typeof setTimeout>
+      const expire = () => stopWorker('本地翻译长时间未响应，已有文件保留，可重试或切换 AI 接口')
+      const restartIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(expire, 5 * 60_000) }
+      const totalTimer = setTimeout(expire, 30 * 60_000)
+      const abort = () => stopWorker('翻译已取消')
+      const cleanup = () => { clearTimeout(idleTimer); clearTimeout(totalTimer); signal?.removeEventListener('abort', abort); pending.delete(requestId) }
+      pending.set(requestId, {
+        resolve: value => { cleanup(); resolve(value) },
+        reject: error => { cleanup(); reject(error) },
+        progress: (percent, message) => { restartIdle(); progress?.(percent, message) },
+      })
+      signal?.addEventListener('abort', abort, { once: true })
+      restartIdle()
+      try { getWorker().postMessage({ requestId, action, texts, source, modelBaseUrl }) }
+      catch (error) { cleanup(); reject(error) }
+    })
   })
+  workerQueue = result
+  return result
 }
 
 export function preloadTranslationModel(modelBaseUrl: string, progress?: ProgressHandler) {
   return requestWorker('preload', [], 'en', modelBaseUrl, progress).then(() => undefined)
 }
 
-export function translateToChinese(texts: string[], source: string, modelBaseUrl: string, progress?: ProgressHandler) {
-  return requestWorker('translate', texts, source, modelBaseUrl, progress)
+export function translateToChinese(texts: string[], source: string, modelBaseUrl: string, progress?: ProgressHandler, signal?: AbortSignal) {
+  return requestWorker('translate', texts, source, modelBaseUrl, progress, signal)
 }
 
-export async function translateWithAi(texts: string[], source: string, progress?: ProgressHandler) {
+export async function translateWithAi(texts: string[], source: string, progress?: ProgressHandler, signal?: AbortSignal) {
   const translations: string[] = []
   const batchSize = 12
   for (let index = 0; index < texts.length; index += batchSize) {
+    if (signal?.aborted) throw new Error('翻译已取消');
     const chunk = texts.slice(index, index + batchSize)
     const translated = await invoke<string[]>('translate_with_ai', {
       request: { texts: chunk, source_language: source },
     })
-    if (translated.length !== chunk.length) throw new Error('AI 接口返回的翻译条数不一致')
+    if (signal?.aborted) throw new Error('翻译已取消');
+    if (!Array.isArray(translated) || translated.length !== chunk.length || translated.some(text => typeof text !== 'string' || !text.trim())) throw new Error('AI 接口返回的译文缺失或为空')
     translations.push(...translated)
     progress?.(Math.round((translations.length / texts.length) * 100), 'AI 接口正在翻译为中文')
   }
@@ -68,17 +101,12 @@ export async function translateWithAi(texts: string[], source: string, progress?
 }
 
 export function clearTranslationModel() {
-  worker?.terminate()
-  worker = null
-  for (const request of pending.values()) request.reject(new Error('翻译任务已取消'))
-  pending.clear()
+  generation += 1
+  stopWorker('翻译任务已取消')
 }
 
 export function cancelTranslation() {
-  worker?.terminate()
-  worker = null
-  for (const request of pending.values()) request.reject(new Error('翻译任务已取消'))
-  pending.clear()
+  clearTranslationModel()
 }
 
 export function toTranslationLanguage(language: string) {

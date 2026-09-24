@@ -1,33 +1,66 @@
-# Design QA — 影链工坊 Desktop
+# 第 2 版素材工作台 · 视觉与交互验收
 
-## Comparison setup
-
-- Reference: approved desktop redesign at 1488 × 1058.
-- Implementation: native Tauri WebView at 1240 × 780 CSS pixels (captured at 1.25 device scale on a 1920 × 1080 display).
-- Compared in one side-by-side image using the same four-row queue and an active download state.
-
-## Results
-
-- Header, two-column structure, large link input, queue toolbar, four-row queue, settings groups, model cards, and save-path field match the approved hierarchy and visual language.
-- The queue remains the only persistent task-status surface.
-- The right panel shows only the currently active stage, then removes that progress section after completion. The duplicated completed-download row from the reference was intentionally removed per approval.
-- Video, cover, platform text, and subtitles are independently selectable.
-- Batch quality and per-item quality controls are visible and usable.
-- Installed model state and selection are visible; missing models open the first-use download confirmation.
-- The header contains only Update and Models; download storage remains in the main inspector rather than a duplicate settings dialog.
-- The Models dialog shows the complete model path, local/API translation choices, encrypted API-key state, and upstream model retrieval without scrolling at the target viewport.
-- The Models dialog is 840 px wide; its three Whisper choices use one horizontal row so the API form and footer remain above the taskbar at 125% Windows scaling.
-- Queue, inspector, path, button, and model-dialog text was raised to a comfortable 10–14 px range while retaining the approved layout density.
-- No horizontal or vertical scrollbar is visible at the target viewport, and the full primary workflow fits without scrolling.
-- Long titles truncate without pushing controls out of alignment; missing thumbnails fall back to a real icon.
-- Primary, secondary, disabled, selected, downloading, completed, and failed states remain visually distinct.
-
-## Functional visual checks
-
-- Active download: right-side detail progress appears; left queue row also updates without duplicate completion messaging.
-- Completed download: right-side detail progress disappears; the matching queue row changes to completed.
-- AI extraction and translation: detected language replaces the generic language step while the stage is running.
-- AI model selection: a standard dropdown displays every upstream model, switches the active value immediately, and falls back to a manual-name field when the provider cannot return a catalog.
-- Empty queue, four-item queue, homepage results, first-use model prompt, and installed-model switching were inspected.
+日期：2026-09-24。范围：本次选定界面的实现，不是 36 项升级、真实平台可用性或安装包的最终验收。
 
 final result: passed
+
+## 视觉依据与对照
+
+- Source visual truth: `G:/Codex/UserData/.codex/generated_images/01a03d15-f233-7c51-86cd-d19fe173207e/exec-e8660b62-1509-49ce-858d-0a5288b4b29c.png`
+- Source pixels: 1487 × 1058。
+- Implementation: `http://127.0.0.1:1426/?qa=1`；开发专用模拟数据，不访问平台或 AI，不证明真实下载成功。
+- CSS viewport: 1488 × 1058，deviceScaleFactor 1。
+- 因可用截图表面为 1440 × 940，浏览器显示缩放为 0.85；截图内实际界面区域为 1265 × 899。去掉右侧/底部未用画布后，归一到 1487 × 1058；未删除或遮盖任何应用内控件。验收后已清除尺寸模拟。
+- Browser-rendered screenshot: `qa/screenshots/workbench-final.png`。
+- Full-view combined comparison（左原图、右实现）: `qa/screenshots/comparison-final.png`。
+- Focused combined controls comparison: `qa/screenshots/comparison-final-controls.png`。已结合原始截图放大检查文字、路径、选择控件。
+- State: 浅色素材库、美妆口播分类、3 张卡片、Small 模型、AI 接口；翻译 40%、完成无进度条、下载 62%。保存路径是本轮 UI 操作后的 `E:\验收视频\美妆口播`，与原图示例路径文字不同但展示规则一致。
+
+## 对照迭代与修复
+
+1. [P2，已修复] 3 张卡片占 4 列位置、封面被 flex 收缩并高度不一致。
+   改用 3 列所需最小宽度、max-content 网格行和不可压缩封面。最终 DOM 实测三个封面均为 374 × 240；没有变形。
+2. [P2，已修复] 初版字号/侧栏比例偏小，工具栏常驻挤占首屏。
+   侧栏恢复到 252 px，品牌 24 px、分类标题 32 px、视频标题 22 px、主体控件 16–18 px。批量工具栏只在当前列表有选中项时显示。最终主界面素材区 clientHeight 与 scrollHeight 均为 510：三张卡片及操作在匹配设计尺寸时完整显示。
+3. [P2，已修复] 下拉选择/长弹窗可能把底部按钮推到窗口之外。
+   弹窗限制在视口内，内容内部滚动、操作区固定。1000 × 720 时弹窗范围 y=16..704；测试/保存按钮 y=647..689。
+4. [P2，已修复] 搜索条件会隐藏新加入的链接；全选会选择其他分类隐藏记录。
+   成功加入链接后清空搜索并恢复全部状态；批量全选/移除/下载只作用于当前展示的可操作记录。
+5. [P2，已修复] 侧栏自动下载显示成小复选框，与选定图开关不一致。
+   复用已有自动下载开关组件，保留语义、禁用态及橙色开启状态。
+
+第一轮记录：`qa/screenshots/comparison.png`。第二轮及最终修复后重新截图并并排查看：`comparison-final.png` 和 `comparison-final-controls.png`；无遗留 P0/P1/P2 视觉问题。
+
+## 五项必要表面检查
+
+- 字体：使用 Windows 系统 Segoe UI / Microsoft YaHei UI，保持中文黑体层级，不增加字体下载。标题/控件/次级信息区分清楚；长标题两行截断并保留 title，长路径可读并可悬停查看。
+- 布局：保留顶部导航、左分类、上多链接输入、下三列封面网格；模型和保存位置仍直接可见。小窗口只让素材列表或弹窗内容内部滚动，不产生全页横向滚动。
+- 色彩：浅暖灰背景、白色面板、#ff5828 橙色主操作与选中态、绿色已保存状态。未完成入口的禁用态为显式开发状态。
+- 图像：三个开发样本为生成的同风格口播/产品图片，照片比例稳定。实际生产卡片使用真实解析封面；图片失效才显示“暂无可用封面”。QA 图片和桥接代码没有进入生产 dist。
+- 文案：更名为“跑量影链工坊”；“解析链接”明确与真正启动下载区分；完成文案为“所选内容已完成”，避免仅选封面时却声称视频已下载。下载和翻译不重复显示同一进度。
+
+## 已验证交互（浏览器模拟）
+
+- 中文分享文案内的两条视频链接：解析进当前分类，选中 2 项，模拟下载和翻译后完成；完成卡片都有打开文件夹入口且无进度条。
+- 识别模型 Small / Medium、批量画质 1080P / 720P 切换。
+- 模型弹窗获取上游列表、选择 test-multilingual、保存翻译方式。
+- 创建 `验收/口播` 分类，编辑备注，再按备注搜索；已完成筛选只显示完成卡片。
+- 封面/双语文案勾选独立生效；更改保存位置后显示新的完整分类路径。
+- 1366 × 768 与 1000 × 720：文档尺寸等于视口，没有横向溢出；核心路径、模型、解析按钮均在视口内。模型弹窗保存按钮可见。截图：`qa/screenshots/model-1000x720.png`。
+- 最终新预览标签在 StrictMode 下切换模型后：console error/warn 均为空。过程中发现 Tauri 官方 mock 的 unlisten 参数名不一致（id/eventId）；仅在开发夹具适配，没有修改第三方包或屏蔽日志。
+
+## 预期差异与 P3 后续
+
+- 真实系统窗口按钮由 Windows 提供，不在网页预览里仿造。
+- 原图暂停图标暂用明确的“取消”；真正暂停/续传属于后续功能，不伪装为已完成。
+- 原图直播/订阅导航已在续作中替换成独立页面；官方账号需要实际登录，不能用预览证明登录成功。
+- 不显示未经验证的“已登录/已连接/视频已保存”承诺；预览飞书自动下载默认关闭，避免看图误以为已启动真实服务。
+- 平台标识暂为文字；照片是生成的 QA 样本而非实际博主。次级按钮圆角和少量文本间距可继续微调，不影响本轮操作。
+
+## 不属于本次通过范围
+
+未测试真实四平台解析下载、真实推理质量/速度、飞书双用户双电脑、直播、订阅、安装器迁移与一键升级。本轮没有发布和替换已安装软件。完整进度见 `UPGRADE-PLAN.md`；正式发布仍被 `qa/release-acceptance.json` 门禁阻止。
+
+### 2026-09-24 直播/订阅续作补充
+
+上述直播/订阅未测说明仅对应早先主界面验收。续作已验证两个入口与独立表单、暂停/恢复订阅、收录任务交接、直播停止后状态；1000×720、1366×768 的导航可见且无横向溢出。新页沿用既定暖灰/白/橙色、16 px 表单控件、固定导航和工作区内部滚动。真实平台与本地文件结果单独记录在 `qa/automation-acceptance-20260924.md`，不与界面夹具混称。

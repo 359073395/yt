@@ -1,0 +1,43 @@
+.automation-workspace { min-width: 0; min-height: 0; overflow-y: auto; padding: 16px; scrollbar-gutter: stable; }
+.automation-heading { margin-bottom: 20px; }
+.automation-heading > div { display: flex; align-items: center; gap: 10px; }
+.automation-heading svg { color: #ff5828; }
+.automation-heading h1 { font-size: var(--text-title); margin: 0; }
+.automation-heading p { margin: 8px 0 0; color: #646e66; line-height: 1.6; }
+.automation-notice { padding: 12px 16px; background: #fff0e8; border: 1px solid #f3c5b4; border-radius: 8px; margin-bottom: 16px; line-height: 1.6; overflow-wrap: anywhere; }
+.automation-form { background: white; padding: 16px; border: 1px solid #e4e6e0; border-radius: 10px; }
+.automation-form label { display: flex; flex-direction: column; gap: 8px; font-size: 16px; }
+.automation-form input, .automation-form select, .automation-form textarea { font: inherit; color: #283029; border: 1px solid #d8ddd5; border-radius: 7px; background: #fff; padding: 10px 12px; min-width: 0; width: 100%; }
+.automation-form textarea { resize: vertical; min-height: 70px; max-height: 180px; }
+.automation-fields { display: grid; grid-template-columns: 1fr 1fr 150px 150px; gap: 14px; margin-top: 16px; }
+.automation-path { display: flex; align-items: center; gap: 16px; margin-top: 18px; }
+.automation-checks { display: flex; flex-wrap: wrap; gap: 16px 24px; margin-top: 20px; }
+.automation-checks label { flex-direction: row; align-items: center; }
+.automation-checks input { width: 18px; height: 18px; margin: 0; }
+.automation-help { color: #6a736b; font-size: 14px; line-height: 1.7; margin: 12px 0; }
+.automation-submit { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 18px; }
+.automation-submit button, .automation-record-actions button { display: inline-flex; align-items: center; gap: 7px; padding: 10px 14px; border-radius: 7px; border: 1px solid #d9dfd6; background: white; }
+.automation-submit span { color: #60685f; font-size: var(--text-small); }
+.automation-records { display: grid; grid-template-columns: repeat(auto-fill,minmax(min(100%, 290px),1fr)); gap: 16px; margin-top: 16px; align-items: start; }
+.automation-records article { display: flex; flex-direction: column; padding: 16px; border: 1px solid #e0e3db; background: white; border-radius: 10px; min-width: 0; }
+.automation-record-title { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.automation-record-title h2 { margin: 0; font-size: var(--text-body); overflow-wrap: anywhere; }
+.automation-record-title span { font-size: 14px; white-space: nowrap; padding: 4px 8px; background: #f0f1ed; border-radius: 5px; }
+.automation-record-title .enabled { color: #c4451b; background: #fff0e8; }
+.automation-records p { margin: 12px 0; line-height: 1.6; overflow-wrap: anywhere; }
+.automation-records small { color: #60685f; font-size: var(--text-small); }
+.automation-records .automation-source { font-size: 14px; color: #758071; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.automation-record-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.automation-empty { grid-column: 1 / -1; padding: 32px; text-align: center; color: #6a7367; border: 1px dashed #d1d9cd; border-radius: 10px; }
+.automation-empty h2 { font-size: 20px; font-weight: 500; }
+.recording-metrics { display: flex; gap: 24px; margin: 12px 0; }
+.recording-metrics strong { font-size: var(--text-title); font-weight: 600; font-variant-numeric: tabular-nums; }
+.recording-metrics small { display: block; margin-top: 6px; font-weight: 400; }
+@media (max-width: 1200px) { .automation-fields { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 1050px) { .workbench-header { gap: 14px; } .workbench-header nav { gap: 12px; } .workbench-tools button { padding: 6px; font-size: 14px; } .automation-workspace { padding: 16px; } }
+.automation-record-detail { font-size: var(--text-small); }
+.automation-record-detail summary { cursor: pointer; color: #a0452c; padding: 8px 0; }
+.automation-record-detail p { margin-top: 0; white-space: pre-wrap; }
+.automation-record-actions { margin-top: auto; padding-top: 12px; }
+.automation-record-actions button { font-size: var(--text-small); }
+@media (max-width: 760px) { .automation-fields { grid-template-columns: 1fr; } .automation-path { flex-wrap: wrap; gap: 8px; } .automation-path .path-control { flex-basis: 100%; } }

@@ -1,9 +1,10 @@
 export type InputMode = 'single' | 'batch' | 'profile'
 export type TranscriptMode = 'none' | 'auto' | 'native' | 'ai'
-export type TaskStatus = 'queued' | 'scanning' | 'downloading' | 'transcribing' | 'completed' | 'partial' | 'failed' | 'cancelled'
+export type TaskStatus = 'queued' | 'scanning' | 'downloading' | 'transcribing' | 'translating' | 'completed' | 'partial' | 'failed' | 'cancelled'
 
 export interface RuntimeInfo {
   version: string
+  preview_build?: boolean
   default_download_dir: string
   yt_dlp_available: boolean
   ffmpeg_available: boolean
@@ -27,6 +28,7 @@ export interface ModelInfo {
 
 export interface DownloadOptions {
   download_dir: string
+  category?: string
   quality: string
   include_video: boolean
   include_thumbnail: boolean
@@ -97,6 +99,7 @@ export interface DownloadTask {
   message: string
   outputDir?: string
   sourceLanguage?: string
+  result?: DownloadResult
 }
 
 export interface ModelProgress {
@@ -151,7 +154,8 @@ export function statusLabel(status: TaskStatus): string {
     queued: '排队中',
     scanning: '扫描中',
     downloading: '下载中',
-    transcribing: '生成文案',
+    transcribing: '提取文案',
+    translating: '翻译中',
     completed: '已完成',
     partial: '未全部完成',
     failed: '失败',

@@ -1,4 +1,10 @@
 import React from 'react'
+import { Archive, ChevronDown, Clock3, Folder, Plus, Search, Play, Radio, Rss } from 'lucide-react'
+import { MediaCard } from './MediaCard'
+import { AccountsPanel } from './AccountsPanel'
+import { AutomationPanel, useAutomation } from './AutomationPanel'
+import { mergeDeliveries } from './automation'
+import { categoryDirectory, filterRecords, isActive, normalizeCategory, restoreLibrary, type PendingItem, type LibraryRecord, type LibraryJournal } from './library'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { check, type Update } from '@tauri-apps/plugin-updater'
@@ -48,14 +54,7 @@ import {
 } from './core'
 import { clearTranslationModel, preloadTranslationModel } from './translator'
 import { finishTranslation } from './translation-job'
-
-interface PendingItem extends MediaPreview {
-  id: string
-  selected: boolean
-  quality: string
-  loading: boolean
-  downloaded?: boolean
-}
+import { AutoDownloadControl, TeamInbox, type Snapshot } from './TeamInbox'
 
 interface ModelPromptState {
   speech: boolean
@@ -108,6 +107,30 @@ function progressSpeed(message: string) {
 }
 
 function App() {
+  const [view, setView] = React.useState<'tasks' | 'library' | 'subscriptions' | 'live'>('library')
+  const automation = useAutomation()
+  const autoStarting = React.useRef(false)
+  const [persistedAutomation, setPersistedAutomation] = React.useState<string[]>([])
+  const [category, setCategory] = React.useState('*')
+  const [categories, setCategories] = React.useState<string[]>([])
+  const [search, setSearch] = React.useState('')
+  const [statusFilter, setStatusFilter] = React.useState('all')
+  const [optionsOpen, setOptionsOpen] = React.useState(false)
+  const [accountsOpen, setAccountsOpen] = React.useState(false)
+  const [categoryDraft, setCategoryDraft] = React.useState<string | null>(null)
+  const [editing, setEditing] = React.useState<LibraryRecord | null>(null)
+  const [editCategory, setEditCategory] = React.useState('')
+  const [editNote, setEditNote] = React.useState('')
+  const [actionBusy, setActionBusy] = React.useState(false)
+  const [journalReady, setJournalReady] = React.useState(false)
+  const [feishu, setFeishu] = React.useState<Snapshot | null>(null)
+  const [feishuProgress, setFeishuProgress] = React.useState<Record<string, ProgressEvent>>({})
+  const journalWriter = React.useRef(Promise.resolve())
+  const journalTimer = React.useRef<number | null>(null)
+  const journalLatest = React.useRef<LibraryJournal | null>(null)
+  const aborters = React.useRef(new Map<string, AbortController>())
+  const pendingStartIds = React.useRef<string[] | undefined>(undefined)
+  const [teamOpen, setTeamOpen] = React.useState(false)
   const [runtime, setRuntime] = React.useState<RuntimeInfo | null>(null)
   const [input, setInput] = React.useState('')
   const [downloadDir, setDownloadDir] = React.useState('')
@@ -155,6 +178,37 @@ function App() {
   const updateRef = React.useRef<Update | null>(null)
   const updateCheckBusy = React.useRef(false)
 
+  React.useEffect(() => {
+    let cancelled = false
+    void invoke<unknown>('library_load').then(value => {
+      if (cancelled) return
+      const restored = restoreLibrary(value)
+      setPendingItems(restored.items); setTasks(restored.tasks); setCategories(restored.categories); setJournalReady(true)
+    }).catch(error => { if (!cancelled) setMessage(String(error)) })
+    return () => { cancelled = true }
+  }, [])
+  React.useEffect(() => {
+    if (!journalReady) return
+    journalLatest.current = { version: 1, items: pendingItems, tasks, categories }
+    if (journalTimer.current !== null) return
+    journalTimer.current = window.setTimeout(() => {
+      const data = journalLatest.current
+      journalTimer.current = null
+      journalWriter.current = journalWriter.current.then(async () => {
+        await invoke<void>('library_save', { data })
+        const ids = data?.items.map(item => item.automationId).filter((id): id is string => !!id) || []
+        setPersistedAutomation(ids)
+        if (ids.length) await invoke('automation_ack', { ids })
+      })
+        .catch(error => setMessage(`任务记录保存失败：${String(error)}。请不要退出软件。`))
+    }, 500)
+  }, [journalReady, pendingItems, tasks, categories])
+  React.useEffect(() => () => { if (journalTimer.current !== null) window.clearTimeout(journalTimer.current) }, [])
+  React.useEffect(() => {
+    if (!journalReady || !automation.snapshot.deliveries.length) return
+    setPendingItems(items => mergeDeliveries(items, automation.snapshot.deliveries, quality))
+  }, [journalReady, automation.snapshot.deliveries, quality])
+
   const refreshRuntime = React.useCallback(async () => {
     const info = await invoke<RuntimeInfo>('runtime_info')
     setRuntime(info)
@@ -183,7 +237,8 @@ function App() {
     refreshAiSettings().catch((error) => setMessage(String(error)))
     const cleanups = [
       listen<ProgressEvent>('job-progress', ({ payload }) => {
-        setTasks((current) => current.map((task) => task.id === payload.job_id
+        if (payload.job_id.startsWith('team-')) setFeishuProgress(current => ({ ...current, [payload.job_id.slice(5)]: payload }))
+        setTasks((current) => current.map((task) => task.id === payload.job_id && task.status !== 'cancelled'
           ? { ...task, status: payload.phase, percent: payload.percent, message: payload.message }
           : task))
       }),
@@ -201,12 +256,14 @@ function App() {
   }, [refreshAiSettings, refreshRuntime])
 
   React.useEffect(() => {
+    if (!runtime || runtime.preview_build) return
     const timer = window.setTimeout(() => void checkForUpdates(true), 4000)
     return () => window.clearTimeout(timer)
-  }, [])
+  }, [runtime?.version, runtime?.preview_build])
 
   const urls = React.useMemo(() => extractSharedUrls(input), [input])
-  const selectedItems = React.useMemo(() => pendingItems.filter((item) => item.selected), [pendingItems])
+  const taskIndex = React.useMemo(() => new Map(tasks.map(task => [task.queueItemId, task])), [tasks])
+  const selectedItems = React.useMemo(() => pendingItems.filter(item => item.selected && !isActive(taskIndex.get(item.id)) && taskIndex.get(item.id)?.status !== 'completed'), [pendingItems, taskIndex])
   const selectedModel = runtime?.models.find((model) => model.id === modelId)
   const installedModel = selectedModel?.installed ?? false
   const toolsReady = Boolean(runtime?.yt_dlp_available && runtime?.ffmpeg_available)
@@ -218,6 +275,10 @@ function App() {
   const aiConfigured = Boolean(aiSettings.base_url && aiSettings.model)
 
   async function checkForUpdates(silent = false) {
+    if (!runtime || runtime.preview_build) {
+      if (!silent && runtime?.preview_build) setMessage('这是独立试用版，不连接正式版自动升级渠道。')
+      return
+    }
     if (updateCheckBusy.current) return
     if (updateRef.current && updatePrompt) {
       setUpdateOpen(true)
@@ -461,6 +522,9 @@ function App() {
       selected: true,
       quality,
       loading: true,
+      category: category === '*' ? '待分类' : category,
+      note: '',
+      created: Date.now(),
     }))
   }
 
@@ -480,7 +544,7 @@ function App() {
 
   async function parseLinks(event?: React.FormEvent, profile = false) {
     event?.preventDefault()
-    if (parsing || running) return
+    if (parsing || !journalReady) return
     setMessage(null)
     if (!toolsReady) {
       setMessage('桌面运行组件尚未准备好，请使用正式安装包或重新安装。')
@@ -507,6 +571,8 @@ function App() {
         return [...current, ...added.map((item) => profile ? { ...item, loading: false } : item)]
       })
       setInput('')
+      setSearch('')
+      setStatusFilter('all')
       if (!profile) {
         void inspectInChunks(resolved, token).catch(() => {
           setPendingItems((current) => current.map((item) => ({ ...item, loading: false })))
@@ -567,7 +633,7 @@ function App() {
       if (prompt.speech && !installedModel) await installModel(modelId)
       if (prompt.translation && !translationCached) await prepareTranslation()
       setModelPrompt(null)
-      if (prompt.resumeDownload) await executeSelectedDownloads(true)
+      if (prompt.resumeDownload) await executeSelectedDownloads(true, pendingStartIds.current)
     } catch (error) {
       setMessage(String(error))
     }
@@ -587,9 +653,10 @@ function App() {
     setMessage('已跳过模型下载，仍可下载视频、封面和平台提供的原版字幕。')
   }
 
-  async function startSelectedDownloads() {
+  async function startSelectedDownloads(ids?: string[]) {
+    pendingStartIds.current = ids
     if (downloadStarting || running) return
-    if (!selectedItems.length) {
+    if (!ids?.length && !selectedItems.length) {
       setMessage('请先解析并勾选至少一条作品。')
       return
     }
@@ -606,7 +673,7 @@ function App() {
           : '请先确认所需模型，确认后会自动继续下载。')
         return
       }
-      await executeSelectedDownloads()
+      await executeSelectedDownloads(false, ids)
     } catch (error) {
       setMessage(`无法启动下载：${String(error)}`)
     } finally {
@@ -614,80 +681,101 @@ function App() {
     }
   }
 
-  async function executeSelectedDownloads(modelsPrepared = false) {
-    if (running) return
+  const autoReady = journalReady && toolsReady && !!downloadDir && !!selectedOutputCount && !running && !downloadStarting && !parsing
+    && (!includeCopy || ((transcriptMode === 'native' || !!installedModel) && (translationProvider === 'api' ? aiConfigured : translationCached)))
+  const autoCandidates = pendingItems.filter(item => item.autoDownload && persistedAutomation.includes(item.automationId || '') && !tasks.some(task => task.queueItemId === item.id))
+  React.useEffect(() => {
+    if (!autoReady || autoStarting.current || !autoCandidates.length) return
+    autoStarting.current = true
+    void startSelectedDownloads(autoCandidates.map(item => item.id)).finally(() => { autoStarting.current = false })
+  }, [autoReady, pendingItems, tasks, persistedAutomation])
+
+  async function executeSelectedDownloads(modelsPrepared = false, ids?: string[]) {
+    if (running || !journalReady) return
     setMessage(null)
-    const chosen = pendingItems.filter((item) => item.selected)
+    const chosen = pendingItems.filter(item => (ids ? ids.includes(item.id) : item.selected) && !isActive(tasks.find(task => task.queueItemId === item.id)) && tasks.find(task => task.queueItemId === item.id)?.status !== 'completed')
     if (!chosen.length) return
-    const created = chosen.map<DownloadTask>((item) => ({
-      id: crypto.randomUUID(),
-      queueItemId: item.id,
-      url: item.url,
-      title: item.title,
-      platform: item.platform,
-      status: 'queued',
-      percent: 0,
-      message: '已加入本地下载队列',
+    const created = chosen.map<DownloadTask>(item => ({
+      id: crypto.randomUUID(), queueItemId: item.id, url: item.url, title: item.title,
+      platform: item.platform, status: 'queued', percent: 0, message: '已加入本地下载队列',
     }))
-    const chosenUrls = new Set(chosen.map((item) => item.url))
-    setTasks((current) => [...created, ...current.filter((task) => !chosenUrls.has(task.url))].slice(0, 200))
+    const chosenIds = new Set(chosen.map(item => item.id))
+    setTasks(current => [...created, ...current.filter(task => !chosenIds.has(task.queueItemId))])
+    created.forEach(task => aborters.current.set(task.id, new AbortController()))
     setRunning(true)
     let translationReady: Promise<void> | null = null
     if (translationTarget === 'zh' && translationProvider === 'local') {
       translationReady = modelsPrepared ? Promise.resolve() : prepareTranslation()
       void translationReady.catch(() => undefined)
     }
+    let textQueue = Promise.resolve()
     try {
       for (let index = 0; index < created.length; index += 1) {
-        const task = created[index]
-        const source = chosen[index]
+        const task = created[index], source = chosen[index]
+        const signal = aborters.current.get(task.id)!.signal
+        if (signal.aborted) continue
         try {
           const options: DownloadOptions = {
-            download_dir: downloadDir,
-            quality: source.quality,
-            include_video: includeVideo,
-            include_thumbnail: includeThumbnail,
-            include_original_subtitle: includeSubtitle,
-            transcript_mode: includeCopy ? transcriptMode : 'none',
-            language,
-            model_id: modelId,
+            download_dir: downloadDir, category: source.category, quality: source.quality,
+            include_video: includeVideo, include_thumbnail: includeThumbnail,
+            include_original_subtitle: includeSubtitle, transcript_mode: includeCopy ? transcriptMode : 'none',
+            language, model_id: modelId,
           }
-          const request: DownloadRequest = { job_id: task.id, url: task.url, options }
-          const result = await invoke<DownloadResult>('download_item', { request })
-          setPendingItems((current) => current.map((item) => item.id === source.id
-            ? { ...item, title: result.title, platform: result.platform || item.platform, thumbnail: result.thumbnail || item.thumbnail, uploader: result.uploader || item.uploader, duration: result.duration ?? item.duration, downloaded: true, loading: false, error: null }
-            : item))
-          const outcome = await finishTranslation(result, {
-            target: translationTarget, provider: translationProvider,
-            modelBaseUrl: runtime!.model_server_url, ready: translationReady,
-          }, (percent, detail) => setTasks((current) => current.map((item) => item.id === task.id
-            ? { ...item, title: result.title, platform: result.platform || item.platform, status: 'transcribing', percent, outputDir: result.output_dir, sourceLanguage: result.source_language, message: detail }
-            : item)))
-          setTasks((current) => current.map((item) => item.id === task.id
-            ? { ...item, title: result.title, platform: result.platform || item.platform, ...outcome, percent: 100, outputDir: result.output_dir, sourceLanguage: result.source_language }
-            : item))
+          const result = await invoke<DownloadResult>('download_item', { request: { job_id: task.id, url: task.url, options } })
+          setPendingItems(current => current.map(item => item.id === source.id
+            ? { ...item, title: result.title, platform: result.platform || item.platform, thumbnail: result.thumbnail || item.thumbnail, uploader: result.uploader || item.uploader, duration: result.duration ?? item.duration, downloaded: true, loading: false, error: null } : item))
+          setTasks(current => current.map(item => item.id === task.id
+            ? { ...item, title: result.title, platform: result.platform || item.platform, result, outputDir: result.output_dir, sourceLanguage: result.source_language, status: signal.aborted ? 'cancelled' : 'translating', percent: 0, message: '文件已保存；文案排队中' } : item))
+          // A separate serial text queue lets the next video download while the API/worker translates.
+          textQueue = textQueue.then(async () => {
+            if (signal.aborted) return
+            const outcome = await finishTranslation(result, {
+              target: translationTarget, provider: translationProvider, modelBaseUrl: runtime!.model_server_url,
+              ready: translationReady, signal,
+            }, (percent, detail) => setTasks(current => current.map(item => item.id === task.id && !signal.aborted
+              ? { ...item, status: 'translating', percent, message: detail } : item)))
+            if (!signal.aborted) {
+              setTasks(current => current.map(item => item.id === task.id ? { ...item, ...outcome, percent: 100 } : item))
+              setPendingItems(current => current.map(item => item.id === source.id ? { ...item, selected: false } : item))
+            }
+          })
         } catch (error) {
           const detail = String(error)
-          const cancelled = detail.toLowerCase().includes('terminated') || detail.includes('已取消')
-          setTasks((current) => current.map((item) => item.id === task.id
-            ? { ...item, status: cancelled ? 'cancelled' : 'failed', message: detail }
-            : item))
+          setTasks(current => current.map(item => item.id === task.id
+            ? { ...item, status: signal.aborted || detail.includes('已取消') ? 'cancelled' : 'failed', message: signal.aborted ? '用户已取消' : detail } : item))
         }
       }
+      await textQueue
     } finally {
+      created.forEach(task => aborters.current.delete(task.id))
       setRunning(false)
     }
   }
 
   async function cancelTask(task: DownloadTask) {
-    try {
-      await invoke('cancel_job', { jobId: task.id })
-      setTasks((current) => current.map((item) => item.id === task.id
-        ? { ...item, status: 'cancelled', message: '用户已取消' }
-        : item))
-    } catch (error) {
-      setMessage(String(error))
+    aborters.current.get(task.id)?.abort()
+    setTasks(current => current.map(item => item.id === task.id ? { ...item, status: 'cancelled', message: item.outputDir ? '已取消后续处理，已保存文件保留' : '用户已取消' } : item))
+    // No child exists yet for queued work, or while an API response settles.
+    if (task.status !== 'queued' && task.status !== 'translating') await invoke('cancel_job', { jobId: task.id }).catch(() => undefined)
+  }
+
+  async function retryRecord(record: LibraryRecord) {
+    if (record.source === 'feishu') {
+      await action(async () => { await invoke('team_action', { action: 'edit', body: { id: record.item.id, retry: true } }) }); return
     }
+    const task = record.task
+    if (task?.result?.segments.length) {
+      if (running) { setMessage('请等待当前文案处理结束后再重试'); return }
+      if (requiredModels(false)) return
+      const controller = new AbortController()
+      aborters.current.set(task.id, controller); setRunning(true)
+      setTasks(current => current.map(item => item.id === task.id ? { ...item, status: 'translating', percent: 0, message: '正在重试文案，不重新下载视频' } : item))
+      try {
+        const outcome = await finishTranslation(task.result, { target: 'zh', provider: translationProvider, modelBaseUrl: runtime!.model_server_url, ready: translationProvider === 'local' ? prepareTranslation() : null, signal: controller.signal },
+          (percent, detail) => setTasks(current => current.map(item => item.id === task.id && !controller.signal.aborted ? { ...item, percent, message: detail } : item)))
+        if (!controller.signal.aborted) setTasks(current => current.map(item => item.id === task.id ? { ...item, ...outcome } : item))
+      } finally { aborters.current.delete(task.id); setRunning(false) }
+    } else await startSelectedDownloads([record.item.id])
   }
 
   async function openTaskFolder(task: DownloadTask) {
@@ -700,8 +788,9 @@ function App() {
   }
 
   function toggleAll() {
-    const shouldSelect = pendingItems.some((item) => !item.selected)
-    setPendingItems((current) => current.map((item) => ({ ...item, selected: shouldSelect })))
+    const ids = new Set(bulkTargets.map(record => record.item.id))
+    const shouldSelect = bulkTargets.some(record => !record.item.selected)
+    setPendingItems(current => current.map(item => ids.has(item.id) ? { ...item, selected: shouldSelect } : item))
   }
 
   function setBatchQuality(next: string) {
@@ -710,9 +799,9 @@ function App() {
   }
 
   function removeSelectedQueueItems() {
-    const removedUrls = new Set(pendingItems.filter((item) => item.selected).map((item) => item.url))
-    setPendingItems((current) => current.filter((item) => !item.selected))
-    setTasks((current) => current.filter((task) => !removedUrls.has(task.url)))
+    const ids = new Set(bulkTargets.filter(record => record.item.selected).map(record => record.item.id))
+    setPendingItems(current => current.filter(item => !ids.has(item.id)))
+    setTasks(current => current.filter(task => !ids.has(task.queueItemId)))
   }
 
   function clearQueue() {
@@ -732,130 +821,113 @@ function App() {
     }
   }
 
+  const deferredSearch = React.useDeferredValue(search)
+  const records = React.useMemo<LibraryRecord[]>(() => [
+    ...pendingItems.map(item => ({ item, task: taskIndex.get(item.id), source: 'manual' as const })),
+    ...(feishu?.jobs || []).map(job => {
+      const progress = feishuProgress[job.id]
+      const status = ({ queued: 'queued', downloading: 'downloading', archiving: 'downloading', downloaded: 'translating', preparing: 'transcribing', text_ready: 'translating', completed: 'completed', partial: 'partial', failed: 'failed' } as const)[job.stage as 'queued'] || 'queued'
+      return {
+        source: 'feishu' as const,
+        item: { id: job.id, url: job.url, title: job.result?.title || '飞书收录的视频', platform: job.result?.platform || platformName(job.url), uploader: job.result?.uploader || '', thumbnail: job.result?.thumbnail, duration: job.result?.duration, selected: false, quality: '1080', loading: false, category: job.category, note: job.note, created: job.created },
+        task: { id: job.id, queueItemId: job.id, url: job.url, title: job.result?.title || '飞书视频', platform: job.result?.platform || '', status, percent: progress?.percent || 0, message: job.detail, outputDir: job.result?.output_dir, result: job.result },
+      }
+    }),
+  ], [pendingItems, taskIndex, feishu, feishuProgress])
+  const allCategories = [...new Set(['待分类', ...categories, ...records.map(record => record.item.category)])]
+  const shown = filterRecords(records, category, deferredSearch, statusFilter, view)
+  const bulkTargets = shown.filter(record => record.source === 'manual' && !isActive(record.task))
+  const visibleSelected = bulkTargets.filter(record => record.item.selected && record.task?.status !== 'completed')
+  const paired = Boolean(feishu?.config.session?.device_id) && !feishu?.config.onboarding
+  const outputPath = downloadDir ? categoryDirectory(downloadDir, category === '*' ? '待分类' : category) : '请选择保存位置'
+  async function action(work: () => Promise<void>) {
+    setActionBusy(true)
+    try { await work() } catch (error) { setMessage(String(error)) } finally { setActionBusy(false) }
+  }
+  async function toggleFeishu() {
+    if (!paired || !feishu?.config.root) { setTeamOpen(true); return }
+    await action(async () => {
+      await invoke('team_save', { config: { ...feishu!.config, enabled: !feishu!.config.enabled } })
+      setFeishu(await invoke<Snapshot>('team_snapshot'))
+    })
+  }
+  function editRecord(record: LibraryRecord) {
+    setEditing(record); setEditCategory(record.item.category); setEditNote(record.item.note)
+  }
+  async function saveRecord() {
+    if (!editing) return
+    await action(async () => {
+      const targetCategory = normalizeCategory(editCategory)
+      if (editing.source === 'feishu') await invoke('team_action', { action: 'edit', body: { id: editing.item.id, category: targetCategory, note: editNote } })
+      else {
+        let target = editing.task?.outputDir
+        if (target && targetCategory !== editing.item.category) target = await invoke<string>('relocate_output', { outputDir: target, root: downloadDir, category: targetCategory })
+        setPendingItems(current => current.map(item => item.id === editing.item.id ? { ...item, category: targetCategory, note: editNote } : item))
+        if (target) setTasks(current => current.map(task => task.queueItemId === editing.item.id ? { ...task, outputDir: target, result: task.result ? { ...task.result, output_dir: target! } : undefined } : task))
+      }
+      setCategories(current => [...new Set([...current, targetCategory])]); setEditing(null)
+    })
+  }
+
   return (
-    <main className="desktop-shell">
-      <header className="app-header">
-        <div className="brand"><span><Link2 size={19} /></span><strong>影链工坊</strong></div>
-        <div className="header-actions">
-          <button className={`update-button ${updatePrompt ? 'available' : ''}`} type="button" disabled={updateChecking} onClick={() => void checkForUpdates(false)} title="检查更新"><RefreshCw className={updateChecking ? 'spin' : ''} size={17} /><span>{updatePrompt ? `升级 ${updatePrompt.version}` : '更新'}</span>{updatePrompt && <i />}</button>
-          <button type="button" onClick={openModels}><Languages size={17} /><span>模型</span></button>
-        </div>
+    <main className="desktop-shell workbench">
+      <header className="workbench-header">
+        <div className="workbench-brand"><Play size={24} fill="currentColor" /><strong>跑量影链工坊</strong></div>
+        <nav aria-label="工作区"><button className={view === 'tasks' ? 'active' : ''} onClick={() => { setView('tasks'); setStatusFilter('all') }}>视频任务</button><button className={view === 'library' ? 'active' : ''} onClick={() => { setView('library'); setStatusFilter('all') }}>素材库</button><button className={view === 'subscriptions' ? 'active' : ''} onClick={() => setView('subscriptions')}>博主订阅</button><button className={view === 'live' ? 'active' : ''} onClick={() => setView('live')}>直播录制</button></nav>
+        <div className="workbench-tools"><button onClick={() => setAccountsOpen(true)}><UserRound size={18} />账号</button><button onClick={openModels}><Languages size={18} />模型</button><button title={runtime?.preview_build ? '独立试用版，不连接正式版自动升级渠道' : undefined} disabled={updateChecking || running} onClick={() => void checkForUpdates(false)}><RefreshCw size={18} className={updateChecking ? 'spin' : ''} />{runtime?.preview_build ? '试用版' : updatePrompt ? '可升级' : '更新'}</button></div>
       </header>
-
-      {message && <div className="notice"><AlertCircle size={16} /><span>{message}</span><button type="button" onClick={() => setMessage(null)}><X size={15} /></button></div>}
-
-      <div className="app-body">
-        <section className="inbox-pane">
-          <form className="link-composer" onSubmit={parseLinks}>
-            <div className="composer-heading"><div><h1>视频链接</h1><span>支持分享文案自动识别</span></div>{urls.length > 0 && <b>已识别 {urls.length} 条</b>}</div>
-            <div className="composer-field">
-              <textarea
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') void parseLinks()
-                }}
-                placeholder={'粘贴一个或多个视频链接 / 分享文案，每行一条'}
-              />
-              {input && <button type="button" onClick={() => setInput('')} aria-label="清空链接"><X /></button>}
-            </div>
-            <div className="composer-actions">
-              <button className="primary-action" type="submit" disabled={parsing || running || !toolsReady || !urls.length}>{parsing ? <LoaderCircle className="spin" /> : <ListChecks />}解析并加入队列</button>
-              <button type="button" disabled={parsing || running || !toolsReady || urls.length !== 1} onClick={() => void parseLinks(undefined, true)}><UserRound />添加博主主页</button>
-              <span>多链接最多 50 条 · 博主主页读取公开作品</span>
-            </div>
-          </form>
-
-          <section className="queue-section">
-            <div className="queue-toolbar">
-              <div><h2>待下载队列</h2><b>{pendingItems.length}</b></div>
-              <div className="queue-actions">
-                <label><span>批量画质</span><select value={quality} onChange={(event) => setBatchQuality(event.target.value)}><option value="best">最佳</option><option value="2160">4K</option><option value="1080">1080P</option><option value="720">720P</option><option value="480">480P</option></select></label>
-                <button type="button" disabled={!selectedItems.length || running} onClick={removeSelectedQueueItems}><Trash2 />移除</button>
-                <button type="button" disabled={!pendingItems.length || running} onClick={clearQueue}><X />清空</button>
-                <button className="start-download" type="button" onClick={() => void startSelectedDownloads()} disabled={downloadStarting || running || parsing || !selectedItems.length || !toolsReady || !selectedOutputCount}>{downloadStarting || running ? <LoaderCircle className="spin" /> : <Download />} {running ? `下载中 ${Math.min(completedCount + 1, selectedItems.length)} / ${selectedItems.length}` : `开始下载 ${selectedItems.length} 项`}</button>
-              </div>
-            </div>
-
-            <div className="queue-table">
-              <div className="queue-head"><button type="button" onClick={toggleAll} aria-label="全选">{pendingItems.length > 0 && pendingItems.every((item) => item.selected) ? <CheckSquare2 /> : <Square />}</button><span>标题 / 平台 / 博主</span><span>画质</span><span>输出内容</span><span>状态</span></div>
-              {!pendingItems.length ? (
-                <div className="queue-empty"><Link2 /><strong>还没有待下载视频</strong><span>把链接或分享文案粘贴到上方，解析后会在这里逐条确认。</span></div>
-              ) : pendingItems.map((item) => {
-                const task = tasks.find((entry) => entry.queueItemId === item.id)
-                const speed = task ? progressSpeed(task.message) : ''
-                return (
-                  <article className={`media-row ${item.selected ? 'selected' : ''}`} data-url={item.url} key={item.id}>
-                    <button className="select-box" type="button" onClick={() => setPendingItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, selected: !entry.selected } : entry))}>{item.selected ? <CheckSquare2 /> : <Square />}</button>
-                    <div className="media-summary"><div className="media-thumb">{item.thumbnail ? <img src={item.thumbnail} alt="" onError={() => setPendingItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, thumbnail: null } : entry))} /> : <Video />}<span>{formatDuration(item.duration)}</span></div><div className="media-copy"><strong title={item.title}>{item.title}</strong><span>{item.platform} · {item.uploader}</span>{item.error && <small title={item.error}>预览受限，下载时会再次尝试</small>}</div></div>
-                    <select value={item.quality} aria-label={`${item.title} 视频清晰度`} onChange={(event) => setPendingItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, quality: event.target.value } : entry))}><option value="best">最佳</option><option value="2160">4K</option><option value="1080">1080P</option><option value="720">720P</option><option value="480">480P</option></select>
-                    <div className="media-tags">{includeVideo && <span><Video />视频</span>}{includeThumbnail && <span><Image />封面</span>}{includeCopy && <span><FileText />双语文案</span>}{includeSubtitle && <span><Subtitles />原版字幕</span>}</div>
-                    <div className={`row-status ${task?.status || 'waiting'}`} title={task?.message}>{!task ? <><span>等待中</span></> : task.status === 'completed' ? <><strong><Check />已完成</strong></> : task.status === 'partial' ? <strong><AlertCircle />未全部完成</strong> : task.status === 'failed' ? <strong><AlertCircle />失败</strong> : task.status === 'cancelled' ? <><span>已取消</span></> : <><strong>{task.status === 'transcribing' ? (task.message.includes('翻译') ? '翻译中' : '提取文案') : task.status === 'queued' ? '排队中' : `下载中 ${Math.round(task.percent)}%`}</strong>{speed && <small>{speed}</small>}</>}{task?.outputDir && (task.status === 'completed' || task.status === 'partial') && <button className="open-task-folder" type="button" aria-label={`打开 ${task.title} 的文件夹`} title={task.outputDir} onClick={() => void openTaskFolder(task)}><FolderOpen />打开文件夹</button>}</div>
-                    {task && (task.status === 'partial' || task.status === 'failed') && <p className="row-issue" role="status">{task.message}</p>}
-                    {item.loading && <div className="row-loading"><LoaderCircle className="spin" />读取中</div>}
-                  </article>
-                )
-              })}
-            </div>
-            <p className="platform-note">支持 YouTube、TikTok、Instagram、抖音等主流平台的公开视频链接</p>
-          </section>
-        </section>
-
-        <aside className="inspector-pane">
-          {activeTask && <section className="active-progress" aria-live="polite">
-            <div className="progress-heading"><h2>任务进度</h2><b>{Math.min(completedCount + 1, selectedItems.length)} / {selectedItems.length}</b></div>
-            {activeTask.status === 'transcribing' ? <>
-              <div className="progress-title"><h3>AI 文案与翻译</h3><strong>进行中</strong></div>
-              <div className="ai-steps">
-                <div className="done"><i><Check /></i><span>提取音轨</span></div>
-                <div className={activeTask.sourceLanguage ? 'done' : 'active'}><i>{activeTask.sourceLanguage ? <Check /> : '2'}</i><span>{activeTask.sourceLanguage ? `识别${languageName(activeTask.sourceLanguage)}` : '识别语言'}</span></div>
-                {translationTarget === 'zh' && <div className={activeTask.sourceLanguage ? 'active' : ''}><i>3</i><span>翻译中文</span></div>}
-              </div>
-              <div className="detail-progress"><div><i style={{ width: `${Math.max(3, activeTask.percent)}%` }} /></div><b>{Math.round(activeTask.percent)}%</b></div>
-              <p className="progress-message">{activeTask.message}</p>
-            </> : <>
-              <div className="progress-title"><h3>原视频下载</h3><strong>进行中</strong></div>
-              <div className="detail-progress"><div><i style={{ width: `${Math.max(3, activeTask.percent)}%` }} /></div><b>{Math.round(activeTask.percent)}%</b></div>
-              <div className="progress-meta"><span>{activeTask.message}</span>{progressSpeed(activeTask.message) && <b>速度 {progressSpeed(activeTask.message)}</b>}</div>
-            </>}
-            <button className="cancel-active" type="button" onClick={() => void cancelTask(activeTask)}><CircleStop />取消当前任务</button>
-          </section>}
-
-          <section className="setting-section">
-            <h2>下载内容</h2>
-            <div className="output-grid">
-              <label><input type="checkbox" checked={includeVideo} onChange={(event) => setIncludeVideo(event.target.checked)} /><Video />视频</label>
-              <label><input type="checkbox" checked={includeThumbnail} onChange={(event) => setIncludeThumbnail(event.target.checked)} /><Image />封面</label>
-              <label><input type="checkbox" checked={includeCopy} onChange={(event) => requestTranslation(event.target.checked ? 'zh' : 'none')} /><FileText />双语文案</label>
-              <label title="仅保存平台提供的原文字幕，没有则跳过"><input type="checkbox" checked={includeSubtitle} onChange={(event) => setIncludeSubtitle(event.target.checked)} /><Subtitles />原版字幕</label>
-            </div>
-            <p className="output-note">原版字幕有则保存；不额外生成中文或双语字幕文件。</p>
-          </section>
-
-          <section className="setting-section ai-section">
-            <div className="section-row"><div><h2>识别模型</h2><p>已安装模型可以随时切换</p></div><button className="manage-models" type="button" onClick={openModels}>管理模型</button></div>
-            <div className="model-cards">{runtime?.models.map((model) => <button type="button" className={model.id === modelId ? 'selected' : ''} aria-pressed={model.id === modelId} key={model.id} onClick={() => chooseModelFromPanel(model.id)}><div className="model-card-heading"><i aria-hidden="true">{model.id === modelId && <Check />}</i><strong>{model.name.split(' · ')[0]}</strong></div><span>{model.name.split(' · ')[1]}</span><span className={model.installed ? 'installed' : ''}>{model.installed ? '已安装' : '未下载'}</span></button>)}</div>
-            <div className="ai-options-grid">
-              <label className="select-field"><span>提取方式</span><select value={transcriptMode} onChange={(event) => requestTranscriptMode(event.target.value as TranscriptMode)}><option value="none">不提取语音文案</option><option value="auto">字幕优先，AI 兜底</option><option value="ai">始终 AI 识别语音</option><option value="native">仅平台字幕</option></select></label>
-              <label className="select-field"><span>来源语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="auto">自动检测</option><option value="zh">中文</option><option value="en">英语</option><option value="id">印尼语</option><option value="ja">日语</option><option value="ko">韩语</option><option value="es">西班牙语</option></select></label>
-              <label className="select-field full-field"><span>文案输出 · {translationProvider === 'api' ? 'AI 接口' : '本地模型'}</span><select value={translationTarget} onChange={(event) => requestTranslation(event.target.value as 'none' | 'zh')}><option value="none">不生成双语文案</option><option value="zh">原文 + 中文（合并为一份双语文案）</option></select><small>翻译方式可在顶部“模型”中切换</small></label>
-            </div>
-          </section>
-
-          <section className="setting-section save-section">
-            <h2>保存位置</h2>
-            <button className="folder-field" type="button" onClick={chooseDirectory}><span title={downloadDir}>{downloadDir || '正在读取下载目录'}</span><FolderOpen /><em>更改</em></button>
-            <div className="space-row"><span>每条视频独立保存，完成后可从队列打开文件夹</span><b>{estimatedSize ? `约 ${formatBytes(estimatedSize)}` : ''}</b></div>
-          </section>
+      {message && <div className="notice" role="status"><AlertCircle size={18} /><span>{message}</span><button aria-label="关闭提示" onClick={() => setMessage(null)}><X size={18} /></button></div>}
+      <div className="workbench-body">
+        <aside className="category-sidebar">
+          <h2>分类文件夹</h2>
+          <div className="category-list">
+            <button className={category === '*' ? 'active' : ''} onClick={() => setCategory('*')}><Archive size={21} />全部素材</button>
+            {allCategories.map(name => <button key={name} className={category === name ? 'active' : ''} onClick={() => setCategory(name)} title={name}>{name === '待分类' ? <Clock3 size={21} /> : <Folder size={21} />}<span>{name}</span></button>)}
+            <button onClick={() => setCategoryDraft('')}><Plus size={21} />新建分类</button>
+          </div>
+          <div className="feishu-shortcut">
+            <button onClick={() => setTeamOpen(true)}><Cloud size={22} /><span>我的飞书 · {paired ? '已配对' : '未绑定'}</span></button>
+            <AutoDownloadControl compact enabled={!!feishu?.config.enabled} busy={actionBusy} onToggle={() => void toggleFeishu()} />
+            <small title={feishu?.connection}>{feishu?.connection || '点击上方绑定个人助手'}</small><small className="feishu-category-tip">发链接时加：分类 护肤</small>
+          </div>
         </aside>
+        {view === 'subscriptions' || view === 'live' ? <AutomationPanel key={view} view={view} snapshot={automation.snapshot} error={automation.error} root={downloadDir} category={category} chooseRoot={() => void action(chooseDirectory)} showTasks={() => { setView('tasks'); setCategory('*'); setStatusFilter('all') }} waiting={autoCandidates.length > 0 && !autoReady} /> : <section className="library-workspace">
+          <form className="collection-composer" onSubmit={event => void parseLinks(event)}>
+            <div className="collection-heading"><h1>视频链接</h1>{urls.length > 0 && <span>识别到 {urls.length} 条</span>}</div>
+            <div className="collection-input"><textarea aria-label="视频链接" value={input} onChange={event => setInput(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void parseLinks() } }} placeholder={'粘贴多条视频链接或分享文案，每行一条'} /><button className="primary" type="submit" disabled={parsing || !toolsReady || !urls.length || !journalReady}>{parsing ? <LoaderCircle className="spin" size={20} /> : null}解析链接</button><button type="button" disabled={parsing || !toolsReady || urls.length !== 1 || !journalReady} onClick={() => void parseLinks(undefined, true)}>博主主页</button></div>
+            <div className="collection-options">
+              <div className="output-options"><label><input type="checkbox" checked={includeVideo} onChange={event => setIncludeVideo(event.target.checked)} />视频</label><label><input type="checkbox" checked={includeThumbnail} onChange={event => setIncludeThumbnail(event.target.checked)} />封面</label><label><input type="checkbox" checked={includeCopy} onChange={event => requestTranslation(event.target.checked ? 'zh' : 'none')} />双语文案</label><label title="平台字幕存在时保存原文件"><input type="checkbox" checked={includeSubtitle} onChange={event => setIncludeSubtitle(event.target.checked)} />原版字幕</label></div>
+              <label className="compact-select">画质<select aria-label="批量画质" value={quality} onChange={event => setBatchQuality(event.target.value)}><option value="best">原始最佳</option><option value="2160">最高 4K</option><option value="1080">最高 1080P</option><option value="720">最高 720P</option><option value="480">最高 480P</option></select></label>
+              <button className="text-button" type="button" aria-expanded={optionsOpen} onClick={() => setOptionsOpen(!optionsOpen)}>下载选项<ChevronDown size={18} /></button>
+            </div>
+            <div className="collection-location"><span>保存到</span><button type="button" className="path-control" title={outputPath} onClick={() => void action(chooseDirectory)}><span>{outputPath}</span><FolderOpen size={20} /><span>更改</span></button><label className="compact-select">识别<select aria-label="识别模型" value={modelId} onChange={event => chooseModelFromPanel(event.target.value)}>{runtime?.models.map(model => <option key={model.id} value={model.id}>{model.name.split(' · ')[0]}{model.installed ? '' : ' · 未下载'}</option>)}</select></label><label className="compact-select">翻译<select aria-label="翻译方式" value={translationProvider} onChange={event => { const value = event.target.value as TranslationProvider; setTranslationProvider(value); window.localStorage.setItem('yinglian-translation-provider', value) }}><option value="api">AI 接口</option><option value="local">本地模型</option></select></label></div>
+            {optionsOpen && <div className="advanced-options"><label>提取方式<select value={transcriptMode} onChange={event => requestTranscriptMode(event.target.value as TranscriptMode)}><option value="auto">字幕优先，AI 兜底</option><option value="native">仅平台字幕</option><option value="ai">始终 AI 识别</option></select></label><label>来源语言<select value={language} onChange={event => setLanguage(event.target.value)}><option value="auto">自动检测</option><option value="en">英语</option><option value="id">印尼语</option><option value="zh">中文</option><option value="ja">日语</option><option value="ko">韩语</option><option value="es">西班牙语</option></select></label><p>画质不超过原视频；原字幕有则保存。API 翻译会发送字幕文本至你配置的服务，不上传账号 Cookie。</p></div>}
+          </form>
+          <section className="library-section">
+            <div className="library-heading"><h2>{category === '*' ? (view === 'tasks' ? '视频任务' : '全部素材') : category}</h2><div className="library-filters" aria-label="任务状态筛选">{[['all','全部'],['active','进行中'],['completed','已完成'],['issues','需处理']].map(([value,label]) => <button key={value} className={statusFilter === value ? 'active' : ''} onClick={() => { if (value === 'completed') setView('library'); setStatusFilter(value) }}>{label}</button>)}</div><label className="library-search"><Search size={18} /><input aria-label="搜索素材" value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索标题或备注" /></label></div>
+            {bulkTargets.some(record => record.item.selected) && <div className="library-bulk"><label><input type="checkbox" checked={bulkTargets.length > 0 && bulkTargets.every(record => record.item.selected)} disabled={!bulkTargets.length} onChange={toggleAll} />全选手动任务</label><span>{shown.length} 条</span><button disabled={!bulkTargets.some(record => record.item.selected) || running} onClick={removeSelectedQueueItems}><Trash2 size={16} />移除记录</button><button className="primary" disabled={downloadStarting || running || parsing || !visibleSelected.length || !selectedOutputCount || !toolsReady || !journalReady} onClick={() => void startSelectedDownloads(visibleSelected.map(record => record.item.id))}>{running ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}{running ? '任务处理中' : `下载选中 ${visibleSelected.length} 项`}</button></div>}
+            <div className="asset-grid">
+              {!shown.length && <div className="library-empty"><Archive size={38} /><h3>{search || statusFilter !== 'all' ? '没有匹配的素材' : '把好视频收在这里'}</h3><p>粘贴链接解析，或用自己的飞书助手发送视频。</p><p>每条视频独立保存，可按分类和备注查找。</p></div>}
+              {shown.map(record => <MediaCard key={record.source + record.item.id} record={record}
+                onSelect={() => setPendingItems(current => current.map(item => item.id === record.item.id ? { ...item, selected: !item.selected } : item))}
+                onEdit={() => editRecord(record)} onOpen={() => record.task && void openTaskFolder(record.task)}
+                onCopy={() => void action(async () => { const text = await invoke<string>('read_bilingual', { outputDir: record.task!.outputDir }); await navigator.clipboard.writeText(text); setMessage('双语文案已复制') })}
+                onCancel={() => record.task && void cancelTask(record.task)} onRetry={() => void retryRecord(record)} />)}
+            </div>
+          </section>
+        </section>}
       </div>
+      <TeamInbox open={teamOpen} onClose={() => setTeamOpen(false)} runtime={runtime} defaultDir={downloadDir} provider={translationProvider} modelId={modelId} onSnapshot={setFeishu} />
+      {categoryDraft !== null && <div className="modal-backdrop"><form className="modal simple-form" onSubmit={event => { event.preventDefault(); try { const name = normalizeCategory(categoryDraft); setCategories(current => [...new Set([...current, name])]); setCategory(name); setCategoryDraft(null) } catch (error) { setMessage(String(error)) } }}><h2>新建分类</h2><label>分类名称<input autoFocus value={categoryDraft} maxLength={180} onChange={event => setCategoryDraft(event.target.value)} placeholder="例如：美妆/口播" required /></label><p>新任务将保存到对应分类文件夹。</p><div className="modal-actions"><button type="button" onClick={() => setCategoryDraft(null)}>取消</button><button className="confirm" type="submit">创建</button></div></form></div>}
+      {editing && <div className="modal-backdrop"><form className="modal simple-form" onSubmit={event => { event.preventDefault(); void saveRecord() }}><h2>分类与备注</h2><label>分类<input value={editCategory} onChange={event => setEditCategory(event.target.value)} required maxLength={180} /></label><label>备注<textarea value={editNote} onChange={event => setEditNote(event.target.value)} maxLength={1000} /></label><p>已下载的单条视频文件夹会一起移动，不覆盖已有文件。</p><div className="modal-actions"><button type="button" onClick={() => setEditing(null)} disabled={actionBusy}>取消</button><button className="confirm" type="submit" disabled={actionBusy}>保存</button></div></form></div>}
+      {accountsOpen && <AccountsPanel onClose={() => setAccountsOpen(false)} />}
 
       {modelPrompt && (
         <div className="modal-backdrop">
           <section className="modal first-model-modal">
             <div className="model-prompt-mark"><WandSparkles /></div>
             <h2>首次使用需要下载模型</h2>
-            <p>模型只下载一次，并保存在你选择的本地位置。没有得到确认前，影链工坊不会自动下载。</p>
+            <p>模型只下载一次，并保存在你选择的本地位置。没有得到确认前，跑量影链工坊不会自动下载。</p>
             <div className="prompt-models">
               {modelPrompt.speech && <div><span><PackageOpen /><strong>{selectedModel?.name || '语音识别模型'}</strong></span><b>{formatBytes(selectedModel?.size_bytes)}</b><small>用于英语、印尼语等多语言语音文案提取</small></div>}
               {modelPrompt.translation && <div><span><Languages /><strong>多语言 → 简体中文</strong></span><b>{formatBytes(runtime?.translation_model_size_bytes || 646109073)}</b><small>用于生成原文与中文对照的双语文案</small></div>}
@@ -884,7 +956,7 @@ function App() {
 
       {modelsOpen && (
         <div className="modal-backdrop" onMouseDown={() => !modelBusy && !translationBusy && !aiSettingsBusy && !aiModelsBusy && setModelsOpen(false)}>
-          <section className="modal model-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" disabled={aiSettingsBusy || aiModelsBusy} onClick={() => !modelBusy && !translationBusy && !aiSettingsBusy && !aiModelsBusy && setModelsOpen(false)}><X /></button><Languages className="modal-mark" /><h2>模型</h2><p>管理语音识别模型，并选择本地模型或兼容 OpenAI 格式的 AI 接口完成中文翻译。</p>
+          <section className="modal model-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" aria-label="关闭模型窗口" type="button" disabled={aiSettingsBusy || aiModelsBusy} onClick={() => !modelBusy && !translationBusy && !aiSettingsBusy && !aiModelsBusy && setModelsOpen(false)}><X /></button><Languages className="modal-mark" /><h2>模型</h2><p>管理语音识别模型，并选择本地模型或兼容 OpenAI 格式的 AI 接口完成中文翻译。</p>
             <button className="model-folder path-readable" type="button" disabled={modelBusy || translationBusy} onClick={chooseModelDirectory}><FolderOpen /><span title={runtime?.model_dir}>{runtime?.model_dir || '正在读取模型目录'}</span><em>选择位置</em></button>
             {modelProgress && <div className="model-confirm-progress"><div><span>{modelProgress.message}</span><b>{Math.round(modelProgress.percent)}%</b></div><div><i style={{ width: `${modelProgress.percent}%` }} /></div><small>{formatBytes(modelProgress.downloaded)} / {formatBytes(modelProgress.total)}</small><button type="button" onClick={() => invoke('cancel_model_download')}>取消下载</button></div>}
             {translationBusy && <div className="model-confirm-progress"><div><span>{translationProgress.message || '正在准备中文翻译模型'}</span><b>{Math.round(translationProgress.percent)}%</b></div><div><i style={{ width: `${translationProgress.percent}%` }} /></div></div>}

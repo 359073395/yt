@@ -1,6 +1,6 @@
 {
   "name": "yinglian-desktop",
-  "version": "1.1.8",
+  "version": "1.10.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,6 +8,7 @@
     "dev:web": "vite",
     "build:web": "tsc --noEmit && vite build",
     "build": "tauri build",
+    "build:preview": "tauri build --config src-tauri/tauri.preview.conf.json --bundles nsis",
     "test": "vitest run",
     "prepare:runtime": "node scripts/prepare-runtime.mjs"
   },
