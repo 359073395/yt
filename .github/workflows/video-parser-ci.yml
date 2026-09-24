@@ -39,7 +39,7 @@ jobs:
           DATABASE_PATH: ${{ runner.temp }}/yinglian.sqlite3
           COOKIE_DIR: ${{ runner.temp }}/yinglian-cookies
           AUTH_SECRET: ci-only-secret
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
