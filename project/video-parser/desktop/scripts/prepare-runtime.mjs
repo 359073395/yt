@@ -58,7 +58,7 @@ const ytDlpPath = join(binDir, 'yt-dlp.exe')
 await download('https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe', ytDlpPath)
 manifest.components.ytDlp = { source: 'https://github.com/yt-dlp/yt-dlp/releases/tag/2026.08.19', bytes: statSync(ytDlpPath).size }
 
-const ffmpegRelease = await json('https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest')
+const ffmpegRelease = await json('https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/autobuild-2026-09-24-14-14')
 const ffmpegAsset = ffmpegRelease.assets.find((asset) => asset.name === 'ffmpeg-master-latest-win64-lgpl-shared.zip')
   ?? ffmpegRelease.assets.find((asset) => /win64-lgpl-shared\.zip$/i.test(asset.name))
 if (!ffmpegAsset) throw new Error('没有找到 Windows x64 FFmpeg LGPL shared 构建')
@@ -71,7 +71,9 @@ if (!ffmpegExe) throw new Error('FFmpeg 压缩包中缺少 ffmpeg.exe')
 copyRuntimeFolder(ffmpegExe, ['ffmpeg.exe', 'ffprobe.exe'])
 manifest.components.ffmpeg = { tag: ffmpegRelease.tag_name, asset: ffmpegAsset.name }
 
-const whisperRelease = await json('https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest')
+// Source-only version releases can be "latest" without Windows assets. Pin
+// the same official CPU runtime already verified in the installed application.
+const whisperRelease = await json('https://api.github.com/repos/ggml-org/whisper.cpp/releases/tags/b4938')
 const whisperAsset = whisperRelease.assets.find((asset) => /^whisper-bin-x64\.zip$/i.test(asset.name))
   ?? whisperRelease.assets.find((asset) => /bin.*x64.*\.zip$/i.test(asset.name))
 if (!whisperAsset) throw new Error('没有找到 Windows x64 whisper.cpp 构建')
