@@ -245,7 +245,8 @@ fn category_dir(root: &str, category: &str) -> Result<PathBuf, String> {
 }
 fn relocate(state: &TeamState, job: &LocalJob, category: &str) -> Result<(), String> {
     let mut data = state.data.lock().map_err(|_| "收件状态不可用")?;
-    let job = data.jobs.get(&job.id).ok_or("任务不存在")?.clone();
+    // A terminal record may have been removed since the worker took its snapshot.
+    let Some(job) = data.jobs.get(&job.id).cloned() else { return Ok(()); };
     if matches!(job.stage.as_str(), "preparing" | "text_ready") {
         return Ok(());
     }
@@ -676,6 +677,10 @@ pub async fn team_action(
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<TeamState>();
+        if action == "remove" {
+            remove_record(&state, body["id"].as_str().ok_or("任务编号缺失")?)?;
+            return Ok(json!({}));
+        }
         if action == "renew_pair" {
             feishu::renew_pair(&state)?;
             return Ok(json!({}));
@@ -736,6 +741,23 @@ pub async fn team_action(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+fn remove_record(state: &TeamState, id: &str) -> Result<(), String> {
+    let mut data = state.data.lock().map_err(|_| "收件状态不可用")?;
+    let job = data.jobs.get(id).ok_or("任务不存在")?;
+    if job.device_id != data.config.session["device_id"].as_str().unwrap_or("") {
+        return Err("任务不属于当前配对".into());
+    }
+    if !matches!(job.stage.as_str(), "completed" | "failed" | "partial" | "cancelled") || job.move_to.is_some() {
+        return Err("任务正在处理中，请结束后再删除记录".into());
+    }
+    let mut next = data.clone();
+    next.jobs.remove(id);
+    // Retain processed message IDs: history replay must not resurrect deleted jobs.
+    // This touches only the journal, never the downloaded output directory.
+    state.save(&next)?;
+    *data = next;
+    Ok(())
 }
 #[tauri::command]
 pub async fn team_prepare_text(
@@ -1146,5 +1168,42 @@ mod tests {
             assert!(safe_category(v).is_err(), "{v}");
         }
         assert_eq!(safe_category("润唇膏"), Ok("润唇膏".into()));
+    }
+    #[test]
+    fn deleting_idle_record_is_durable_and_never_deletes_downloaded_files() {
+        for stage in ["completed", "failed", "partial", "cancelled"] {
+            let state = fixture_state();
+            let job = fixture_job(&state);
+            state.data.lock().unwrap().config.session = json!({"device_id":"test"});
+            state.update(&job.id, |j| j.stage = stage.into()).unwrap();
+            remove_record(&state, &job.id).unwrap();
+            assert!(state.data.lock().unwrap().jobs.is_empty());
+            assert!(load_journal(&state.path).unwrap().0.jobs.is_empty());
+            assert_eq!(fs::read(Path::new(&job.result.unwrap().output_dir).join("视频.mp4")).unwrap(), b"test payload");
+        }
+    }
+    #[test]
+    fn active_or_unowned_records_cannot_be_deleted() {
+        let state = fixture_state();
+        let job = fixture_job(&state);
+        assert!(remove_record(&state, &job.id).unwrap_err().contains("当前配对"));
+        state.data.lock().unwrap().config.session = json!({"device_id":"test"});
+        for stage in ["queued", "downloading", "archiving", "downloaded", "preparing", "text_ready", "unknown"] {
+            state.update(&job.id, |j| j.stage = stage.into()).unwrap();
+            assert!(remove_record(&state, &job.id).unwrap_err().contains("正在处理中"));
+            assert_eq!(load_journal(&state.path).unwrap().0.jobs.len(), 1);
+        }
+        state.update(&job.id, |j| { j.stage = "completed".into(); j.move_to = Some("pending".into()); }).unwrap();
+        assert!(remove_record(&state, &job.id).is_err());
+    }
+    #[test]
+    fn failed_record_deletion_write_keeps_the_original_record() {
+        let state = fixture_state();
+        let job = fixture_job(&state);
+        state.data.lock().unwrap().config.session = json!({"device_id":"test"});
+        // A directory in place of the next snapshot simulates a write failure.
+        fs::create_dir(state.path.with_extension("1.json")).unwrap();
+        assert!(remove_record(&state, &job.id).is_err());
+        assert!(state.data.lock().unwrap().jobs.contains_key(&job.id));
     }
 }

@@ -22,9 +22,22 @@ export interface LibraryJournal {
   items: PendingItem[]
   tasks: DownloadTask[]
   categories: string[]
+  dismissedDeliveries?: string[]
 }
 export const activeStatuses: TaskStatus[] = ['queued', 'scanning', 'downloading', 'transcribing', 'translating']
 export function isActive(task?: DownloadTask) { return !!task && activeStatuses.includes(task.status) }
+
+// Keep subscription receipts after record deletion, so an in-flight poll cannot re-add it.
+export function removeLibraryRecords(journal: LibraryJournal, ids: string[]): LibraryJournal {
+  const selected = new Set(ids)
+  if (journal.items.some(item => selected.has(item.id) && item.loading) || journal.tasks.some(task => selected.has(task.queueItemId) && isActive(task))) throw new Error('任务正在处理中，请结束后再删除记录')
+  return {
+    ...journal,
+    items: journal.items.filter(item => !selected.has(item.id)),
+    tasks: journal.tasks.filter(task => !selected.has(task.queueItemId)),
+    dismissedDeliveries: [...new Set([...(journal.dismissedDeliveries || []), ...journal.items.filter(item => selected.has(item.id)).flatMap(item => item.automationId ? [item.automationId] : [])])],
+  }
+}
 
 // The native directory layer repeats these checks. Never allow a category to escape the chosen root.
 export function normalizeCategory(value: string): string {
@@ -47,13 +60,14 @@ export function restoreLibrary(value: unknown): LibraryJournal {
   const data = value as Partial<LibraryJournal>
   if (data.version !== 1) throw new Error('素材库版本不兼容；已停止写入，原数据未改动')
   if (!Array.isArray(data.items) || !Array.isArray(data.tasks) || !Array.isArray(data.categories)) throw new Error('素材库格式损坏；原数据未改动')
+  if (data.dismissedDeliveries !== undefined && (!Array.isArray(data.dismissedDeliveries) || data.dismissedDeliveries.some(id => typeof id !== 'string'))) throw new Error('订阅收件记录损坏；原数据未改动')
   if (data.items.some(item => !item || typeof item.id !== 'string' || typeof item.url !== 'string' || (item.category != null && typeof item.category !== 'string')) || data.categories.some(category => typeof category !== 'string')) throw new Error('素材库记录损坏；已停止写入，原数据未改动')
   const items = data.items.map(item => ({ ...item, loading: false, category: normalizeCategory(item.category || '待分类'), note: typeof item.note === 'string' ? item.note : '', created: Number(item.created) || 0 }))
   const ids = new Set(items.map(item => item.id))
   const tasks = data.tasks.filter(task => task && ids.has(task.queueItemId)).map(task => isActive(task)
     ? { ...task, status: task.outputDir ? 'partial' as const : 'cancelled' as const, message: task.outputDir ? '上次处理已中断；已保存文件保留，可重试文案' : '上次任务已中断，请重新开始' }
     : task)
-  return { version: 1, items, tasks, categories: data.categories.map(normalizeCategory) }
+  return { version: 1, items, tasks, categories: data.categories.map(normalizeCategory), dismissedDeliveries: [...new Set(data.dismissedDeliveries || [])] }
 }
 export function filterRecords(records: LibraryRecord[], category: string, search: string, status: string, view: string) {
   const term = search.trim().toLocaleLowerCase()

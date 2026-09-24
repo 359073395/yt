@@ -1,10 +1,10 @@
 import React from 'react'
-import { CheckCircle2, CircleStop, Copy, Download, FolderOpen, ImageOff, Pencil, RefreshCw } from 'lucide-react'
+import { CheckCircle2, CircleStop, Copy, Download, FolderOpen, ImageOff, Pencil, RefreshCw, Trash2 } from 'lucide-react'
 import type { LibraryRecord } from './library'
 import { isActive, visibleStages } from './library'
 
-export const MediaCard = React.memo(function MediaCard({ record, onSelect, onEdit, onOpen, onCopy, onCancel, onRetry }: {
-  record: LibraryRecord; onSelect: () => void; onEdit: () => void; onOpen: () => void; onCopy: () => void; onCancel: () => void; onRetry: () => void
+export const MediaCard = React.memo(function MediaCard({ record, onSelect, onEdit, onOpen, onCopy, onCancel, onRetry, onRemove, removalBusy = false }: {
+  record: LibraryRecord; onSelect: () => void; onEdit: () => void; onOpen: () => void; onCopy: () => void; onCancel: () => void; onRetry: () => void; onRemove: () => void; removalBusy?: boolean
 }) {
   const { item, task, source } = record
   const [badImage, setBadImage] = React.useState(false)
@@ -35,6 +35,7 @@ export const MediaCard = React.memo(function MediaCard({ record, onSelect, onEdi
         {isActive(task) && source === 'manual' && <button onClick={onCancel}><CircleStop size={17} />取消</button>}
         {retry && <button onClick={onRetry}><RefreshCw size={17} />{task?.result?.segments.length ? '重试文案' : '重试'}</button>}
         {!task && source === 'manual' && <button onClick={onRetry}><Download size={17} />下载</button>}
+        <button onClick={onRemove} disabled={removalBusy || item.loading || isActive(task)} title={isActive(task) || item.loading ? '任务正在处理中，结束后可删除记录' : '只删除记录，保留本地文件'}><Trash2 size={17} />删除记录</button>
       </div>
     </div>
   </article>

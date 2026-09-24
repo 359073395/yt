@@ -19,8 +19,8 @@ export interface AutomationSnapshot {
 }
 export const emptyAutomation: AutomationSnapshot = { subscriptions: [], deliveries: [], recordings: [], error: '' }
 export const recordingActive = (status: string) => ['resolving', 'recording', 'stopping'].includes(status)
-export function mergeDeliveries(items: PendingItem[], deliveries: Delivery[], quality: string): PendingItem[] {
-  const known = new Set(items.map(item => item.automationId).filter(Boolean))
+export function mergeDeliveries(items: PendingItem[], deliveries: Delivery[], quality: string, dismissed: string[] = []): PendingItem[] {
+  const known = new Set([...dismissed, ...items.map(item => item.automationId).filter(Boolean)])
   const additions = deliveries.filter(delivery => {
     if (known.has(delivery.id)) return false
     known.add(delivery.id); return true

@@ -4,7 +4,7 @@ import { MediaCard } from './MediaCard'
 import { AccountsPanel } from './AccountsPanel'
 import { AutomationPanel, useAutomation } from './AutomationPanel'
 import { mergeDeliveries } from './automation'
-import { categoryDirectory, filterRecords, isActive, normalizeCategory, restoreLibrary, type PendingItem, type LibraryRecord, type LibraryJournal } from './library'
+import { categoryDirectory, filterRecords, isActive, normalizeCategory, restoreLibrary, removeLibraryRecords, type PendingItem, type LibraryRecord, type LibraryJournal } from './library'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { check, type Update } from '@tauri-apps/plugin-updater'
@@ -119,6 +119,9 @@ function App() {
   const [accountsOpen, setAccountsOpen] = React.useState(false)
   const [categoryDraft, setCategoryDraft] = React.useState<string | null>(null)
   const [editing, setEditing] = React.useState<LibraryRecord | null>(null)
+  const [removing, setRemoving] = React.useState<LibraryRecord[] | null>(null)
+  const [removalError, setRemovalError] = React.useState('')
+  const [dismissedDeliveries, setDismissedDeliveries] = React.useState<string[]>([])
   const [editCategory, setEditCategory] = React.useState('')
   const [editNote, setEditNote] = React.useState('')
   const [actionBusy, setActionBusy] = React.useState(false)
@@ -184,12 +187,13 @@ function App() {
       if (cancelled) return
       const restored = restoreLibrary(value)
       setPendingItems(restored.items); setTasks(restored.tasks); setCategories(restored.categories); setJournalReady(true)
+      setDismissedDeliveries(restored.dismissedDeliveries || [])
     }).catch(error => { if (!cancelled) setMessage(String(error)) })
     return () => { cancelled = true }
   }, [])
   React.useEffect(() => {
     if (!journalReady) return
-    journalLatest.current = { version: 1, items: pendingItems, tasks, categories }
+    journalLatest.current = { version: 1, items: pendingItems, tasks, categories, dismissedDeliveries }
     if (journalTimer.current !== null) return
     journalTimer.current = window.setTimeout(() => {
       const data = journalLatest.current
@@ -198,16 +202,17 @@ function App() {
         await invoke<void>('library_save', { data })
         const ids = data?.items.map(item => item.automationId).filter((id): id is string => !!id) || []
         setPersistedAutomation(ids)
-        if (ids.length) await invoke('automation_ack', { ids })
+        const receipts = [...ids, ...(data?.dismissedDeliveries || [])]
+        if (receipts.length) await invoke('automation_ack', { ids: receipts })
       })
         .catch(error => setMessage(`任务记录保存失败：${String(error)}。请不要退出软件。`))
     }, 500)
-  }, [journalReady, pendingItems, tasks, categories])
+  }, [journalReady, pendingItems, tasks, categories, dismissedDeliveries])
   React.useEffect(() => () => { if (journalTimer.current !== null) window.clearTimeout(journalTimer.current) }, [])
   React.useEffect(() => {
-    if (!journalReady || !automation.snapshot.deliveries.length) return
-    setPendingItems(items => mergeDeliveries(items, automation.snapshot.deliveries, quality))
-  }, [journalReady, automation.snapshot.deliveries, quality])
+    if (!journalReady || removing || actionBusy || !automation.snapshot.deliveries.length) return
+    setPendingItems(items => mergeDeliveries(items, automation.snapshot.deliveries, quality, dismissedDeliveries))
+  }, [journalReady, automation.snapshot.deliveries, quality, dismissedDeliveries, removing, actionBusy])
 
   const refreshRuntime = React.useCallback(async () => {
     const info = await invoke<RuntimeInfo>('runtime_info')
@@ -655,7 +660,7 @@ function App() {
 
   async function startSelectedDownloads(ids?: string[]) {
     pendingStartIds.current = ids
-    if (downloadStarting || running) return
+    if (downloadStarting || running || removing || actionBusy) return
     if (!ids?.length && !selectedItems.length) {
       setMessage('请先解析并勾选至少一条作品。')
       return
@@ -681,7 +686,7 @@ function App() {
     }
   }
 
-  const autoReady = journalReady && toolsReady && !!downloadDir && !!selectedOutputCount && !running && !downloadStarting && !parsing
+  const autoReady = journalReady && toolsReady && !!downloadDir && !!selectedOutputCount && !running && !downloadStarting && !parsing && !removing && !actionBusy
     && (!includeCopy || ((transcriptMode === 'native' || !!installedModel) && (translationProvider === 'api' ? aiConfigured : translationCached)))
   const autoCandidates = pendingItems.filter(item => item.autoDownload && persistedAutomation.includes(item.automationId || '') && !tasks.some(task => task.queueItemId === item.id))
   React.useEffect(() => {
@@ -799,15 +804,32 @@ function App() {
   }
 
   function removeSelectedQueueItems() {
-    const ids = new Set(bulkTargets.filter(record => record.item.selected).map(record => record.item.id))
-    setPendingItems(current => current.filter(item => !ids.has(item.id)))
-    setTasks(current => current.filter(task => !ids.has(task.queueItemId)))
+    setRemovalError('')
+    setRemoving(bulkTargets.filter(record => record.item.selected))
   }
 
-  function clearQueue() {
-    const removedUrls = new Set(pendingItems.map((item) => item.url))
-    setPendingItems([])
-    setTasks((current) => current.filter((task) => !removedUrls.has(task.url)))
+  async function deleteRecords() {
+    if (!removing?.length || actionBusy) return
+    setActionBusy(true); setRemovalError('')
+    try {
+      if (removing[0].source === 'feishu') {
+        await invoke('team_action', { action: 'remove', body: { id: removing[0].item.id } })
+        setFeishu(await invoke<Snapshot>('team_snapshot'))
+      } else {
+        if (running || downloadStarting || parsing) throw new Error('任务正在处理中，请结束后再删除记录')
+        const data = removeLibraryRecords({ version: 1, items: pendingItems, tasks, categories, dismissedDeliveries }, removing.map(record => record.item.id))
+        if (journalTimer.current !== null) { window.clearTimeout(journalTimer.current); journalTimer.current = null }
+        // Drain older writes first; do not report success until deletion is on disk.
+        const write = journalWriter.current.then(() => invoke<void>('library_save', { data }))
+        journalWriter.current = write.catch(() => undefined)
+        await write
+        journalLatest.current = data
+        setPendingItems(data.items); setTasks(data.tasks); setDismissedDeliveries(data.dismissedDeliveries || [])
+      }
+      setMessage(`已删除 ${removing.length} 条记录，本地视频、封面和文案等文件保留。`)
+      setRemoving(null)
+    } catch (error) { setRemovalError(String(error)) }
+    finally { setActionBusy(false) }
   }
 
   function chooseModelFromPanel(selected: string) {
@@ -912,12 +934,15 @@ function App() {
                 onSelect={() => setPendingItems(current => current.map(item => item.id === record.item.id ? { ...item, selected: !item.selected } : item))}
                 onEdit={() => editRecord(record)} onOpen={() => record.task && void openTaskFolder(record.task)}
                 onCopy={() => void action(async () => { const text = await invoke<string>('read_bilingual', { outputDir: record.task!.outputDir }); await navigator.clipboard.writeText(text); setMessage('双语文案已复制') })}
-                onCancel={() => record.task && void cancelTask(record.task)} onRetry={() => void retryRecord(record)} />)}
+                onCancel={() => record.task && void cancelTask(record.task)} onRetry={() => void retryRecord(record)}
+                removalBusy={!journalReady || actionBusy || (record.source === 'manual' && (running || downloadStarting || parsing))}
+                onRemove={() => { setRemovalError(''); setRemoving([record]) }} />)}
             </div>
           </section>
         </section>}
       </div>
       <TeamInbox open={teamOpen} onClose={() => setTeamOpen(false)} runtime={runtime} defaultDir={downloadDir} provider={translationProvider} modelId={modelId} onSnapshot={setFeishu} />
+      {removing && <div className="modal-backdrop"><section className="modal simple-form" role="dialog" aria-modal="true" aria-labelledby="remove-record-title"><h2 id="remove-record-title">删除{removing.length > 1 ? ` ${removing.length} 条` : ''}记录？</h2><p>{removing.length === 1 ? removing[0].item.title : '所选记录将从视频任务和素材库中移除。'}</p><p>只删除软件里的记录，不删除本地视频、封面、文案或字幕文件。删除后不会自动恢复。</p>{removalError && <p role="alert">{removalError}</p>}<div className="modal-actions"><button type="button" autoFocus disabled={actionBusy} onClick={() => setRemoving(null)}>取消</button><button type="button" className="confirm" disabled={actionBusy} onClick={() => void deleteRecords()}>{actionBusy ? '正在删除…' : '仅删除记录'}</button></div></section></div>}
       {categoryDraft !== null && <div className="modal-backdrop"><form className="modal simple-form" onSubmit={event => { event.preventDefault(); try { const name = normalizeCategory(categoryDraft); setCategories(current => [...new Set([...current, name])]); setCategory(name); setCategoryDraft(null) } catch (error) { setMessage(String(error)) } }}><h2>新建分类</h2><label>分类名称<input autoFocus value={categoryDraft} maxLength={180} onChange={event => setCategoryDraft(event.target.value)} placeholder="例如：美妆/口播" required /></label><p>新任务将保存到对应分类文件夹。</p><div className="modal-actions"><button type="button" onClick={() => setCategoryDraft(null)}>取消</button><button className="confirm" type="submit">创建</button></div></form></div>}
       {editing && <div className="modal-backdrop"><form className="modal simple-form" onSubmit={event => { event.preventDefault(); void saveRecord() }}><h2>分类与备注</h2><label>分类<input value={editCategory} onChange={event => setEditCategory(event.target.value)} required maxLength={180} /></label><label>备注<textarea value={editNote} onChange={event => setEditNote(event.target.value)} maxLength={1000} /></label><p>已下载的单条视频文件夹会一起移动，不覆盖已有文件。</p><div className="modal-actions"><button type="button" onClick={() => setEditing(null)} disabled={actionBusy}>取消</button><button className="confirm" type="submit" disabled={actionBusy}>保存</button></div></form></div>}
       {accountsOpen && <AccountsPanel onClose={() => setAccountsOpen(false)} />}

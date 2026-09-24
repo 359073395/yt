@@ -1,5 +1,24 @@
 use super::*;
 
+#[test]
+fn deleted_download_does_not_return_from_history_replay_after_restart() {
+    let s = fixture();
+    let message = event("delete-test", "https://youtu.be/abc 分类 测试");
+    ingest(&s, "cli_testapp", &message).unwrap();
+    let id = s.data.lock().unwrap().jobs.keys().next().unwrap().clone();
+    s.update(&id, |j| j.stage = "completed".into()).unwrap();
+    remove_record(&s, &id).unwrap();
+    let (saved, _) = load_journal(&s.path).unwrap();
+    assert!(saved.jobs.is_empty());
+    assert!(saved.messages.contains_key("device-one:delete-test"));
+    *s.data.lock().unwrap() = saved;
+    ingest(&s, "cli_testapp", &message).unwrap();
+    assert!(s.data.lock().unwrap().jobs.is_empty());
+    // A deliberate new message remains an explicit request, not history replay.
+    ingest(&s, "cli_testapp", &event("new-request", "https://youtu.be/abc")).unwrap();
+    assert_eq!(s.data.lock().unwrap().jobs.len(), 1);
+}
+
 fn history_message(id: &str, owner: &str) -> Value {
     json!({"message_id":id,"sender":{"id":owner,"id_type":"open_id","sender_type":"user"},"msg_type":"text","body":{"content":json!({"text":format!("https://youtu.be/{id}")}).to_string()}})
 }

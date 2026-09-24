@@ -62,7 +62,16 @@ export function setupPreview() {
         if (r) { r.status = 'completed'; r.detail = 'UI 模拟已停止，无真实录制文件' }
         return null
       }
-      case 'team_snapshot': return snapshot
+      case 'team_snapshot': return structuredClone(snapshot)
+      case 'team_action': {
+        const job = snapshot.jobs.find(job => job.id === args.body.id)
+        if (!job) throw new Error('任务不存在')
+        if (args.action === 'remove') {
+          if (!['completed', 'failed', 'partial', 'cancelled'].includes(job.stage)) throw new Error('任务正在处理中，请结束后再删除记录')
+          snapshot.jobs = snapshot.jobs.filter(job => job.id !== args.body.id)
+        } else throw new Error('界面预览未模拟此操作')
+        return null
+      }
       case 'team_save': snapshot = { ...snapshot, config: args.config }; return null
       case 'choose_download_dir': downloadDir = 'E:\\验收视频'; return downloadDir
       case 'choose_model_dir': modelDir = 'E:\\验收模型'; return modelDir
