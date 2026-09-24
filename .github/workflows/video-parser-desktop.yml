@@ -87,7 +87,12 @@ jobs:
           if ($LASTEXITCODE) { throw 'Signed updater manifest missing' }
           $manifest = Get-Content -Raw (Join-Path $newDir 'latest.json') | ConvertFrom-Json
           if ($manifest.version -ne '1.10.0') { throw 'Unexpected update version; review channel migration for next release' }
-          Copy-Item -LiteralPath (Join-Path $newDir 'latest.json') -Destination (Join-Path $newDir 'paoliang-latest.json')
+          # Use the public binary download, not an API metadata/draft URL.
+          $assetName = "Paoliang-YingLian_$($manifest.version)_x64-setup.exe"
+          foreach ($platform in $manifest.platforms.PSObject.Properties) {
+            $platform.Value.url = "https://github.com/${{ github.repository }}/releases/download/$tag/$assetName"
+          }
+          $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $newDir 'paoliang-latest.json') -Encoding utf8
           gh release download video-parser-desktop-v1.1.8 --repo '${{ github.repository }}' --pattern latest.json --dir $legacyDir
           if ($LASTEXITCODE) { throw 'Legacy channel manifest unavailable; do not publish' }
           gh release upload $tag (Join-Path $newDir 'paoliang-latest.json') (Join-Path $legacyDir 'latest.json') RELEASE-1.10.0.md --clobber --repo '${{ github.repository }}'
