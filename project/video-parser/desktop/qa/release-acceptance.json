@@ -1,15 +1,57 @@
 {
-  "version": "1.1.8",
-  "sourceTrees": {},
+  "version": "1.10.0",
+  "sourceTrees": {
+    "src": "bd6e94a2930961b92e84316fc0a1f9d91e0c9958",
+    "src-tauri/src": "ba40be9813b0db5aa6fd1226029c7f5a192349b9",
+    "src-tauri/tauri.conf.json": "5cdb3b7fc03766587715417f55332e9cc5c68a08",
+    "package-lock.json": "a847142e3cd559879b5f6442eb0b76211eff6b1a",
+    "src-tauri/resources/bin/yt-dlp-plugins": "2b4128f8cb6cd01e7dcf21fd4702420b40e14ff6"
+  },
   "checks": {
-    "design": { "status": "passed", "evidence": "design-qa.md" },
-    "native-installer-migration": { "status": "not_tested" },
-    "four-platform-downloads": { "status": "not_tested" },
-    "local-and-api-transcription-translation": { "status": "not_tested" },
-    "feishu-two-users-two-machines": { "status": "not_tested" },
-    "cancel-resume-output-integrity": { "status": "partial" },
-    "live-recording-replay": { "status": "partial", "evidence": "qa/automation-acceptance-20260924.md" },
-    "subscriptions-images-comments": { "status": "partial", "evidence": "qa/automation-acceptance-20260924.md" },
-    "models-engine-update-security": { "status": "partial" }
-  }
+    "design": {
+      "status": "passed",
+      "evidence": "qa/release-1.10.0.md"
+    },
+    "native-installer-migration": {
+      "status": "passed",
+      "evidence": "qa/release-1.10.0.md"
+    },
+    "four-platform-downloads": {
+      "status": "not_tested"
+    },
+    "local-and-api-transcription-translation": {
+      "status": "not_tested"
+    },
+    "feishu-two-users-two-machines": {
+      "status": "not_tested"
+    },
+    "cancel-resume-output-integrity": {
+      "status": "partial"
+    },
+    "live-recording-replay": {
+      "status": "passed",
+      "evidence": "qa/release-1.10.0.md"
+    },
+    "subscriptions-images-comments": {
+      "status": "partial",
+      "evidence": "qa/automation-acceptance-20260924.md"
+    },
+    "models-engine-update-security": {
+      "status": "partial"
+    },
+    "feishu-classification": {
+      "status": "passed",
+      "evidence": "qa/release-1.10.0.md"
+    },
+    "download-regression": {
+      "status": "passed",
+      "evidence": "qa/release-1.10.0.md"
+    },
+    "automated-regressions": {
+      "status": "passed",
+      "evidence": "qa/release-1.10.0.md"
+    }
+  },
+  "scope": "existing-features-20260924",
+  "approval": "2026-09-24 用户确认：同意，按现有功能验收发布"
 }
