@@ -1,8 +1,8 @@
 {
   "version": "1.10.0",
   "sourceTrees": {
-    "src": "bd6e94a2930961b92e84316fc0a1f9d91e0c9958",
-    "src-tauri/src": "ba40be9813b0db5aa6fd1226029c7f5a192349b9",
+    "src": "12660e0d5d2badf3c6927d71b8a4a8714507059a",
+    "src-tauri/src": "458d0624ddba913d0dfb795b455708a37dc1b371",
     "src-tauri/tauri.conf.json": "5cdb3b7fc03766587715417f55332e9cc5c68a08",
     "package-lock.json": "a847142e3cd559879b5f6442eb0b76211eff6b1a",
     "src-tauri/resources/bin/yt-dlp-plugins": "2b4128f8cb6cd01e7dcf21fd4702420b40e14ff6"
@@ -44,6 +44,10 @@
       "evidence": "qa/release-1.10.0.md"
     },
     "download-regression": {
+      "status": "passed",
+      "evidence": "qa/release-1.10.0.md"
+    },
+    "download-record-deletion": {
       "status": "passed",
       "evidence": "qa/release-1.10.0.md"
     },

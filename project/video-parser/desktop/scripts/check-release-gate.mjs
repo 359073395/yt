@@ -11,7 +11,7 @@ const fullScope = ['design', 'native-installer-migration', 'four-platform-downlo
 // User explicitly approved the existing-feature scope on 2026-09-24. This is
 // version-specific, not a blanket waiver for future releases or a false pass.
 const scoped = manifest.version === '1.10.0' && receipt.scope === 'existing-features-20260924'
-const required = scoped ? ['design', 'native-installer-migration', 'feishu-classification', 'download-regression', 'automated-regressions', 'live-recording-replay'] : fullScope
+const required = scoped ? ['design', 'native-installer-migration', 'feishu-classification', 'download-regression', 'download-record-deletion', 'automated-regressions', 'live-recording-replay'] : fullScope
 const failures = []
 if (receipt.version !== manifest.version) failures.push('验收版本与安装包版本不一致')
 if (scoped && (!receipt.approval || !existsSync(resolve(root, 'RELEASE-1.10.0.md')))) failures.push('缺少本次范围批准或公开功能限制说明')
