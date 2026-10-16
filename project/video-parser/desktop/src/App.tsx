@@ -7,7 +7,8 @@ import { mergeDeliveries } from './automation'
 import { categoryDirectory, filterRecords, isActive, normalizeCategory, restoreLibrary, removeLibraryRecords, type PendingItem, type LibraryRecord, type LibraryJournal } from './library'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { check, type Update } from '@tauri-apps/plugin-updater'
+import { type Update } from '@tauri-apps/plugin-updater'
+import { checkApplicationUpdate } from './updater'
 import {
   AlertCircle,
   Check,
@@ -292,7 +293,7 @@ function App() {
     updateCheckBusy.current = true
     setUpdateChecking(true)
     try {
-      const update = await check({ timeout: 15000 })
+      const update = await checkApplicationUpdate()
       if (!update) {
         if (!silent) setMessage(`当前已是最新版本 ${runtime?.version || ''}`.trim())
         return

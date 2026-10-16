@@ -35,6 +35,7 @@ jobs:
       - name: Prepare official Windows runtimes
         run: npm run prepare:runtime
       - run: npm test -- --run
+      - run: npm run test:runtime
       - name: Native regression tests
         run: cargo test --locked --lib --manifest-path src-tauri/Cargo.toml
       - run: npm audit --omit=dev
@@ -62,7 +63,7 @@ jobs:
           tagName: video-parser-desktop-v__VERSION__
           releaseName: 跑量影链工坊 Desktop __VERSION__
           releaseBody: |
-            Windows x64。1.10.0 按现有功能范围发布，完整更新、升级及限制说明见随包 RELEASE-1.10.0.md。保留 1.1.8-beta 工作台配置；旧独立稳定版不自动切换数据。
+            Windows x64。开源组件维护更新，更新、升级及验证范围见随包对应版本 RELEASE 文档。保留工作台配置；旧独立稳定版不自动切换数据。
           releaseDraft: true
           prerelease: false
           generateReleaseNotes: true
@@ -80,23 +81,20 @@ jobs:
           node scripts/verify-updater.mjs $installer.FullName ($installer.FullName + '.sig')
           if ($LASTEXITCODE) { throw 'Installer does not match the application updater public key' }
           $tag = '${{ github.ref_name }}'
+          $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          $notes = "RELEASE-$version.md"
+          if ($tag -ne "video-parser-desktop-v$version" -or !(Test-Path $notes)) { throw 'Release tag or notes do not match package version' }
           $newDir = Join-Path $env:RUNNER_TEMP 'paoliang-update'
           $legacyDir = Join-Path $env:RUNNER_TEMP 'legacy-update'
           New-Item -ItemType Directory -Path $newDir,$legacyDir -Force | Out-Null
           gh release download $tag --repo '${{ github.repository }}' --pattern latest.json --dir $newDir
           if ($LASTEXITCODE) { throw 'Signed updater manifest missing' }
-          $manifest = Get-Content -Raw (Join-Path $newDir 'latest.json') | ConvertFrom-Json
-          if ($manifest.version -ne '1.10.0') { throw 'Unexpected update version; review channel migration for next release' }
-          # Use the public binary download, not an API metadata/draft URL.
-          $assetName = "Paoliang-YingLian_$($manifest.version)_x64-setup.exe"
-          foreach ($platform in $manifest.platforms.PSObject.Properties) {
-            $platform.Value.url = "https://github.com/${{ github.repository }}/releases/download/$tag/$assetName"
-          }
-          $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $newDir 'paoliang-latest.json') -Encoding utf8
+          node scripts/update-channel.mjs (Join-Path $newDir 'latest.json') (Join-Path $newDir 'paoliang-latest.json') '${{ github.repository }}'
+          if ($LASTEXITCODE) { throw 'Public channel validation failed' }
           gh release download video-parser-desktop-v1.1.8 --repo '${{ github.repository }}' --pattern latest.json --dir $legacyDir
           if ($LASTEXITCODE) { throw 'Legacy channel manifest unavailable; do not publish' }
-          gh release upload $tag (Join-Path $newDir 'paoliang-latest.json') (Join-Path $legacyDir 'latest.json') RELEASE-1.10.0.md --clobber --repo '${{ github.repository }}'
+          gh release upload $tag (Join-Path $newDir 'paoliang-latest.json') (Join-Path $legacyDir 'latest.json') $notes --clobber --repo '${{ github.repository }}'
           if ($LASTEXITCODE) { throw 'Channel upload failed' }
-          gh release edit $tag --notes-file RELEASE-1.10.0.md --repo '${{ github.repository }}'
+          gh release edit $tag --notes-file $notes --repo '${{ github.repository }}'
           if ($LASTEXITCODE) { throw 'Release notes update failed' }
           # Keep draft until the actual signed CI installer is checked locally.

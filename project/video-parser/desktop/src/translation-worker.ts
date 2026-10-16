@@ -1,20 +1,10 @@
-import { env, pipeline } from '@huggingface/transformers'
-
-env.allowLocalModels = true
-env.allowRemoteModels = false
-env.useBrowserCache = false
+import { createLocalTranslator } from './translation-engine'
 
 let translatorPromise: Promise<any> | null = null
 
 function getTranslator(requestId: string, modelBaseUrl: string) {
-  env.localModelPath = `${modelBaseUrl.replace(/\/$/, '')}/`
-  translatorPromise ??= (pipeline as any)('translation', 'Xenova/m2m100_418M', {
-    dtype: 'q8',
-    device: 'wasm',
-    local_files_only: true,
-    progress_callback: (progress: Record<string, unknown>) => {
-      self.postMessage({ requestId, type: 'model-progress', progress })
-    },
+  translatorPromise ??= createLocalTranslator(modelBaseUrl, (progress: unknown) => {
+    self.postMessage({ requestId, type: 'model-progress', progress })
   })
   return translatorPromise
 }

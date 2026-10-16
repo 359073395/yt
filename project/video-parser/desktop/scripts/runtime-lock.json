@@ -1,0 +1,21 @@
+{
+  "checkedAt": "2026-10-16",
+  "ytDlp": {
+    "version": "2026.08.19",
+    "source": "https://github.com/yt-dlp/yt-dlp/releases/tag/2026.08.19",
+    "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe",
+    "sha256": "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"
+  },
+  "ffmpeg": {
+    "version": "N-127564-g3c92f003c7",
+    "source": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-10-15-13-03",
+    "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-15-13-03/ffmpeg-N-127564-g3c92f003c7-win64-lgpl-shared.zip",
+    "sha256": "845fdf0267526b32ac6d8310c3febf06f23df8cc2edfd3ed669a000c18b291d2"
+  },
+  "whisper": {
+    "version": "1.9.5 (b5454)",
+    "source": "https://github.com/ggml-org/whisper.cpp/releases/tag/b5454",
+    "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+    "sha256": "6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb"
+  }
+}

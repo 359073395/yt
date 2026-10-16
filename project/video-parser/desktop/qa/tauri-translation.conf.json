@@ -1,0 +1,8 @@
+{
+  "identifier": "org.yinglian.translation-qa-1101",
+  "build": {
+    "beforeDevCommand": "",
+    "devUrl": "http://127.0.0.1:41826/qa/translation-smoke.html"
+  },
+  "app": { "windows": [{ "label": "main", "title": "跑量影链工坊 - 1.10.1 翻译验收（隔离配置）", "width": 1000, "height": 720 }] }
+}

@@ -115,6 +115,13 @@ pub fn init(app: &tauri::AppHandle) -> Result<(), String> {
 }
 #[tauri::command]
 pub async fn network_settings() -> Result<Config, String> { Ok(config()) }
+// The updater needs the same explicit local route as other overseas downloads.
+// This returns a validated loopback address only, never proxy credentials.
+#[tauri::command]
+pub async fn update_proxy() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| endpoint("https://github.com/"))
+        .await.map_err(|_| "读取更新代理失败".to_string())
+}
 #[tauri::command]
 pub async fn save_network_settings(app: tauri::AppHandle, request: Config) -> Result<Config, String> {
     tauri::async_runtime::spawn_blocking(move || {

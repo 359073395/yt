@@ -3591,6 +3591,7 @@ pub fn run() {
             launch_login,
             accounts::account_statuses,
             network::network_settings,
+            network::update_proxy,
             network::save_network_settings,
             network::detect_local_proxy,
             network::test_network_proxy,
