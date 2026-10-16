@@ -8,7 +8,7 @@ import { categoryDirectory, filterRecords, isActive, normalizeCategory, restoreL
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { type Update } from '@tauri-apps/plugin-updater'
-import { checkApplicationUpdate } from './updater'
+import { checkApplicationUpdate, installApplicationUpdate } from './updater'
 import {
   AlertCircle,
   Check,
@@ -325,7 +325,7 @@ function App() {
     let downloaded = 0
     let total = 0
     try {
-      await update.downloadAndInstall((event) => {
+      await installApplicationUpdate(update, (event) => {
         if (event.event === 'Started') {
           total = event.data.contentLength || 0
           setUpdateProgress({ percent: 0, downloaded: 0, total })
@@ -336,7 +336,7 @@ function App() {
         } else {
           setUpdateProgress({ percent: 100, downloaded: total || downloaded, total })
         }
-      }, { restartAfterInstall: true })
+      })
     } catch (error) {
       setUpdateError(`升级失败，旧版本未被替换：${String(error)}`)
       setUpdateInstalling(false)
