@@ -1,61 +1,51 @@
 {
-  "version": "1.10.0",
+  "version": "1.10.1",
+  "scope": "upstream-maintenance-20261016",
+  "approval": "2026-10-16 用户请求：检查本软件开源更新，告知并同步升级软件，通过软件内一键自动升级交付。仅本轮维护范围，非历史规划全量验收。",
   "sourceTrees": {
-    "src": "12660e0d5d2badf3c6927d71b8a4a8714507059a",
-    "src-tauri/src": "458d0624ddba913d0dfb795b455708a37dc1b371",
-    "src-tauri/tauri.conf.json": "5cdb3b7fc03766587715417f55332e9cc5c68a08",
-    "package-lock.json": "a847142e3cd559879b5f6442eb0b76211eff6b1a",
-    "src-tauri/resources/bin/yt-dlp-plugins": "2b4128f8cb6cd01e7dcf21fd4702420b40e14ff6"
+    "src": "85ec89a1a27f06dac04f2b507ce2ed5e3ec5cdaa",
+    "src-tauri/src": "0015b4fa7d24ffcb051a779ce179f6a7b2e68330",
+    "src-tauri/tauri.conf.json": "7af9936d5719076bb55c42f2410f967c63e9bf40",
+    "package-lock.json": "b7d95e4c05937a8c54a49e2c50966636edf7b072",
+    "src-tauri/resources/bin/yt-dlp-plugins": "2b4128f8cb6cd01e7dcf21fd4702420b40e14ff6",
+    "package.json": "24506f9d62fecddb6b4b8e0de03d619de9727d74",
+    "src-tauri/Cargo.toml": "fe47bcd111088fd36754e6d228dc66e4f254fde7",
+    "src-tauri/Cargo.lock": "aa3f8acbc05f2236f3f7769aeaee506f6d29571b",
+    "scripts": "3e008f210556582ed66a3f2256b9280fea29716f"
   },
   "checks": {
-    "design": {
+    "dependency-audit": {
       "status": "passed",
-      "evidence": "qa/release-1.10.0.md"
+      "evidence": "qa/release-1.10.1.md"
     },
-    "native-installer-migration": {
+    "runtime-integrity": {
       "status": "passed",
-      "evidence": "qa/release-1.10.0.md"
+      "evidence": "qa/release-1.10.1.md"
     },
-    "four-platform-downloads": {
-      "status": "not_tested"
-    },
-    "local-and-api-transcription-translation": {
-      "status": "not_tested"
-    },
-    "feishu-two-users-two-machines": {
-      "status": "not_tested"
-    },
-    "cancel-resume-output-integrity": {
-      "status": "partial"
-    },
-    "live-recording-replay": {
+    "media-engines": {
       "status": "passed",
-      "evidence": "qa/release-1.10.0.md"
+      "evidence": "qa/release-1.10.1.md"
     },
-    "subscriptions-images-comments": {
-      "status": "partial",
-      "evidence": "qa/automation-acceptance-20260924.md"
-    },
-    "models-engine-update-security": {
-      "status": "partial"
-    },
-    "feishu-classification": {
+    "local-translation": {
       "status": "passed",
-      "evidence": "qa/release-1.10.0.md"
-    },
-    "download-regression": {
-      "status": "passed",
-      "evidence": "qa/release-1.10.0.md"
-    },
-    "download-record-deletion": {
-      "status": "passed",
-      "evidence": "qa/release-1.10.0.md"
+      "evidence": "qa/release-1.10.1.md"
     },
     "automated-regressions": {
       "status": "passed",
-      "evidence": "qa/release-1.10.0.md"
+      "evidence": "qa/release-1.10.1.md"
+    },
+    "upgrade-compatibility": {
+      "status": "passed",
+      "evidence": "qa/release-1.10.1.md"
+    },
+    "native-in-place-install": {
+      "status": "not_tested"
+    },
+    "four-platform-live-network": {
+      "status": "not_tested"
+    },
+    "cloud-api-translation": {
+      "status": "not_tested"
     }
-  },
-  "scope": "existing-features-20260924",
-  "approval": "2026-09-24 用户确认：同意，按现有功能验收发布"
+  }
 }
