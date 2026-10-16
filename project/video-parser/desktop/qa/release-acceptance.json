@@ -3,7 +3,7 @@
   "scope": "upstream-maintenance-20261016",
   "approval": "2026-10-16 用户请求：检查本软件开源更新，告知并同步升级软件，通过软件内一键自动升级交付。仅本轮维护范围，非历史规划全量验收。",
   "sourceTrees": {
-    "src": "85ec89a1a27f06dac04f2b507ce2ed5e3ec5cdaa",
+    "src": "e7a57fd7ca0ac7bd7087b9d9dc965ed9c672874d",
     "src-tauri/src": "0015b4fa7d24ffcb051a779ce179f6a7b2e68330",
     "src-tauri/tauri.conf.json": "7af9936d5719076bb55c42f2410f967c63e9bf40",
     "package-lock.json": "b7d95e4c05937a8c54a49e2c50966636edf7b072",
