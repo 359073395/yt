@@ -14,13 +14,18 @@ const scoped = manifest.version === '1.10.0' && receipt.scope === 'existing-feat
 // This release has its own current maintenance request and fresh evidence; the
 // September feature-scope approval is not reused for October's dependency update.
 const maintenance = manifest.version === '1.10.1' && receipt.scope === 'upstream-maintenance-20261016'
-const required = maintenance
+// Current user-approved TikTok fix: test first, publish 1.10.2 for self-update.
+const tiktokFix = manifest.version === '1.10.2' && receipt.scope === 'tiktok-free-fallback-20261019'
+const required = tiktokFix
+  ? ['tiktok-target-download', 'free-provider-failover', 'public-provider-security', 'automated-regressions', 'upgrade-compatibility']
+  : maintenance
   ? ['dependency-audit', 'runtime-integrity', 'media-engines', 'local-translation', 'automated-regressions', 'upgrade-compatibility']
   : scoped ? ['design', 'native-installer-migration', 'feishu-classification', 'download-regression', 'download-record-deletion', 'automated-regressions', 'live-recording-replay'] : fullScope
 const failures = []
 if (receipt.version !== manifest.version) failures.push('验收版本与安装包版本不一致')
 if (scoped && (!receipt.approval || !existsSync(resolve(root, 'RELEASE-1.10.0.md')))) failures.push('缺少本次范围批准或公开功能限制说明')
 if (maintenance && (!receipt.approval || !existsSync(resolve(root, 'RELEASE-1.10.1.md')))) failures.push('缺少本次维护请求或公开验证范围')
+if (tiktokFix && (!receipt.approval || !existsSync(resolve(root, 'RELEASE-1.10.2.md')))) failures.push('缺少本次修复发布批准或公开验证范围')
 for (const name of required) {
   const check = receipt.checks[name]
   if (check?.status !== 'passed') { failures.push(`${name}: ${check?.status || 'missing'}`); continue }
@@ -28,7 +33,7 @@ for (const name of required) {
   const rel = relative(root, path)
   if (!check.evidence || isAbsolute(rel) || rel.startsWith('..') || !existsSync(path) || !readFileSync(path, 'utf8').trim()) failures.push(`${name}: 缺少项目内的实测证据`)
 }
-const sourcePaths = ['src', 'src-tauri/src', 'src-tauri/tauri.conf.json', 'package-lock.json', 'src-tauri/resources/bin/yt-dlp-plugins', ...(maintenance ? ['package.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'scripts'] : [])]
+const sourcePaths = ['src', 'src-tauri/src', 'src-tauri/tauri.conf.json', 'package-lock.json', 'src-tauri/resources/bin/yt-dlp-plugins', ...((maintenance || tiktokFix) ? ['package.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'scripts'] : []), ...(tiktokFix ? ['src-tauri/examples/tiktok-smoke.rs', 'src-tauri/build.rs'] : [])]
 for (const path of sourcePaths) {
   const tree = execFileSync('git', ['rev-parse', `HEAD:project/video-parser/desktop/${path}`], { cwd: root, encoding: 'utf8' }).trim()
   if (receipt.sourceTrees?.[path] !== tree) failures.push(`${path}: 验收未对应当前源码`)

@@ -25,12 +25,16 @@ mod automation;
 mod live;
 mod accounts;
 mod network;
+mod tiktok;
+mod tiktok_free;
 #[cfg(feature = "team-smoke")]
 pub use team::run_smoke as run_team_smoke;
 #[cfg(feature = "team-smoke")]
 pub use automation::run_smoke as run_automation_smoke;
 #[cfg(feature = "team-smoke")]
 pub use accounts::run_smoke as run_account_smoke;
+#[cfg(feature = "team-smoke")]
+pub use tiktok::run_smoke as run_tiktok_smoke;
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
     Foundation::LocalFree,
@@ -1804,10 +1808,20 @@ fn tiktok_media_url(value: &str) -> bool {
     Url::parse(value)
         .ok()
         .map(|url| {
+            if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some()
+                || url.port_or_known_default() != Some(443) { return false; }
             let host = url.host_str().unwrap_or_default().to_lowercase();
-            host.ends_with("-webapp-prime.tiktok.com")
+            (host == "www.tiktok.com" && url.path() == "/aweme/v1/play/"
+                && url.query_pairs().any(|(key, value)| key == "video_id" && !value.is_empty()))
+                || host.ends_with("-webapp-prime.tiktok.com")
                 || host == "webapp-prime.tiktok.com"
-                || (host.ends_with(".com") && host.contains(".tiktokcdn-"))
+                || host.strip_suffix(".tiktok.com").and_then(|prefix| prefix.rsplit_once('.'))
+                    .is_some_and(|(server, region)| server.ends_with("-webapp-prime")
+                        && !server.contains('.') && region.len() == 2
+                        && region.bytes().all(|byte| byte.is_ascii_lowercase()))
+                || host.strip_suffix(".com").and_then(|value| value.rsplit('.').next())
+                    .and_then(|value| value.strip_prefix("tiktokcdn-"))
+                    .is_some_and(|region| region.len() == 2 && region.bytes().all(|byte| byte.is_ascii_lowercase()))
                 || [
                     "tiktokcdn.com",
                     "tiktokv.com",
@@ -1820,6 +1834,7 @@ fn tiktok_media_url(value: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn tiktok_media_from_public_fallback(payload: &Value, video_id: &str) -> Option<String> {
     if payload.get("code").and_then(Value::as_i64) != Some(0)
         || payload.pointer("/data/id").and_then(Value::as_str) != Some(video_id)
@@ -1831,25 +1846,6 @@ fn tiktok_media_from_public_fallback(payload: &Value, video_id: &str) -> Option<
         .filter_map(|pointer| payload.pointer(pointer).and_then(Value::as_str))
         .find(|candidate| tiktok_media_url(candidate))
         .map(str::to_string)
-}
-
-fn tiktok_media_with_public_fallback(
-    client: &reqwest::blocking::Client,
-    page_url: &str,
-    video_id: &str,
-) -> Result<String, String> {
-    let body = client
-        .post("https://www.tikwm.com/api/")
-        .header(reqwest::header::USER_AGENT, BROWSER_USER_AGENT)
-        .form(&[("url", page_url), ("hd", "1")])
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .and_then(reqwest::blocking::Response::text)
-        .map_err(|error| format!("TikTok 公开解析回退失败：{error}"))?;
-    let payload: Value = serde_json::from_str(&body)
-        .map_err(|error| format!("TikTok 公开解析回退数据无效：{error}"))?;
-    tiktok_media_from_public_fallback(&payload, video_id)
-        .ok_or_else(|| "TikTok 公开解析回退没有返回安全的视频地址".into())
 }
 
 fn tiktok_embed_state(html: &str) -> Result<Value, String> {
@@ -1877,6 +1873,13 @@ fn cdp_call<S: Read + Write>(
     method: &str,
     params: Value,
 ) -> Result<Value, String> {
+    cdp_call_observe(socket, id, method, params, |_| {})
+}
+
+fn cdp_call_observe<S: Read + Write>(
+    socket: &mut tungstenite::WebSocket<S>, id: i64, method: &str, params: Value,
+    mut observe: impl FnMut(&Value),
+) -> Result<Value, String> {
     socket
         .send(Message::Text(
             serde_json::json!({ "id": id, "method": method, "params": params })
@@ -1884,16 +1887,23 @@ fn cdp_call<S: Read + Write>(
                 .into(),
         ))
         .map_err(|error| format!("浏览器会话请求失败：{error}"))?;
+    let started = std::time::Instant::now();
+    let budget = Duration::from_secs(if method == "Page.navigate" { 20 } else { 8 });
     loop {
-        let message = socket
-            .read()
-            .map_err(|error| format!("浏览器会话读取失败：{error}"))?;
+        if started.elapsed() > budget { return Err(format!("浏览器会话响应超时（{method}）")); }
+        let message = match socket.read() {
+            Ok(message) => message,
+            Err(tungstenite::Error::Io(error)) if matches!(error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) => continue,
+            Err(error) => return Err(format!("浏览器会话读取失败（{method}）：{error}")),
+        };
         let Message::Text(text) = message else {
             continue;
         };
         let payload: Value =
             serde_json::from_str(text.as_str()).map_err(|_| "浏览器会话返回了无效数据")?;
         if payload.get("id").and_then(Value::as_i64) != Some(id) {
+            observe(&payload);
             continue;
         }
         if let Some(detail) = payload.pointer("/error/message").and_then(Value::as_str) {
@@ -1906,6 +1916,15 @@ fn cdp_call<S: Read + Write>(
 struct PreparedTikTok {
     info_path: PathBuf,
     cookie_path: Option<PathBuf>,
+    attempted: Vec<tiktok::Route>,
+    info: Value,
+}
+
+impl Drop for PreparedTikTok {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.info_path);
+        if let Some(path) = &self.cookie_path { let _ = fs::remove_file(path); }
+    }
 }
 
 fn tiktok_media_with_edge(
@@ -1914,6 +1933,7 @@ fn tiktok_media_with_edge(
     embed_url: &str,
 ) -> Result<(String, String), String> {
     let edge = find_edge().ok_or("未找到 Windows 自带的 Microsoft Edge")?;
+    let saved_session = accounts::tiktok_browser_cookies(app);
     let session_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
@@ -1943,7 +1963,7 @@ fn tiktok_media_with_edge(
         .arg("--window-size=720,960")
         .arg("--autoplay-policy=no-user-gesture-required")
         .arg(format!("--user-data-dir={}", profile.display()))
-        .arg(page_url)
+        .arg("about:blank")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut child = command
@@ -1970,6 +1990,7 @@ fn tiktok_media_with_edge(
         }
         let port = port.ok_or("TikTok 官方播放器没有正常启动")?;
         let client = reqwest::blocking::Client::builder()
+            .no_proxy()
             .timeout(Duration::from_secs(8))
             .build()
             .map_err(|error| error.to_string())?;
@@ -1989,7 +2010,7 @@ fn tiktok_media_with_edge(
                         items.iter().find_map(|item| {
                             let page_url = item.get("url").and_then(Value::as_str)?;
                             if item.get("type").and_then(Value::as_str) == Some("page")
-                                && page_url.starts_with("https://www.tiktok.com/")
+                                && page_url == "about:blank"
                             {
                                 item.get("webSocketDebuggerUrl")
                                     .and_then(Value::as_str)
@@ -2021,89 +2042,23 @@ fn tiktok_media_with_edge(
         let socket = browser_socket
             .as_mut()
             .ok_or("TikTok 播放器读取通道不可用")?;
-        let mut playback_session = false;
-        for id in 1..=60 {
-            let payload = cdp_call(socket, id, "Network.getAllCookies", serde_json::json!({}))?;
-            playback_session = payload
-                .pointer("/result/cookies")
-                .and_then(Value::as_array)
-                .is_some_and(|cookies| {
-                    cookies.iter().any(|cookie| {
-                        cookie.get("name").and_then(Value::as_str) == Some("tt_chain_token")
-                    })
-                });
-            if playback_session {
-                break;
-            }
-            thread::sleep(Duration::from_millis(250));
+        cdp_call(socket, 800, "Network.enable", serde_json::json!({}))?;
+        if !saved_session.is_empty() {
+            cdp_call(socket, 801, "Network.setCookies", serde_json::json!({"cookies":saved_session}))
+                .map_err(|_| "TikTok 官方播放器无法复用工坊已保存的登录会话")?;
         }
-        if !playback_session {
-            return Err("TikTok 官方页面没有建立播放会话".into());
-        }
-        cdp_call(
-            socket,
-            70,
-            "Page.navigate",
-            serde_json::json!({ "url": embed_url }),
-        )?;
-        let expression = r#"JSON.stringify({url: Array.from(document.querySelectorAll('video')).map(video => video.currentSrc || video.src).find(value => { try { const host = new URL(value).hostname; return host.endsWith('tiktokcdn.com') || host.endsWith('tiktokv.com') || host.endsWith('byteoversea.com') || host.endsWith('ibytedtos.com') || host.endsWith('-webapp-prime.tiktok.com'); } catch { return false; } }) || ''})"#;
-        let mut media_url = None;
-        for id in 100..=160 {
-            let payload = cdp_call(
-                socket,
-                id,
-                "Runtime.evaluate",
-                serde_json::json!({
-                    "expression": expression,
-                    "returnByValue": true
-                }),
-            )?;
-            let value = payload
-                .pointer("/result/result/value")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let data = serde_json::from_str::<Value>(value).ok();
-            let candidate = data
-                .as_ref()
-                .and_then(|data| data.get("url").and_then(Value::as_str).map(str::to_string));
-            if candidate.as_deref().is_some_and(tiktok_media_url) {
-                media_url = candidate;
-                break;
-            }
-            thread::sleep(Duration::from_millis(250));
-        }
-        let media_url = media_url.ok_or("TikTok 官方播放器没有生成视频地址")?;
-        let payload = cdp_call(socket, 200, "Network.getAllCookies", serde_json::json!({}))?;
-        let mut cookie_file = String::from("# Netscape HTTP Cookie File\n");
-        let cookie_lines = payload
-            .pointer("/result/cookies")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|cookie| {
-                let domain = cookie.get("domain")?.as_str()?.trim_start_matches('.');
-                if domain != "tiktok.com" && !domain.ends_with(".tiktok.com") {
-                    return None;
-                }
-                let name = cookie.get("name")?.as_str()?;
-                let value = cookie.get("value")?.as_str()?;
-                if name.contains(['\t', '\r', '\n']) || value.contains(['\t', '\r', '\n']) {
-                    return None;
-                }
-                let expires = cookie
-                    .get("expires")
-                    .and_then(Value::as_f64)
-                    .filter(|value| *value > 0.0)
-                    .unwrap_or(0.0) as u64;
-                Some(format!(
-                    ".tiktok.com\tTRUE\t/\tTRUE\t{expires}\t{name}\t{value}\n"
-                ))
-            })
-            .collect::<Vec<_>>();
-        if cookie_lines.is_empty() {
-            return Err("TikTok 官方播放器没有建立匿名会话".into());
-        }
-        cookie_file.push_str(&cookie_lines.concat());
+        runtime_log(app, format!("tiktok_player_saved_login={}", !saved_session.is_empty()));
+        #[cfg(feature = "team-smoke")]
+        tiktok::configure_smoke_mobile(socket)?;
+        // Shop videos can play on the work page while the embed player has no video.
+        // Try that page first, in this isolated profile, never the user's browser.
+        let media_url = match tiktok::browser_media(app, socket, page_url, 100, Duration::from_secs(35))? {
+            Some(media) => media,
+            None => tiktok::browser_media(app, socket, embed_url, 500, Duration::from_secs(35))?
+                .ok_or("TikTok 官方作品页和嵌入播放器均未生成视频地址")?,
+        };
+        let payload = cdp_call(socket, 300, "Network.getAllCookies", serde_json::json!({}))?;
+        let cookie_file = tiktok::playback_cookie_jar(&payload["result"]["cookies"]);
         Ok((media_url, cookie_file))
     })();
     if let Some(socket) = browser_socket.as_mut() {
@@ -2154,9 +2109,16 @@ fn prepare_tiktok_info_json(
     destination: &Path,
     browser_fallback: bool,
 ) -> Result<PreparedTikTok, String> {
+    prepare_tiktok_remaining(app, source, destination, browser_fallback, &[], None, || Ok(()))
+}
+
+fn prepare_tiktok_remaining(
+    app: &tauri::AppHandle, source: &str, destination: &Path, browser_fallback: bool,
+    excluded: &[tiktok::Route], metadata: Option<Value>, mut check_cancel: impl FnMut() -> Result<(), String>,
+) -> Result<PreparedTikTok, String> {
     let client = network::client(source)
         .redirect(reqwest::redirect::Policy::limited(8))
-        .timeout(Duration::from_secs(25))
+        .timeout(Duration::from_secs(12))
         .build()
         .map_err(|error| error.to_string())?;
     let mut canonical = source.to_string();
@@ -2171,119 +2133,43 @@ fn prepare_tiktok_info_json(
         video_id = tiktok_video_id(&canonical);
     }
     let video_id = video_id.ok_or("没有从 TikTok 链接识别出作品 ID")?;
-    let embed_url = format!("https://www.tiktok.com/embed/v2/{video_id}");
-    let player_url = format!("https://www.tiktok.com/player/v1/{video_id}?autoplay=1&loop=1");
-    let html = client
-        .get(&embed_url)
-        .header(reqwest::header::USER_AGENT, BROWSER_USER_AGENT)
-        .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml")
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .and_then(reqwest::blocking::Response::text)
-        .map_err(|error| format!("TikTok 官方嵌入页读取失败：{error}"))?;
-    if html.len() > 4 * 1024 * 1024 {
-        return Err("TikTok 官方嵌入页数据异常".into());
-    }
-    let state = tiktok_embed_state(&html)?;
-    let entries = state
-        .pointer("/source/data")
-        .and_then(Value::as_object)
-        .ok_or("TikTok 官方嵌入页缺少作品数据")?;
-    let entry = entries
-        .get(&format!("/embed/v2/{video_id}"))
-        .or_else(|| {
-            entries
-                .values()
-                .find(|value| value.get("videoData").is_some())
-        })
-        .ok_or("TikTok 官方嵌入页没有找到该作品")?;
-    let video_data = entry
-        .get("videoData")
-        .ok_or("TikTok 官方嵌入页缺少视频数据")?;
-    let item = video_data
-        .get("itemInfos")
-        .ok_or("TikTok 官方嵌入页缺少作品信息")?;
-    if item.get("id").and_then(Value::as_str) != Some(video_id.as_str()) {
-        return Err("TikTok 官方嵌入页返回了其他作品".into());
-    }
-    let video = item.get("video").ok_or("TikTok 作品缺少媒体信息")?;
-    let embedded_media_url = video
-        .get("urls")
-        .and_then(Value::as_array)
-        .and_then(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .find(|candidate| tiktok_media_url(candidate))
-        });
-    let (media_url, cookie_file, media_referer) = if let Some(media_url) = embedded_media_url {
-        (media_url.to_string(), None, embed_url.clone())
-    } else if browser_fallback {
-        match tiktok_media_with_public_fallback(&client, &canonical, &video_id) {
-            Ok(media_url) => (media_url, None, "https://www.tiktok.com/".into()),
-            Err(public_error) => {
-                let (media_url, cookie_file) = tiktok_media_with_edge(app, &canonical, &player_url)
-                    .map_err(|edge_error| {
-                        format!("{public_error}；官方播放器回退也失败：{edge_error}")
-                    })?;
-                (media_url, Some(cookie_file), player_url)
+    let player_url = format!("https://www.tiktok.com/player/v1/{video_id}?autoplay=1&muted=1&loop=0");
+    let mut attempted = Vec::new();
+    let resolved = tiktok::resolve_remaining(&video_id, source, browser_fallback, accounts::has_session(app, "tiktok"), excluded, metadata, |route| {
+        check_cancel()?;
+        attempted.push(route);
+        runtime_log(app, format!("tiktok_resolve id={video_id} route={route:?}"));
+        #[cfg(feature = "team-smoke")]
+        println!("RESOLVER {route:?}");
+        match route {
+            tiktok::Route::Embed => tiktok::embed_info(&client, &video_id, &canonical),
+            tiktok::Route::Extractor => {
+                let tool = find_tool(app, "yt-dlp.exe").ok_or("下载引擎尚未就绪")?;
+                let mut command = Command::new(tool);
+                command.args(["--ignore-config", "--no-cache-dir", "--dump-single-json", "--skip-download",
+                    "--no-playlist", "--no-warnings", "--socket-timeout", "10", "--retries", "0", "--extractor-retries", "0"])
+                    .arg(&canonical);
+                let _cookies = add_cookie_args(app, &mut command, &canonical);
+                let output = live::capture(&mut command, Duration::from_secs(30), &AtomicBool::new(false))?;
+                if !output.status.success() {
+                    return Err(format!("TikTok 下载引擎解析失败：{}", user_error(&String::from_utf8_lossy(&output.stderr))));
+                }
+                let info = serde_json::from_slice(&output.stdout).map_err(|_| "TikTok 下载引擎返回了无效数据")?;
+                Ok(tiktok::Resolved { info, cookies: None })
+            }
+            tiktok::Route::Public | tiktok::Route::MusicalDown | tiktok::Route::SssTik => {
+                tiktok_free::resolve(route.provider().unwrap(), &canonical, &video_id)
+            }
+            tiktok::Route::Player => {
+                let (media, cookies) = tiktok_media_with_edge(app, &canonical, &player_url)?;
+                let mut info = tiktok::media_info(&video_id, &canonical, Some(&media), &canonical);
+                info["formats"][0]["http_headers"].as_object_mut().unwrap().remove("User-Agent");
+                Ok(tiktok::Resolved { info, cookies: Some(cookies) })
             }
         }
-    } else {
-        // Preview only needs metadata/cover, not a playable download URL.
-        (String::new(), None, embed_url.clone())
-    };
-    let metadata = video.get("videoMeta").unwrap_or(&Value::Null);
-    let title = item
-        .get("text")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("TikTok 视频");
-    let author = video_data.get("authorInfos").and_then(Value::as_object);
-    let thumbnail = item
-        .get("coversOrigin")
-        .or_else(|| item.get("covers"))
-        .and_then(Value::as_array)
-        .and_then(|values| values.iter().filter_map(Value::as_str).next());
-    let mut http_headers = serde_json::json!({ "Referer": media_referer });
-    if cookie_file.is_none() {
-        http_headers
-            .as_object_mut()
-            .ok_or("TikTok 请求头创建失败")?
-            .insert(
-                "User-Agent".into(),
-                Value::String(BROWSER_USER_AGENT.into()),
-            );
-    }
-    let info = serde_json::json!({
-        "_type": "video",
-        "id": video_id,
-        "title": title,
-        "description": title,
-        "extractor": "TikTokEmbed",
-        "extractor_key": "TikTokEmbed",
-        "webpage_url": canonical,
-        "original_url": source,
-        "thumbnail": thumbnail,
-        "uploader": author.and_then(|value| value.get("uniqueId")).and_then(Value::as_str),
-        "uploader_id": author.and_then(|value| value.get("userId")).and_then(Value::as_str),
-        "timestamp": item.get("createTime").and_then(Value::as_i64),
-        "duration": metadata.get("duration").and_then(Value::as_f64),
-        "formats": [{
-            "format_id": "official-embed",
-            "format_note": "官方嵌入页原始画质",
-            "url": media_url,
-            "ext": "mp4",
-            "protocol": "https",
-            "width": metadata.get("width").and_then(Value::as_i64),
-            "height": metadata.get("height").and_then(Value::as_i64),
-            "vcodec": "h264",
-            "acodec": "aac",
-            "http_headers": http_headers
-        }],
-        "subtitles": {}
     });
-    let cookie_path = cookie_file
+    let tiktok::Resolved { info, cookies } = resolved?;
+    let cookie_path = cookies
         .map(|body| {
             let path = destination.with_extension("cookies.txt");
             fs::write(&path, body)
@@ -2303,6 +2189,8 @@ fn prepare_tiktok_info_json(
     Ok(PreparedTikTok {
         info_path: destination.to_path_buf(),
         cookie_path,
+        attempted,
+        info,
     })
 }
 
@@ -2961,71 +2849,10 @@ fn visible_directory(path: &Path) -> String {
     }
 }
 
-fn execute_download(
-    app: tauri::AppHandle,
-    state: RuntimeState,
-    request: DownloadRequest,
-) -> Result<DownloadResult, String> {
-    let url = validate_url(&request.url)?;
-    let mut output_root = PathBuf::from(request.options.download_dir.trim());
-    if output_root.as_os_str().is_empty() {
-        return Err("请选择下载目录".into());
-    }
-    if let Some(category) = &request.options.category {
-        output_root = library::category_path(&output_root, category)?;
-    }
-    fs::create_dir_all(&output_root).map_err(|error| format!("无法创建下载目录：{error}"))?;
-    let workspace = DownloadWorkspace::create(&output_root, &request.job_id)?;
-    let yt_dlp = find_tool(&app, "yt-dlp.exe").ok_or("下载引擎尚未就绪")?;
-    let ffmpeg = find_tool(&app, "ffmpeg.exe").ok_or("媒体处理引擎尚未就绪")?;
-    emit_progress(
-        &app,
-        &request.job_id,
-        "downloading",
-        0.0,
-        "正在读取视频信息",
-    );
-
-    let _ = accounts::sync(&app, false);
-    if is_douyin_url(&url) && !login_profile_exists(&app) {
-        let profile = public_edge_profile_dir(&app)?;
-        if !public_session_fresh(&profile) {
-            emit_progress(
-                &app,
-                &request.job_id,
-                "downloading",
-                0.0,
-                "正在建立抖音匿名访客会话",
-            );
-            let edge = find_edge().ok_or("未找到 Windows 自带的 Microsoft Edge")?;
-            scan_profile_with_edge(&edge, &profile, &url, 0)?;
-        }
-    }
-
-    let tiktok_info = if is_tiktok_url(&url) {
-        emit_progress(
-            &app,
-            &request.job_id,
-            "downloading",
-            0.0,
-            "正在解析 TikTok 官方播放器",
-        );
-        let cache = app
-            .path()
-            .app_cache_dir()
-            .map_err(|error| error.to_string())?;
-        fs::create_dir_all(&cache).map_err(|error| format!("无法创建任务缓存目录：{error}"))?;
-        Some(prepare_tiktok_info_json(
-            &app,
-            &url,
-            &cache.join(format!("tiktok-{}.json", request.job_id)),
-            true,
-        )?)
-    } else {
-        None
-    };
-
-    let mut command = Command::new(yt_dlp);
+fn download_with_engine(app: &tauri::AppHandle, state: &RuntimeState, request: &DownloadRequest,
+    url: &str, directory: &Path, prepared: Option<&PreparedTikTok>) -> Result<PathBuf, String> {
+    let ffmpeg = find_tool(app, "ffmpeg.exe").ok_or("媒体处理引擎尚未就绪")?;
+    let mut command = Command::new(find_tool(app, "yt-dlp.exe").ok_or("下载引擎尚未就绪")?);
     command
         .arg("--encoding")
         .arg("utf-8")
@@ -3050,7 +2877,7 @@ fn execute_download(
         .arg("--print")
         .arg("after_move:__YINGLIAN_FILE__%(filepath)s")
         .arg("--paths")
-        .arg(&workspace.0)
+        .arg(directory)
         .arg("--output")
         .arg("%(uploader,uploader_id|未知作者)s/%(upload_date>%Y-%m-%d)s_%(title).80B_[%(id)s]/视频.%(ext)s");
     if request.options.include_thumbnail {
@@ -3060,7 +2887,8 @@ fn execute_download(
             .arg("jpg");
     }
     let _cookies;
-    if let Some(prepared) = tiktok_info.as_ref() {
+    if let Some(prepared) = prepared {
+        command.args(["--force-overwrites", "--no-continue", "--retries", "0"]);
         if let Some(cookie_path) = prepared.cookie_path.as_ref() {
             _cookies = None;
             network::yt(&mut command, &url);
@@ -3080,20 +2908,61 @@ fn execute_download(
         command.arg(&url);
     }
     let download = run_streaming(&app, &state, &request.job_id, "downloading", &mut command);
-    if let Some(prepared) = tiktok_info {
-        let _ = fs::remove_file(prepared.info_path);
-        if let Some(path) = prepared.cookie_path {
-            let _ = fs::remove_file(path);
-        }
-    }
     let output = download?;
     let media_file = output
         .output_file
         .or_else(|| {
             tiktok_video_id(&url)
-                .and_then(|video_id| find_tiktok_media_file(&workspace.0, &video_id))
+                .and_then(|video_id| find_tiktok_media_file(directory, &video_id))
         })
         .ok_or("下载完成但没有找到输出文件")?;
+    Ok(media_file)
+}
+
+fn execute_download(
+    app: tauri::AppHandle,
+    state: RuntimeState,
+    request: DownloadRequest,
+) -> Result<DownloadResult, String> {
+    let url = validate_url(&request.url)?;
+    let mut output_root = PathBuf::from(request.options.download_dir.trim());
+    if output_root.as_os_str().is_empty() {
+        return Err("请选择下载目录".into());
+    }
+    if let Some(category) = &request.options.category {
+        output_root = library::category_path(&output_root, category)?;
+    }
+    fs::create_dir_all(&output_root).map_err(|error| format!("无法创建下载目录：{error}"))?;
+    let workspace = DownloadWorkspace::create(&output_root, &request.job_id)?;
+    emit_progress(
+        &app,
+        &request.job_id,
+        "downloading",
+        0.0,
+        "正在读取视频信息",
+    );
+
+    let _ = accounts::sync(&app, false);
+    if is_douyin_url(&url) && !login_profile_exists(&app) {
+        let profile = public_edge_profile_dir(&app)?;
+        if !public_session_fresh(&profile) {
+            emit_progress(
+                &app,
+                &request.job_id,
+                "downloading",
+                0.0,
+                "正在建立抖音匿名访客会话",
+            );
+            let edge = find_edge().ok_or("未找到 Windows 自带的 Microsoft Edge")?;
+            scan_profile_with_edge(&edge, &profile, &url, 0)?;
+        }
+    }
+
+    let media_file = if is_tiktok_url(&url) {
+        tiktok::download(&app, &state, &request, &url, &workspace.0)?
+    } else {
+        download_with_engine(&app, &state, &request, &url, &workspace.0, None)?
+    };
     let job_dir = media_file.parent().ok_or("输出目录无效")?.to_path_buf();
     let (title, platform) = postprocess_metadata(&job_dir)?;
     let payload = fs::read(job_dir.join("视频信息.json"))
@@ -3933,10 +3802,38 @@ mod tests {
     }
 
     #[test]
+    fn browser_command_survives_a_temporary_socket_timeout() {
+        struct TimeoutOnce { bytes: std::io::Cursor<Vec<u8>>, first: bool }
+        impl Read for TimeoutOnce {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.first { self.first = false; return Err(std::io::ErrorKind::TimedOut.into()); }
+                self.bytes.read(buffer)
+            }
+        }
+        impl Write for TimeoutOnce {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { Ok(bytes.len()) }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let text = br#"{"id":7,"result":{}}"#;
+        let mut frame = vec![0x81, text.len() as u8]; frame.extend_from_slice(text);
+        let stream = TimeoutOnce { bytes:std::io::Cursor::new(frame), first:true };
+        let mut socket = tungstenite::WebSocket::from_raw_socket(stream, tungstenite::protocol::Role::Client, None);
+        assert_eq!(cdp_call(&mut socket, 7, "Page.navigate", serde_json::json!({})).unwrap()["id"], 7);
+    }
+    #[test]
     fn tiktok_media_hosts_are_strictly_limited() {
+        for url in ["http://v19.tiktokcdn.com/video", "https://user:pass@v19.tiktokcdn.com/video",
+            "https://v19.tiktokcdn.com:8443/video", "https://evil.tiktokcdn-attack.com/video"] {
+            assert!(!tiktok_media_url(url));
+        }
         assert!(tiktok_media_url(
             "https://v16-webapp-prime.tiktok.com/video/tos/example"
         ));
+        assert!(tiktok_media_url("https://v19-webapp-prime.us.tiktok.com/video/tos/example"));
+        assert!(!tiktok_media_url("https://v19-webapp-prime.us.tiktok.com.evil.test/video"));
+        assert!(tiktok_media_url("https://www.tiktok.com/aweme/v1/play/?video_id=example"));
+        assert!(!tiktok_media_url("https://www.tiktok.com/aweme/v1/play/?video_id="));
+        assert!(!tiktok_media_url("https://www.tiktok.com/other/?video_id=example"));
         assert!(tiktok_media_url(
             "https://v19.tiktokcdn.com/video/tos/example"
         ));

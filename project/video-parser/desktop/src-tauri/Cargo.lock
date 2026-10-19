@@ -5533,7 +5533,7 @@ dependencies = [
 
 [[package]]
 name = "yinglian-desktop"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "base64 0.22.1",
  "flate2",

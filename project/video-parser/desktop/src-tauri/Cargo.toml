@@ -1,6 +1,6 @@
 [package]
 name = "yinglian-desktop"
-version = "1.10.1"
+version = "1.10.2"
 description = "轻量、非阻塞的本地视频与多语言文案下载工具"
 authors = ["359073395"]
 edition = "2021"
@@ -26,6 +26,10 @@ required-features = ["team-smoke"]
 
 [[example]]
 name = "account-smoke"
+required-features = ["team-smoke"]
+
+[[example]]
+name = "tiktok-smoke"
 required-features = ["team-smoke"]
 
 [build-dependencies]

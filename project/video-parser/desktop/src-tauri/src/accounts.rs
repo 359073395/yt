@@ -126,6 +126,34 @@ pub fn sync(app: &tauri::AppHandle, force: bool) -> Result<(), String> {
 pub fn has_session(app: &tauri::AppHandle, platform: &str) -> bool {
     root(app).ok().and_then(|r| load(&r).ok()).and_then(|s| s.get(platform).and_then(|jar| platform_jar(jar, platform, now()))).is_some()
 }
+// Reuse only this application's encrypted, platform-scoped login snapshot.
+// Never inspect Chrome or another browser profile for the playback fallback.
+pub fn tiktok_browser_cookies(app: &tauri::AppHandle) -> Vec<Value> {
+    if let Err(error) = sync(app, false) {
+        runtime_log(app, format!("account_sync_pending platform=tiktok detail={error}"));
+    }
+    root(app).ok().and_then(|r| load(&r).ok())
+        .and_then(|sessions| sessions.get("tiktok").map(|jar| browser_cookies(jar, "tiktok", now())))
+        .unwrap_or_default()
+}
+fn browser_cookies(source: &str, platform: &str, at: u64) -> Vec<Value> {
+    let Some(jar) = platform_jar(source, platform, at) else { return Vec::new(); };
+    jar.lines().filter_map(|line| {
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() != 7 { return None; }
+        let domain = fields[0].trim_start_matches("#HttpOnly_");
+        let mut cookie = serde_json::json!({
+            "name":fields[5], "value":fields[6], "path":fields[2],
+            "secure":fields[3] == "TRUE", "httpOnly":fields[0].starts_with("#HttpOnly_")
+        });
+        if fields[1] == "TRUE" { cookie["domain"] = domain.into(); }
+        else { cookie["url"] = format!("https://{}{}", domain.trim_start_matches('.'), fields[2]).into(); }
+        if let Ok(expiry) = fields[4].parse::<u64>() {
+            if expiry > at { cookie["expires"] = expiry.into(); }
+        }
+        Some(cookie)
+    }).collect()
+}
 pub fn for_download(app: &tauri::AppHandle, source: &str) -> Option<CookieLease> {
     let platform = platform_for_url(source)?;
     if let Err(error) = sync(app, false) { runtime_log(app, format!("account_sync_pending platform={platform} detail={error}")); }
@@ -178,6 +206,22 @@ mod tests {
         let jar = cookie(".facebook.com", "c_user", 0);
         assert!(platform_jar(&jar, "facebook", 1).is_none());
         assert!(platform_jar(&(jar + &cookie(".facebook.com", "xs", 0)), "facebook", 1).is_some());
+    }
+    #[test] fn playback_snapshot_preserves_scope_and_omits_expired_other_platforms() {
+        let jar = cookie("#HttpOnly_.tiktok.com", "sessionid", 0)
+            + &cookie(".douyin.com", "sessionid", 0)
+            + &cookie(".tiktok.com.evil.test", "foreign", 0)
+            + &cookie(".tiktok.com", "expired", 5)
+            + "www.tiktok.com\tFALSE\t/player/\tTRUE\t100\thost_only\tunit-value\n";
+        let rows = browser_cookies(&jar, "tiktok", 10);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["domain"], ".tiktok.com");
+        assert_eq!(rows[0]["httpOnly"], true);
+        assert!(rows[0].get("expires").is_none());
+        assert_eq!(rows[1]["url"], "https://www.tiktok.com/player/");
+        assert_eq!(rows[1]["expires"], 100);
+        assert!(rows[1].get("domain").is_none());
+        assert!(browser_cookies(&cookie(".tiktok.com", "ttwid", 0), "tiktok", 10).is_empty());
     }
     #[test] fn temporary_cookie_is_removed_on_drop() {
         let root = std::env::temp_dir().join(format!("paoliang-cookie-test-{}", uuid::Uuid::new_v4()));
