@@ -2,13 +2,14 @@
 //! Windows examples need the Common Controls v6 manifest. Build with:
 //! cargo rustc --example updater-download-smoke -- -C link-arg=/MANIFEST:EMBED
 //!   -C link-arg=/MANIFESTINPUT:<absolute path to examples/team-smoke.manifest>
-//! Run with <independently verified installer path> <new report path>.
+//! Run with <independently verified installer path> <new report path> [version].
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use std::time::Duration;
 use std::io::Write;
 use tauri_plugin_updater::UpdaterExt;
 
 fn main() {
+    let expected_version = std::env::args().nth(3).unwrap_or_else(|| env!("CARGO_PKG_VERSION").into());
     let expected = std::fs::read(std::env::args_os().nth(1).expect("verified installer path")).expect("read verified installer");
     let mut report = std::fs::OpenOptions::new().create_new(true).write(true).open(std::env::args_os().nth(2).expect("new QA report path")).expect("create QA report");
     writeln!(report, "Started: isolated read-only updater QA").unwrap();
@@ -23,11 +24,11 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = async {
                     let updater = handle.updater_builder()
-                        .version_comparator(|_, release| release.version.to_string() == "1.10.1")
+                        .version_comparator(move |_, release| release.version.to_string() == expected_version)
                         .target("windows-x86_64-nsis")
                         .proxy("http://127.0.0.1:10808".parse()?)
                         .timeout(Duration::from_secs(30)).build()?;
-                    let mut update = updater.check().await?.ok_or("1.10.1 unavailable on public channel")?;
+                    let mut update = updater.check().await?.ok_or("expected version unavailable on public channel")?;
                     println!("Public channel: {}", update.version);
                     writeln!(report, "Public channel: {}", update.version)?;
                     update.timeout = Some(Duration::from_secs(900));
