@@ -7,7 +7,7 @@ RUN npm run build
 
 FROM denoland/deno:bin-2.9.4 AS deno-runtime
 
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     APP_HOST=0.0.0.0 \
