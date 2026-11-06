@@ -54,6 +54,8 @@ jobs:
           if ($LASTEXITCODE) { throw 'QA yt-dlp install failed' }
           python -X utf8 qa/test_tiktok_live_plugin.py
           if ($LASTEXITCODE) { throw 'TikTok plugin compatibility tests failed' }
+          python -X utf8 qa/test_douyin_plugin.py
+          if ($LASTEXITCODE) { throw 'Douyin plugin compatibility tests failed' }
       - name: Native regression tests
         run: cargo test --locked --lib --manifest-path src-tauri/Cargo.toml
       - run: npm audit --omit=dev

@@ -21,6 +21,18 @@ https://github.com/isaackogan/TikTokLive/blob/master/TikTokLive/client/web/route
 No TikTokLive source, runtime, signature service, or extra browser is bundled.
 The override delegates media parsing to the bundled yt-dlp extractor.
 
+## Douyin video compatibility plugin
+
+`yinglian_douyin.py` adapts the web-detail protocol repair in yt-dlp PR #17826
+by viking1304 (Unlicense), reviewed at commit
+`728fe46fbaa97d6f03efcaf9e766d4db63338b8d`:
+https://github.com/yt-dlp/yt-dlp/pull/17826.
+That proposal is not merged into the pinned official release. The local plugin
+adds the required request parameters and media Referer, verifies the returned
+video ID, and preserves HTTP failures instead of misreporting every failure as
+an expired login. It uses only official Douyin endpoints; no extra service or
+runtime is bundled. Regression tests must pass before upgrading yt-dlp again.
+
 ## Douyin live protocol reference
 
 The native live-room resolver was informed by `jiji262/douyin-downloader`:
