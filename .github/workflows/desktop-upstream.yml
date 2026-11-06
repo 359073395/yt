@@ -1,0 +1,24 @@
+name: Desktop upstream maintenance
+on:
+  schedule:
+    - cron: '20 2 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: project/video-parser/desktop
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Check pinned runtime releases
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/check-upstream.py
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: desktop-upstream-report
+          path: project/video-parser/desktop/qa/upstream-check.json

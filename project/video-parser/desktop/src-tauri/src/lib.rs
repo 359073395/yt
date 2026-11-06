@@ -28,6 +28,10 @@ mod network;
 mod tiktok;
 mod tiktok_free;
 #[cfg(feature = "team-smoke")]
+mod engine_smoke;
+#[cfg(feature = "team-smoke")]
+pub use engine_smoke::run as run_engine_smoke;
+#[cfg(feature = "team-smoke")]
 pub use team::run_smoke as run_team_smoke;
 #[cfg(feature = "team-smoke")]
 pub use automation::run_smoke as run_automation_smoke;
@@ -1023,6 +1027,11 @@ fn launch_login(app: tauri::AppHandle, platform: String) -> Result<String, Strin
 }
 
 fn add_cookie_args(app: &tauri::AppHandle, command: &mut Command, source_url: &str) -> Option<accounts::CookieLease> {
+    // The official yt-dlp EXE includes EJS, but needs a JS engine. Pin execution
+    // to our verified bundled Deno instead of relying on the user's PATH.
+    if let Some(deno) = resource_bin_dirs(app).into_iter().map(|dir| dir.join("deno.exe")).find(|path| path.is_file()) {
+        command.arg("--no-js-runtimes").arg("--js-runtimes").arg(format!("deno:{}", deno.display()));
+    }
     network::yt(command, source_url);
     // A per-command, per-platform snapshot avoids a locked browser DB breaking every platform.
     if let Some(cookie) = accounts::for_download(app, source_url) {

@@ -1,5 +1,19 @@
 version: 2
 updates:
+  - package-ecosystem: npm
+    directory: /project/video-parser/desktop
+    schedule:
+      interval: weekly
+    groups:
+      desktop-compatible:
+        update-types: [minor, patch]
+  - package-ecosystem: cargo
+    directory: /project/video-parser/desktop/src-tauri
+    schedule:
+      interval: weekly
+    groups:
+      native-compatible:
+        update-types: [minor, patch]
   - package-ecosystem: pip
     directory: /project/video-parser/backend
     schedule:

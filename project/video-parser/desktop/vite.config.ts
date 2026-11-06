@@ -10,8 +10,10 @@ export default defineConfig({
   },
   envPrefix: ['VITE_', 'TAURI_ENV_*'],
   build: {
-    target: ['es2021', 'chrome105', 'safari13'],
-    minify: 'esbuild',
+    // This installer targets Windows WebView2; Safari 13 cannot represent the
+    // BigInt operations required by the existing ONNX translation worker.
+    target: ['es2021', 'chrome105'],
+    minify: 'oxc',
     sourcemap: false,
   },
   worker: {

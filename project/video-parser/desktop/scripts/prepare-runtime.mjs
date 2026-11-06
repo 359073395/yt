@@ -43,7 +43,7 @@ function copyRuntime(source, requiredNames) {
 }
 
 try {
-  for (const [name, names] of [['ytDlp', ['yt-dlp.exe']], ['ffmpeg', ['ffmpeg.exe', 'ffprobe.exe']], ['whisper', ['whisper-cli.exe']]]) {
+  for (const [name, names] of [['ytDlp', ['yt-dlp.exe']], ['ffmpeg', ['ffmpeg.exe', 'ffprobe.exe']], ['whisper', ['whisper-cli.exe']], ['deno', ['deno.exe']]]) {
     const component = lock[name]
     const archive = join(cacheDir, `${component.sha256}-${basename(new URL(component.url).pathname)}`)
     console.log(`${name}: ${component.version} (${await downloadVerified(component.url, archive, component.sha256)})`)
@@ -59,15 +59,16 @@ try {
     ytDlp: execFileSync(join(stage, 'yt-dlp.exe'), ['--version'], { encoding: 'utf8' }).trim(),
     ffmpeg: execFileSync(join(stage, 'ffmpeg.exe'), ['-version'], { encoding: 'utf8' }).split(/\r?\n/)[0],
     whisper: execFileSync(join(stage, 'whisper-cli.exe'), ['--help'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(),
+    deno: execFileSync(join(stage, 'deno.exe'), ['--version'], { encoding: 'utf8' }).split(/\r?\n/)[0],
   }
-  if (probes.ytDlp !== lock.ytDlp.version || !probes.ffmpeg.includes(lock.ffmpeg.version)) throw new Error('Runtime version probe differs from lock')
+  if (probes.ytDlp !== lock.ytDlp.version || !probes.ffmpeg.includes(lock.ffmpeg.version) || !probes.deno.startsWith(`deno ${lock.deno.version} `)) throw new Error('Runtime version probe differs from lock')
   const manifest = { generatedAt: new Date().toISOString(), checkedAt: lock.checkedAt, components: {}, files: {} }
-  for (const name of ['ytDlp', 'ffmpeg', 'whisper']) manifest.components[name] = { ...lock[name], probe: probes[name] || 'CLI help exited successfully' }
+  for (const name of ['ytDlp', 'ffmpeg', 'whisper', 'deno']) manifest.components[name] = { ...lock[name], probe: probes[name] || 'CLI help exited successfully' }
   const fresh = readdirSync(stage).filter(name => statSync(join(stage, name)).isFile())
   // Only obsolete runtime binaries in this project's bin directory are removed.
   // User models, plugins and installed application data are untouched.
   for (const name of readdirSync(binDir)) {
-    if ((name.endsWith('.dll') || ['yt-dlp.exe', 'ffmpeg.exe', 'ffprobe.exe', 'whisper-cli.exe'].includes(name)) && !fresh.includes(name)) rmSync(join(binDir, name))
+    if ((name.endsWith('.dll') || ['yt-dlp.exe', 'ffmpeg.exe', 'ffprobe.exe', 'whisper-cli.exe', 'deno.exe'].includes(name)) && !fresh.includes(name)) rmSync(join(binDir, name))
   }
   for (const name of fresh) {
     copyFileSync(join(stage, name), join(binDir, name))
@@ -77,6 +78,8 @@ try {
   for (const path of files(stage).filter(path => !relative(licenseDir, path).startsWith('..'))) {
     const dest = join(binDir, relative(stage, path)); mkdirSync(dirname(dest), { recursive: true }); copyFileSync(path, dest)
   }
+  mkdirSync(join(binDir, 'licenses'), { recursive: true })
+  copyFileSync(join(root, 'scripts/licenses/deno-LICENSE.md'), join(binDir, 'licenses/deno-LICENSE.md'))
   writeFileSync(join(binDir, 'runtime-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
   console.log(`Verified ${fresh.length} runtime files; local models and account data untouched`)
 } finally {

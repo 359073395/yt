@@ -1,6 +1,6 @@
 [package]
 name = "yinglian-desktop"
-version = "1.10.2"
+version = "1.11.0"
 description = "轻量、非阻塞的本地视频与多语言文案下载工具"
 authors = ["359073395"]
 edition = "2021"
@@ -33,22 +33,27 @@ name = "tiktok-smoke"
 required-features = ["team-smoke"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7.4", features = [] }
+
+[[example]]
+name = "engine-smoke"
+required-features = ["team-smoke"]
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23.1"
 flate2 = "1"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls", "form"] }
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-single-instance = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-updater = { version = "2.14.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
+tauri = { version = "2.12.5", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2.5.5"
+tauri-plugin-dialog = "2.8.4"
+tauri-plugin-updater = { version = "2.14.1", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tiny_http = "0.12"
 url = "2"
-tungstenite = { version = "0.28", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }
 prost = "0.14"
 regex = "1"
 uuid = { version = "1", features = ["v4"] }

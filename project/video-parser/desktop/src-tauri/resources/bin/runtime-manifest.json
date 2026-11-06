@@ -1,20 +1,20 @@
 {
-  "generatedAt": "2026-10-16T04:07:47.721Z",
-  "checkedAt": "2026-10-16",
+  "generatedAt": "2026-11-06T04:35:57.609Z",
+  "checkedAt": "2026-11-06",
   "components": {
     "ytDlp": {
-      "version": "2026.08.19",
-      "source": "https://github.com/yt-dlp/yt-dlp/releases/tag/2026.08.19",
-      "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe",
-      "sha256": "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a",
-      "probe": "2026.08.19"
+      "version": "2026.10.26",
+      "source": "https://github.com/yt-dlp/yt-dlp/releases/tag/2026.10.26",
+      "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.26/yt-dlp.exe",
+      "sha256": "f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d",
+      "probe": "2026.10.26"
     },
     "ffmpeg": {
-      "version": "N-127564-g3c92f003c7",
-      "source": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-10-15-13-03",
-      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-15-13-03/ffmpeg-N-127564-g3c92f003c7-win64-lgpl-shared.zip",
-      "sha256": "845fdf0267526b32ac6d8310c3febf06f23df8cc2edfd3ed669a000c18b291d2",
-      "probe": "ffmpeg version N-127564-g3c92f003c7-20261015 Copyright (c) 2000-2026 the FFmpeg developers"
+      "version": "N-128433-gdb8537d8cc",
+      "source": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-11-05-12-48",
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-11-05-12-48/ffmpeg-N-128433-gdb8537d8cc-win64-lgpl-shared.zip",
+      "sha256": "29dc4e7da13bb6d4cbe85e3f0ee4a44c097d75145f4ee200b66080c0236f58b8",
+      "probe": "ffmpeg version N-128433-gdb8537d8cc-20261105 Copyright (c) 2000-2026 the FFmpeg developers"
     },
     "whisper": {
       "version": "1.9.5 (b5454)",
@@ -22,36 +22,47 @@
       "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
       "sha256": "6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb",
       "probe": "CLI help exited successfully"
+    },
+    "deno": {
+      "version": "2.9.8",
+      "source": "https://github.com/denoland/deno/releases/tag/v2.9.8",
+      "url": "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-pc-windows-msvc.zip",
+      "sha256": "cba84b26e0df5ae7f74fc66b86a95b866872a86292ebd84fa1e959927edd93bf",
+      "probe": "deno 2.9.8 (stable, release, x86_64-pc-windows-msvc)"
     }
   },
   "files": {
     "avcodec-63.dll": {
-      "bytes": 91924992,
-      "sha256": "89dfa23292a35ff3d0a4a2ad6116a74f97725a5a01da682784fdaec5bcfef3b9"
+      "bytes": 92814336,
+      "sha256": "ec8866e125c1b189f093cbeaea8756529d3e9669dc8881a7cb41336c6c3490d0"
     },
     "avdevice-63.dll": {
-      "bytes": 4948480,
-      "sha256": "281991ba443a83ed25ba407c6d08900ec90ff6116c3652ff9a14b97d90eb35b8"
+      "bytes": 5008384,
+      "sha256": "72dcf3aec246f49202e8169f27ed6dcfcf134023f479135fd58ede16bbbd1224"
     },
     "avfilter-12.dll": {
-      "bytes": 31670784,
-      "sha256": "2480f55ee62e655d5864998f164ff1cacb4d6d20f8b878f6a1ca354adde424db"
+      "bytes": 32121344,
+      "sha256": "93fd57c915a89380351a95672a893eaa4c7914c2a5c05c26f45df878b6aab2d7"
     },
     "avformat-63.dll": {
-      "bytes": 25730048,
-      "sha256": "3c5d5ab177dce1a9d86c13eeb76b5de21700aa06b310b035a9b1c47e59244582"
+      "bytes": 22871552,
+      "sha256": "4302d0c1c54a51d7a3e43b240d6a22b51a14a59474f3bbd2263943c007b5936a"
     },
     "avutil-61.dll": {
-      "bytes": 3038720,
-      "sha256": "685412c387be8471676392496356688826473dcab62deda60fabe2026c9a612f"
+      "bytes": 3052032,
+      "sha256": "5ace43bb1106b0d8114b68c0cac540b519b26c1a28e23d471fc3d54b33bcc99f"
+    },
+    "deno.exe": {
+      "bytes": 98081568,
+      "sha256": "924397800533d3eb0ed0c889b20ad70e18b970d93acd8135bc043f425e528266"
     },
     "ffmpeg.exe": {
-      "bytes": 561152,
-      "sha256": "abaada4f40accb628fc8fd08893f0e5f1cb61ad09c998d24352b7f4c80c671c5"
+      "bytes": 574464,
+      "sha256": "92b5b837fb86ad9b88562b2e5a9246b505bb77274202cdbaf98ca8e0811b954d"
     },
     "ffprobe.exe": {
-      "bytes": 236544,
-      "sha256": "30ee1e50dc23e9af805272d90e3e3f641a4a3a2ba538a671567c00e8e1bea444"
+      "bytes": 276480,
+      "sha256": "037ee7ad5890c6065a1f7ea89054f0505abee7ba4bee8dfae313877d47fcca91"
     },
     "ggml-base.dll": {
       "bytes": 693248,
@@ -98,12 +109,12 @@
       "sha256": "31fe18616d872af9b6134b47a6dff8072ae4ecbe5df0273f4f8dc36766c9db8e"
     },
     "swresample-7.dll": {
-      "bytes": 739840,
-      "sha256": "5177d7a256d7da279f5e262a8205aa57945da3c32c52358025bd4d51791cc16e"
+      "bytes": 751616,
+      "sha256": "38747749a93cd71fb389f2ba6aaba5f0bb04318f172a4372d0098a668120b10f"
     },
     "swscale-10.dll": {
-      "bytes": 2391552,
-      "sha256": "bd5cd6abd7a69e62eb0689689ea75a0143dd22378854a838285f9314a54e1160"
+      "bytes": 2422784,
+      "sha256": "c1da9dbc9bd73a1a7d0e57531d9477db6580b3c1cbd80e3ccf4b22578f1ea920"
     },
     "whisper-cli.exe": {
       "bytes": 479744,
@@ -114,8 +125,8 @@
       "sha256": "034396d75bb5720c1851674ff64a96192b58f6927b68d334ebd254ce6cad9674"
     },
     "yt-dlp.exe": {
-      "bytes": 17840399,
-      "sha256": "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"
+      "bytes": 23575744,
+      "sha256": "f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d"
     }
   }
 }

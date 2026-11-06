@@ -58,6 +58,7 @@ pub fn client(source: &str) -> reqwest::blocking::ClientBuilder {
     client_at(endpoint(source).as_deref())
 }
 pub fn client_at(endpoint: Option<&str>) -> reqwest::blocking::ClientBuilder {
+    initialize_tls_provider();
     let builder = reqwest::blocking::Client::builder().no_proxy();
     match endpoint.and_then(|url| reqwest::Proxy::all(url).ok()) { Some(proxy) => builder.proxy(proxy), None => builder }
 }
@@ -109,9 +110,16 @@ fn persist(root: &Path, value: &Config) -> Result<(), String> {
     file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|e| e.to_string())
 }
 pub fn init(app: &tauri::AppHandle) -> Result<(), String> {
+    initialize_tls_provider();
     let value = load(&app.path().app_local_data_dir().map_err(|e| e.to_string())?)?.0;
     *CONFIG.get_or_init(|| RwLock::new(Config::default())).write().map_err(|_| "网络配置忙")? = value;
     Ok(())
+}
+fn initialize_tls_provider() {
+    // Reqwest 0.13 enables AWS-LC while tungstenite also enables ring. Without
+    // an explicit process default, rustls' WebSocket builder panics at runtime.
+    static INITIALIZED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INITIALIZED.get_or_init(|| { let _ = rustls::crypto::aws_lc_rs::default_provider().install_default(); });
 }
 #[tauri::command]
 pub async fn network_settings() -> Result<Config, String> { Ok(config()) }
@@ -153,6 +161,13 @@ pub async fn test_network_proxy(request: Config) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn websocket_tls_builder_has_an_explicit_crypto_provider() {
+        initialize_tls_provider();
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        assert!(!config.crypto_provider().cipher_suites.is_empty());
+    }
     #[test] fn proxy_config_survives_restart_and_interrupted_write() {
         let root = std::env::temp_dir().join(format!("yinglian-network-test-{}", uuid::Uuid::new_v4()));
         let manual = Config { mode: "manual".into(), ..Config::default() };

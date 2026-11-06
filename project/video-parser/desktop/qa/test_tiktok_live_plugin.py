@@ -1,6 +1,6 @@
 """Offline regression suite for the bundled yt-dlp compatibility plugin.
 
-Run with a QA-only yt-dlp 2026.08.19 dependency on PYTHONPATH, not a global install.
+Run with the runtime-lock yt-dlp version in a QA-only environment, not a global install.
 """
 import importlib.util
 from pathlib import Path
