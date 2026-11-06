@@ -39,7 +39,7 @@ fn room_in(value: &Value, depth: usize) -> Option<&Value> {
     if value.get("stream_url").is_some() { return Some(value); }
     match value { Value::Object(map) => map.values().find_map(|v| room_in(v,depth+1)), Value::Array(items) => items.iter().find_map(|v| room_in(v,depth+1)), _ => None }
 }
-fn room_stream(room: &Value) -> Result<String, String> {
+pub(super) fn room_stream(room: &Value) -> Result<String, String> {
     if room.get("status").and_then(Value::as_u64) != Some(2) { return Err("直播间当前未开播".into()); }
     for field in ["flv_pull_url","hls_pull_url_map"] {
         if let Some(map) = room["stream_url"][field].as_object() {
@@ -53,9 +53,8 @@ fn room_stream(room: &Value) -> Result<String, String> {
     Err("直播间没有可用的公开音视频流；请确认账号权限或稍后重试".into())
 }
 fn media_url(raw: &str) -> bool { Url::parse(raw).map(|u| matches!(u.scheme(),"https"|"http") && u.host_str().is_some() && u.username().is_empty() && u.password().is_none()).unwrap_or(false) }
-fn stream_from_html(html: &str) -> Result<String, String> {
+fn room_from_html(html: &str) -> Result<Value, String> {
     let pattern = regex::Regex::new(r#"(?s)self\.__pace_f\.push\((.*?)\)\s*;?\s*</script>"#).map_err(|e| e.to_string())?;
-    let mut room_error = None;
     for captures in pattern.captures_iter(html) {
         let Ok(payload) = serde_json::from_str::<Value>(&captures[1]) else { continue; };
         let Some(raw) = payload.get(1).and_then(Value::as_str) else { continue; };
@@ -64,34 +63,38 @@ fn stream_from_html(html: &str) -> Result<String, String> {
         if chunk.is_empty() || !chunk.bytes().all(|b| b.is_ascii_hexdigit()) { continue; }
         if let Ok(data) = serde_json::from_str::<Value>(json) {
             if let Some(room) = room_in(&data,0) {
-                match room_stream(room) { Ok(stream) => return Ok(stream), Err(error) => room_error = Some(error) }
+                return Ok(room.clone());
             }
         }
     }
-    Err(room_error.unwrap_or_else(|| "抖音未返回公开直播流；请确认直播间已开播。受登录/风控限制的房间暂不能录制".into()))
+    Err("抖音未返回公开直播状态；可能受登录、网络或风控限制".into())
+}
+#[cfg(test)]
+fn stream_from_html(html: &str) -> Result<String, String> {
+    room_stream(&room_from_html(html)?)
 }
 fn get_text(client: &reqwest::blocking::Client, url: &str) -> Result<String,String> {
     let mut response = client.get(url).header(reqwest::header::USER_AGENT,BROWSER_USER_AGENT).header(reqwest::header::REFERER,"https://live.douyin.com/")
         .send().and_then(reqwest::blocking::Response::error_for_status).map_err(|_| "官方直播页面暂时不可访问；可能需要登录或受网络限制")?.take(8 * 1024 * 1024);
     let mut text = String::new(); response.read_to_string(&mut text).map_err(|_| "直播页面格式无效")?; Ok(text)
 }
-fn douyin_stream(url: &Url, stop: &AtomicBool, proxy: Option<&str>) -> Result<String,String> {
+pub(super) fn douyin_room(url: &Url, stop: &AtomicBool, proxy: Option<&str>) -> Result<Value,String> {
     let room_id = url.path().trim_matches('/');
     if room_id.is_empty() || !room_id.bytes().all(|b| b.is_ascii_digit()) { return Err("请粘贴 live.douyin.com 后带数字房间号的直播链接".into()); }
     let client = network::client_at(proxy).timeout(Duration::from_secs(12)).redirect(reqwest::redirect::Policy::limited(3)).build().map_err(|e| e.to_string())?;
     let api = format!("https://live.douyin.com/webcast/room/web/enter/?aid=6383&app_name=douyin_web&live_id=1&device_platform=web&language=zh-CN&enter_source=&is_need_double_stream=false&cookie_enabled=true&web_rid={room_id}");
     if let Ok(text) = get_text(&client,&api) {
         if let Ok(data) = serde_json::from_str::<Value>(&text) {
-            if let Some(room) = room_in(&data,0) { return room_stream(room); }
+            if let Some(room) = room_in(&data,0) { return Ok(room.clone()); }
         }
     }
     if stop.load(Ordering::Relaxed) { return Err("已取消连接".into()); }
     let html = get_text(&client,&format!("https://live.douyin.com/{room_id}"))?;
-    stream_from_html(&html)
+    room_from_html(&html)
 }
 fn resolve(app: &tauri::AppHandle, source: &str, stop: &AtomicBool, proxy: Option<&str>) -> Result<(String,String),String> {
     let url = Url::parse(source).map_err(|_| "直播链接无效")?;
-    if url.host_str() == Some("live.douyin.com") { return douyin_stream(&url,stop,proxy).map(|u| (u,"https://live.douyin.com/".into())); }
+    if url.host_str() == Some("live.douyin.com") { return room_stream(&douyin_room(&url,stop,proxy)?).map(|u| (u,"https://live.douyin.com/".into())); }
     let engine = find_tool(app,"yt-dlp.exe").ok_or("下载引擎尚未就绪")?;
     let mut command = Command::new(engine);
     // TikTok's HLS can contain untimestamped packets that Matroska cannot copy.
@@ -133,15 +136,22 @@ fn recorder_command(ffmpeg: &Path, stream: &str, referer: &str, output: &Path, p
     cmd.args(["-i",stream,"-map","0:v?","-map","0:a?","-c","copy","-avoid_negative_ts","make_zero","-f","segment","-segment_time","600","-reset_timestamps","1","-segment_format","matroska"])
         .arg(output.join("直播_%04d.mkv")).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()); cmd
 }
-pub fn record(app: &tauri::AppHandle, id: &str, request: &LiveRequest, output: &Path, stop: &AtomicBool) -> Result<(),String> {
+pub struct PreparedLive { pub stream: String, pub referer: String, pub proxy: Option<String> }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RecordBudget { pub seconds: u64, pub bytes: u64 }
+pub fn record(app: &tauri::AppHandle, id: &str, request: &LiveRequest, output: &Path, stop: &AtomicBool, prepared: Option<PreparedLive>, budget: Option<RecordBudget>) -> Result<(),String> {
     if !enough_space(output)? { return Err("保存盘剩余空间不足 512 MB，未开始录制".into()); }
-    let proxy = network::endpoint(&request.url);
-    let (stream,referer) = resolve(app,&request.url,stop,proxy.as_deref())?;
+    let (stream,referer,proxy) = if let Some(prepared) = prepared { (prepared.stream, prepared.referer, prepared.proxy) } else {
+        let proxy = network::endpoint(&request.url);
+        let (stream, referer) = resolve(app,&request.url,stop,proxy.as_deref())?;
+        (stream, referer, proxy)
+    };
     if stop.load(Ordering::Relaxed) { return Err("已取消连接".into()); }
     let ffmpeg = find_tool(app,"ffmpeg.exe").ok_or("FFmpeg 尚未就绪")?;
     let state = app.state::<AutomationState>();
     runtime_log(app, format!("live_start job={id} proxy={}", proxy.is_some()));
-    run_recorder(recorder_command(&ffmpeg,&stream,&referer,output,proxy.as_deref()),output,stop,Duration::from_secs(request.minutes*60),request.max_gb*1024*1024*1024, |status,detail,elapsed,bytes| {
+    let budget = budget.unwrap_or(RecordBudget { seconds: request.minutes*60, bytes: request.max_gb*1024*1024*1024 });
+    run_recorder(recorder_command(&ffmpeg,&stream,&referer,output,proxy.as_deref()),output,stop,Duration::from_secs(budget.seconds),budget.bytes, |status,detail,elapsed,bytes| {
         if matches!(status, "failed" | "partial" | "completed") { runtime_log(app, format!("live_end job={id} status={status} bytes={bytes} detail={}", safe_error(detail))); }
         state.update_record(id,status,detail,elapsed,bytes)
     })
@@ -176,7 +186,7 @@ fn run_recorder(mut command: Command, output: &Path, stop: &AtomicBool, duration
         if let Some(status) = child.0.try_wait().map_err(|e| e.to_string())? {
             let normal = status.success() && bytes > 0 && !stalled;
             let error = errors.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
-            let detail = if !reason.is_empty() { reason.clone() } else if normal { "直播结束，分段已保存".into() } else { failed_detail(&String::from_utf8_lossy(&error), bytes) };
+            let detail = if !reason.is_empty() && bytes == 0 { format!("{}；未生成录制文件（0 字节）",reason.replace("，已有分段保留","")) } else if !reason.is_empty() { reason.clone() } else if normal { "直播结束，分段已保存".into() } else { failed_detail(&String::from_utf8_lossy(&error), bytes) };
             return update(if normal { "completed" } else if bytes > 0 { "partial" } else { "failed" }, &detail,elapsed,bytes);
         }
         if stopping.is_none() {

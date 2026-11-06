@@ -13,11 +13,17 @@ export interface Delivery {
 export interface Recording {
   id: string; url: string; name: string; category: string; output_dir: string
   status: string; detail: string; created: number; elapsed: number; bytes: number
+  monitor_id: string; session_id: string
+}
+export interface LiveMonitor {
+  id: string; request: { url: string; name: string; root: string; category: string; minutes: number; max_gb: number }
+  interval_seconds: number; enabled: boolean; checking: boolean; last_checked: number; next_check: number
+  detail: string; recording_id: string
 }
 export interface AutomationSnapshot {
-  subscriptions: Subscription[]; deliveries: Delivery[]; recordings: Recording[]; error: string
+  subscriptions: Subscription[]; deliveries: Delivery[]; recordings: Recording[]; monitors: LiveMonitor[]; error: string
 }
-export const emptyAutomation: AutomationSnapshot = { subscriptions: [], deliveries: [], recordings: [], error: '' }
+export const emptyAutomation: AutomationSnapshot = { subscriptions: [], deliveries: [], recordings: [], monitors: [], error: '' }
 export const recordingActive = (status: string) => ['resolving', 'recording', 'stopping'].includes(status)
 export function mergeDeliveries(items: PendingItem[], deliveries: Delivery[], quality: string, dismissed: string[] = []): PendingItem[] {
   const known = new Set([...dismissed, ...items.map(item => item.automationId).filter(Boolean)])

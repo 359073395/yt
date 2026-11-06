@@ -23,6 +23,7 @@ mod team;
 mod library;
 mod automation;
 mod live;
+mod live_monitor;
 mod accounts;
 mod network;
 mod tiktok;
@@ -35,6 +36,8 @@ pub use engine_smoke::run as run_engine_smoke;
 pub use team::run_smoke as run_team_smoke;
 #[cfg(feature = "team-smoke")]
 pub use automation::run_smoke as run_automation_smoke;
+#[cfg(feature = "team-smoke")]
+pub use live_monitor::run_smoke as run_live_monitor_smoke;
 #[cfg(feature = "team-smoke")]
 pub use accounts::run_smoke as run_account_smoke;
 #[cfg(feature = "team-smoke")]
@@ -3444,6 +3447,8 @@ pub fn run() {
             automation::automation_ack,
             automation::live_start,
             automation::live_stop,
+            live_monitor::live_monitor_add,
+            live_monitor::live_monitor_action,
             library::library_load,
             library::library_save,
             library::read_bilingual,

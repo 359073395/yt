@@ -54,12 +54,24 @@ export function setupPreview() {
       }
       case 'live_start': {
         const request = args.request, id = crypto.randomUUID()
-        automation.recordings.unshift({ id, url: request.url, name: request.name || '模拟直播', category: request.category, output_dir: `${request.root}\\${request.category}\\直播\\模拟录制`, status: 'recording', detail: 'UI 模拟录制状态，没有创建真实视频文件', created: Math.floor(Date.now()/1000), elapsed: 12, bytes: 5 * 1024 * 1024 })
+        automation.recordings.unshift({ id, url: request.url, name: request.name || '模拟直播', category: request.category, output_dir: `${request.root}\\${request.category}\\直播\\模拟录制`, status: 'recording', detail: 'UI 模拟录制状态，没有创建真实视频文件', created: Math.floor(Date.now()/1000), elapsed: 12, bytes: 5 * 1024 * 1024, monitor_id: '', session_id: '' })
         return id
       }
       case 'live_stop': {
         const r = automation.recordings.find(r => r.id === args.id)
         if (r) { r.status = 'completed'; r.detail = 'UI 模拟已停止，无真实录制文件' }
+        return null
+      }
+      case 'live_monitor_add': {
+        automation.monitors.push({ id: crypto.randomUUID(), request: { ...args.request.recording, name: args.request.recording.name || '开播自动录制' }, interval_seconds: args.request.interval_seconds, enabled: true, checking: false, last_checked: 0, next_check: 0, detail: 'UI 模拟：等待开播，没有访问真实平台', recording_id: '' })
+        return null
+      }
+      case 'live_monitor_action': {
+        const monitor = automation.monitors.find(m => m.id === args.id)
+        if (!monitor) throw new Error('监控不存在')
+        if (args.action === 'toggle') monitor.enabled = !monitor.enabled
+        if (args.action === 'remove') automation.monitors = automation.monitors.filter(m => m.id !== args.id)
+        if (args.action === 'check') { monitor.last_checked = Math.floor(Date.now() / 1000); monitor.detail = 'UI 模拟：当前未开播，继续监控' }
         return null
       }
       case 'team_snapshot': return structuredClone(snapshot)

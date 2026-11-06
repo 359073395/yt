@@ -1,6 +1,8 @@
 param(
   [Parameter(Mandatory=$true)][string]$PreviousInstaller,
   [Parameter(Mandatory=$true)][string]$CandidateInstaller,
+  [Parameter(Mandatory=$true)][string]$PreviousVersion,
+  [Parameter(Mandatory=$true)][string]$CandidateVersion,
   [Parameter(Mandatory=$true)][string]$ReceiptPath,
   [Parameter(Mandatory=$true)][string]$SourceSha
 )
@@ -35,7 +37,7 @@ try {
   Install-Candidate $PreviousInstaller
   $main = Join-Path $installRoot 'paoliang-preview.exe'
   $receipt.previousVersion = (Get-Item -LiteralPath $main).VersionInfo.ProductVersion
-  if ($receipt.previousVersion -ne '1.10.2') { throw 'Previous installer version mismatch.' }
+  if ($receipt.previousVersion -ne $PreviousVersion) { throw 'Previous installer version mismatch.' }
   $models = Join-Path $env:RUNNER_TEMP 'yinglian-existing-models'
   $media = Join-Path $env:RUNNER_TEMP 'yinglian-existing-media'
   New-Item -ItemType Directory -Path $localRoot,$roamingRoot,$models,$media -Force | Out-Null
@@ -44,6 +46,7 @@ try {
     @{path=(Join-Path $roamingRoot 'library.1.json'); content='{"generation":9,"data":{"version":1,"categories":["升级迁移验收","嵌套/分类"],"items":[],"tasks":[],"dismissedDeliveries":[]}}'},
     @{path=(Join-Path $localRoot 'network.1.json'); content='{"generation":1,"config":{"mode":"direct","address":"http://127.0.0.1:10808","overseas_only":true}}'},
     @{path=(Join-Path $localRoot 'model-location.txt'); content=$models},
+    @{path=(Join-Path $roamingRoot 'automation.0.json'); content='{"version":1,"generation":4,"subscriptions":[],"deliveries":[],"recordings":[]}'},
     @{path=(Join-Path $models 'model-preservation-fixture.txt'); content='Synthetic model preservation marker; not an ASR model.'},
     @{path=(Join-Path $media 'media-preservation-fixture.txt'); content='Synthetic user media preservation marker; not a video.'}
   )
@@ -52,7 +55,7 @@ try {
   foreach ($fixture in $fixtures) { $before[$fixture.path]=(Get-FileHash -LiteralPath $fixture.path -Algorithm SHA256).Hash }
   Install-Candidate $CandidateInstaller
   $receipt.installedVersion=(Get-Item -LiteralPath $main).VersionInfo.ProductVersion
-  if ($receipt.installedVersion -ne '1.11.0') { throw 'Candidate installer did not upgrade the application.' }
+  if ($receipt.installedVersion -ne $CandidateVersion) { throw 'Candidate installer did not upgrade the application.' }
   foreach ($fixture in $fixtures) {
     if ((Get-FileHash -LiteralPath $fixture.path -Algorithm SHA256).Hash -ne $before[$fixture.path]) {
       throw "Existing data was changed: $([IO.Path]::GetFileName($fixture.path))"

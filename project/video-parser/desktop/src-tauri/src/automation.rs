@@ -19,21 +19,24 @@ pub struct Recording {
     pub id: String, pub url: String, pub name: String, pub category: String,
     pub output_dir: String, pub status: String, pub detail: String,
     pub created: u64, pub elapsed: u64, pub bytes: u64,
+    #[serde(default)] pub monitor_id: String,
+    #[serde(default)] pub session_id: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Journal {
     version: u32, generation: u64, pub subscriptions: Vec<Subscription>,
     pub deliveries: Vec<Delivery>, pub recordings: Vec<Recording>,
+    #[serde(default)] pub monitors: Vec<live_monitor::LiveMonitor>,
 }
 impl Default for Journal {
-    fn default() -> Self { Self { version: 1, generation: 0, subscriptions: vec![], deliveries: vec![], recordings: vec![] } }
+    fn default() -> Self { Self { version: 1, generation: 0, subscriptions: vec![], deliveries: vec![], recordings: vec![], monitors: vec![] } }
 }
 pub struct AutomationState {
     root: PathBuf, pub journal: Mutex<Journal>, pub error: Mutex<String>,
     pub stops: Mutex<HashMap<String, Arc<AtomicBool>>>, pub quitting: AtomicBool,
 }
 pub fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() }
-fn load(root: &Path) -> Result<Journal, String> {
+pub(super) fn load(root: &Path) -> Result<Journal, String> {
     let mut found = false;
     let mut valid = vec![];
     for slot in 0..2 {
@@ -87,10 +90,12 @@ pub fn start(app: &tauri::AppHandle) -> Result<(), String> {
     let root = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let (mut journal, error) = match load(&root) { Ok(j) => (j, String::new()), Err(e) => (Journal::default(), e) };
     for s in &mut journal.subscriptions { s.checking = false; }
+    live_monitor::recover(&mut journal);
     for r in &mut journal.recordings {
         if active_record(&r.status) { r.status = "interrupted".into(); r.detail = "上次录制中断；已写入的分段保留，请打开文件夹检查".into(); }
     }
     app.manage(AutomationState { root, journal: Mutex::new(journal), error: Mutex::new(error), stops: Mutex::new(HashMap::new()), quitting: AtomicBool::new(false) });
+    live_monitor::start(app);
     let app = app.clone();
     thread::spawn(move || {
         let state = app.state::<AutomationState>();
@@ -155,14 +160,14 @@ pub struct SubscriptionRequest {
     limit: usize, include_existing: bool, auto_download: bool,
 }
 #[derive(Serialize)]
-pub struct Snapshot { pub subscriptions: Vec<Subscription>, pub deliveries: Vec<Delivery>, pub recordings: Vec<Recording>, error: String }
+pub struct Snapshot { pub subscriptions: Vec<Subscription>, pub deliveries: Vec<Delivery>, pub recordings: Vec<Recording>, pub monitors: Vec<live_monitor::LiveMonitor>, error: String }
 #[tauri::command]
 pub fn automation_snapshot(state: State<AutomationState>) -> Snapshot {
     let error = state.error.lock().unwrap().clone();
     let j = state.journal.lock().unwrap();
     // Seen IDs are native-only; do not send large histories every poll.
     let subscriptions = j.subscriptions.iter().cloned().map(|mut s| { s.seen.clear(); s }).collect();
-    Snapshot { subscriptions, deliveries: j.deliveries.clone(), recordings: j.recordings.clone(), error }
+    Snapshot { subscriptions, deliveries: j.deliveries.clone(), recordings: j.recordings.clone(), monitors: j.monitors.clone(), error }
 }
 #[tauri::command]
 pub async fn subscription_add(app: tauri::AppHandle, request: SubscriptionRequest) -> Result<(), String> {
@@ -203,7 +208,7 @@ pub fn active_record(status: &str) -> bool { matches!(status, "resolving" | "rec
 pub fn enabled(app: &tauri::AppHandle) -> bool {
     let Some(state) = app.try_state::<AutomationState>() else { return false; };
     let j = state.journal.lock().unwrap();
-    j.subscriptions.iter().any(|s| s.enabled) || j.recordings.iter().any(|r| active_record(&r.status))
+    j.subscriptions.iter().any(|s| s.enabled) || j.monitors.iter().any(|m| m.enabled) || j.recordings.iter().any(|r| active_record(&r.status))
 }
 pub fn shutdown(app: &tauri::AppHandle) {
     let state = app.state::<AutomationState>();
@@ -212,11 +217,13 @@ pub fn shutdown(app: &tauri::AppHandle) {
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     while !state.stops.lock().unwrap().is_empty() && std::time::Instant::now() < deadline { thread::sleep(Duration::from_millis(100)); }
 }
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LiveRequest { pub url: String, pub name: String, pub root: String, pub category: String, pub minutes: u64, pub max_gb: u64 }
 #[tauri::command]
 pub async fn live_start(app: tauri::AppHandle, request: LiveRequest) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || live_start_sync(app, request, None)).await.map_err(|e| e.to_string())?
+}
+pub fn live_start_sync(app: tauri::AppHandle, request: LiveRequest, launch: Option<live_monitor::Launch>) -> Result<String, String> {
         let url = validate_url(&request.url)?;
         if !(1..=360).contains(&request.minutes) || !(1..=50).contains(&request.max_gb) { return Err("录制时长 1～360 分钟，容量上限 1～50 GB".into()); }
         if request.name.chars().count() > 80 { return Err("名称不超过 80 字".into()); }
@@ -233,32 +240,49 @@ pub async fn live_start(app: tauri::AppHandle, request: LiveRequest) -> Result<S
         let parent = fs::canonicalize(parent).map_err(|e| e.to_string())?;
         if !parent.starts_with(&root) { return Err("分类路径超出保存目录".into()); }
         let output = parent.join(format!("录制_{}_[{}]", now(), &id[..8]));
-        fs::create_dir(&output).map_err(|e| e.to_string())?;
-        state.edit(|j| {
+        let mut stops = state.stops.lock().unwrap();
+        let budget = state.edit(|j| {
+            if state.quitting.load(Ordering::Relaxed) { return Err("程序正在退出".into()); }
             if j.recordings.iter().filter(|r| active_record(&r.status)).count() >= 2 { return Err("最多同时录制 2 个直播间".into()); }
-            if j.recordings.iter().any(|r| active_record(&r.status) && r.url == url) { return Err("该直播间正在录制或连接".into()); }
-            j.recordings.insert(0, Recording { id: id.clone(), url, name: if request.name.trim().is_empty() { "直播录制".into() } else { request.name.clone() }, category: request.category.clone(), output_dir: visible_directory(&output), status: "resolving".into(), detail: "正在连接官方直播源，最多等待 60 秒…".into(), created: now(), elapsed: 0, bytes: 0 }); Ok(())
+            if j.recordings.iter().any(|r| active_record(&r.status) && live_monitor::same_source(&r.url, &url)) { return Err("该直播间正在录制或连接".into()); }
+            if let Some(ref launch) = launch { if j.recordings.iter().any(|r| active_record(&r.status) && r.session_id == launch.session_id) { return Err("同一场直播已由其他监控录制".into()); } }
+            let budget = if let Some(ref launch) = launch { Some(live_monitor::reserve(j, launch, &id)?) } else { None };
+            fs::create_dir(&output).map_err(|e| e.to_string())?;
+            j.recordings.insert(0, Recording { id: id.clone(), url, name: if request.name.trim().is_empty() { "直播录制".into() } else { request.name.clone() }, category: request.category.clone(), output_dir: visible_directory(&output), status: "resolving".into(), detail: "正在连接官方直播源，最多等待 60 秒…".into(), created: now(), elapsed: 0, bytes: 0, monitor_id: launch.as_ref().map(|l| l.monitor_id.clone()).unwrap_or_default(), session_id: launch.as_ref().map(|l| l.session_id.clone()).unwrap_or_default() }); Ok(budget)
         })?;
         let stop = Arc::new(AtomicBool::new(false));
-        state.stops.lock().unwrap().insert(id.clone(), stop.clone());
+        stops.insert(id.clone(), stop.clone());
+        drop(stops);
         let job_id = id.clone();
         thread::spawn(move || {
-            let result = live::record(&app, &job_id, &request, &output, &stop);
+            let mut request = request;
+            if let Some(ref launch) = launch { request.url = launch.playback_url.clone(); }
+            let prepared = launch.and_then(|l| l.prepared);
+            let result = live::record(&app, &job_id, &request, &output, &stop, prepared, budget);
             let state = app.state::<AutomationState>();
             if let Err(error) = result {
                 let bytes = live::folder_bytes(&output);
-                let _ = state.update_record(&job_id, if bytes > 0 { "partial" } else if stop.load(Ordering::Relaxed) { "cancelled" } else { "failed" }, &error, 0, bytes);
+                let elapsed = state.journal.lock().unwrap().recordings.iter().find(|r| r.id == job_id).map(|r| r.elapsed).unwrap_or(0);
+                let _ = state.update_record(&job_id, if bytes > 0 { "partial" } else if stop.load(Ordering::Relaxed) { "cancelled" } else { "failed" }, &error, elapsed, bytes);
+            }
+            if state.quitting.load(Ordering::Relaxed) {
+                let _ = state.edit(|j| {
+                    if let Some(r) = j.recordings.iter_mut().find(|r| r.id == job_id && !r.monitor_id.is_empty()) {
+                        r.status = "interrupted".into(); r.detail = "程序退出，已录分段保留；下次启动会恢复监控并检查本场剩余额度".into();
+                    } Ok(())
+                });
             }
             state.stops.lock().unwrap().remove(&job_id);
         });
         Ok(id)
-    }).await.map_err(|e| e.to_string())?
 }
 #[tauri::command]
 pub fn live_stop(state: State<AutomationState>, id: String) -> Result<(), String> {
-    let stop = state.stops.lock().unwrap().get(&id).cloned().ok_or("该录制已结束")?;
+    let stops = state.stops.lock().unwrap();
+    let stop = stops.get(&id).cloned().ok_or("该录制已结束")?;
+    let saved = state.edit(|j| { live_monitor::finish_current(j, &id); Ok(()) });
     stop.store(true, Ordering::Relaxed);
-    Ok(())
+    saved
 }
 
 #[cfg(test)]

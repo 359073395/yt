@@ -164,6 +164,27 @@ pub fn for_download(app: &tauri::AppHandle, source: &str) -> Option<CookieLease>
     fs::write(&temp.0, jar).ok()?;
     Some(temp)
 }
+// For fixed official monitor endpoints only; no plaintext transfer file or redirects.
+pub fn request_cookie(app: &tauri::AppHandle, source: &str) -> Option<String> {
+    let platform = platform_for_url(source)?;
+    let sessions = load(&root(app).ok()?).ok()?;
+    let jar = platform_jar(sessions.get(platform)?, platform, now())?;
+    cookie_for_url(&jar, &Url::parse(source).ok()?)
+}
+fn cookie_for_url(jar: &str, url: &Url) -> Option<String> {
+    let host = url.host_str()?;
+    let values: Vec<_> = jar.lines().filter_map(|row| {
+        let f: Vec<_> = row.split('\t').collect();
+        if f.len() != 7 { return None; }
+        let domain = f[0].trim_start_matches("#HttpOnly_").trim_start_matches('.');
+        let scope = if f[1] == "TRUE" { domain_matches(host, domain) } else { host == domain };
+        let path = url.path();
+        let path_matches = path == f[2] || (path.starts_with(f[2]) && (f[2].ends_with('/') || path[f[2].len()..].starts_with('/')));
+        if !scope || !path_matches || (f[3] == "TRUE" && url.scheme() != "https") || f[5].contains(['\r','\n',';']) || f[6].contains(['\r','\n',';']) { return None; }
+        Some(format!("{}={}", f[5], f[6]))
+    }).collect();
+    (!values.is_empty()).then(|| values.join("; "))
+}
 #[tauri::command]
 pub async fn account_statuses(app: tauri::AppHandle, refresh: Option<bool>) -> Result<Vec<AccountStatus>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -185,6 +206,13 @@ pub async fn account_statuses(app: tauri::AppHandle, refresh: Option<bool>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn monitor_cookie_header_obeys_host_path_and_secure_scope() {
+        let jar = ".douyin.com\tTRUE\t/\tTRUE\t0\tsessionid\tone\nwww.douyin.com\tFALSE\t/private\tTRUE\t0\tprivate\ttwo\nother.douyin.com\tFALSE\t/\tTRUE\t0\tother\tthree\n";
+        assert_eq!(cookie_for_url(jar,&Url::parse("https://www.douyin.com/aweme/").unwrap()).unwrap(),"sessionid=one");
+        assert!(cookie_for_url(jar,&Url::parse("http://www.douyin.com/").unwrap()).is_none());
+        assert!(cookie_for_url(jar,&Url::parse("https://www.douyin.com.evil.test/").unwrap()).is_none());
+        assert!(!cookie_for_url(jar,&Url::parse("https://www.douyin.com/private-other").unwrap()).unwrap().contains("private="));
+    }
     fn cookie(domain: &str, name: &str, expiry: u64) -> String { format!("{domain}\tTRUE\t/\tTRUE\t{expiry}\t{name}\tunit-value\n") }
     #[test] fn anonymous_cookie_is_not_login() { assert!(platform_jar(&cookie(".douyin.com", "ttwid", 0), "douyin", 10).is_none()); }
     #[test] fn sessions_are_platform_scoped() {

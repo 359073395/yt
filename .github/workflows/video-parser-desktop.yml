@@ -21,6 +21,10 @@ on:
         description: 'Exact source commit of that candidate'
         required: false
         default: ''
+      previous_version:
+        description: 'Previous signed application version for isolated upgrade testing'
+        required: false
+        default: '1.11.0'
 
 permissions:
   contents: write
@@ -145,23 +149,26 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_RUN: ${{ inputs.artifact_run_id }}
           SOURCE_SHA: ${{ inputs.artifact_source_sha }}
+          PREVIOUS_VERSION: ${{ inputs.previous_version }}
         run: |
           $ErrorActionPreference='Stop'
           if ($env:SOURCE_RUN -notmatch '^\d+$' -or $env:SOURCE_SHA -notmatch '^[0-9a-f]{40}$') { throw 'Invalid candidate identity' }
+          if ($env:PREVIOUS_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid previous version' }
           $run=gh run view $env:SOURCE_RUN --repo $env:GITHUB_REPOSITORY --json headSha,conclusion | ConvertFrom-Json
           if ($LASTEXITCODE -or $run.headSha -ne $env:SOURCE_SHA -or $run.conclusion -ne 'success') { throw 'Candidate source or build status mismatch' }
           $candidateDir=Join-Path $env:RUNNER_TEMP 'candidate'
           $previousDir=Join-Path $env:RUNNER_TEMP 'previous'
           gh run download $env:SOURCE_RUN --repo $env:GITHUB_REPOSITORY --name "yinglian-desktop-$($env:SOURCE_SHA)" --dir $candidateDir
           if ($LASTEXITCODE) { throw 'Candidate download failed' }
-          gh release download video-parser-desktop-v1.10.2 --repo $env:GITHUB_REPOSITORY --pattern 'Paoliang-YingLian_1.10.2_x64-setup.exe*' --dir $previousDir
+          gh release download "video-parser-desktop-v$env:PREVIOUS_VERSION" --repo $env:GITHUB_REPOSITORY --pattern "Paoliang-YingLian_$($env:PREVIOUS_VERSION)_x64-setup.exe*" --dir $previousDir
           if ($LASTEXITCODE) { throw 'Previous signed installer download failed' }
           $candidate=@(Get-ChildItem -LiteralPath $candidateDir -File -Filter '*.exe')
           if ($candidate.Count -ne 1) { throw 'Expected one candidate installer' }
-          $previous=Join-Path $previousDir 'Paoliang-YingLian_1.10.2_x64-setup.exe'
+          $previous=Join-Path $previousDir "Paoliang-YingLian_$($env:PREVIOUS_VERSION)_x64-setup.exe"
           node project/video-parser/desktop/scripts/verify-updater.mjs $previous ($previous+'.sig')
           if ($LASTEXITCODE) { throw 'Previous installer signature invalid' }
-          & project/video-parser/desktop/qa/verify-installer-upgrade.ps1 -PreviousInstaller $previous -CandidateInstaller $candidate[0].FullName -SourceSha $env:SOURCE_SHA -ReceiptPath (Join-Path $env:RUNNER_TEMP 'installer-upgrade-receipt.json')
+          $version=(Get-Content -Raw project/video-parser/desktop/package.json | ConvertFrom-Json).version
+          & project/video-parser/desktop/qa/verify-installer-upgrade.ps1 -PreviousInstaller $previous -CandidateInstaller $candidate[0].FullName -PreviousVersion $env:PREVIOUS_VERSION -CandidateVersion $version -SourceSha $env:SOURCE_SHA -ReceiptPath (Join-Path $env:RUNNER_TEMP 'installer-upgrade-receipt.json')
       - uses: actions/upload-artifact@v7.0.2
         if: always()
         with:
