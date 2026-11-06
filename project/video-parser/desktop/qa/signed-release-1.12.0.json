@@ -55,6 +55,15 @@
   "signedBuildRun": 42224661192,
   "legacyChannelUnchanged": true,
   "publicChannelVersion": "1.12.0",
-  "nativeUpdaterDownload": "in progress; actual native component has discovered public version 1.12.0",
+  "nativeUpdaterDownload": {
+    "status": "body-download-timeout",
+    "discoveredVersion": "1.12.0",
+    "timeoutSeconds": 900,
+    "proxy": "http://127.0.0.1:10808",
+    "error": "Reqwest Decode / Body / TimedOut",
+    "fullDownloadVerified": false,
+    "installationAttempted": false,
+    "alternative": "Use the locally downloaded, independently signed and upgrade-tested release installer."
+  },
   "localInstalledVersion": "1.11.0; no local installation performed"
 }
