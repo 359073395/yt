@@ -1,57 +1,65 @@
 {
-  "version": "1.10.2",
-  "scope": "tiktok-free-fallback-20261019",
-  "approval": "用户当前明确要求修复 TikTok 下载，先测试免费路线并接入备用解析；已批准测试通过后发布 1.10.2，用户自行一键更新，不直接覆盖本机。验收范围为本轮修复，非历史功能全量验收。",
+  "version": "1.11.0",
+  "scope": "all-implemented-features-20261106",
+  "approval": "用户要求全部更新、验证所有功能后发布升级包。本轮无缩小验收范围批准；未通过项目保持阻断。",
   "sourceTrees": {
     "src": "e7a57fd7ca0ac7bd7087b9d9dc965ed9c672874d",
-    "src-tauri/src": "656dd9f64de8befc15031adca133ce1da54e03af",
-    "src-tauri/tauri.conf.json": "0f6f7d2e83c4dbf968b8d652db30cbc6b498f533",
-    "package-lock.json": "b9f006c9ddb16d8a2aecd4460108f3b55a7d5fe3",
+    "src-tauri/src": "cc29b9e45b1a290226576b2c7ed8acd81f5615ef",
+    "src-tauri/tauri.conf.json": "6f280f320f07fe6001b56672d8afa9bc052055cf",
+    "package-lock.json": "b2480c92dd069d0e33f0e4684bcd9eaaae487eb4",
     "src-tauri/resources/bin/yt-dlp-plugins": "2b4128f8cb6cd01e7dcf21fd4702420b40e14ff6",
-    "package.json": "62a6fe859061c5f27f7cd9b6648909b128bef14e",
-    "src-tauri/Cargo.toml": "b4077461eacb6001b1339d1dd83e4840bd86476d",
-    "src-tauri/Cargo.lock": "f78d1b7dd1458a16533d05f6ed666d4a01561aea",
-    "scripts": "8a1f8e1e4d11c6a0d04e01ddfe952c70f9bb757c",
-    "src-tauri/examples/tiktok-smoke.rs": "fffb716e7c7ded0da4abf1f4cc010e51012fdde6",
-    "src-tauri/build.rs": "27275a96e84c62a27934a1004249fa0dd52ce240"
+    "package.json": "1e7d2f53ccb322738016eb2127ff34ee35db5a9b",
+    "src-tauri/Cargo.toml": "9f379044887442bbb2c355d540e0f286a3d54e9b",
+    "src-tauri/Cargo.lock": "c4bfe951cd9d6fb4a7886b3856e570690f10314e",
+    "scripts": "3e3605940876bee35c785ee344c7b463591e38b1",
+    "src-tauri/examples": "ba0eb4b30ce45102149f95324ad503525b98ad9e",
+    "src-tauri/build.rs": "27275a96e84c62a27934a1004249fa0dd52ce240",
+    "vite.config.ts": "22fb66e5f5fa94095b2ca177493094cf4ad69a3c"
   },
   "checks": {
-    "tiktok-target-download": {
+    "dependency-audit": {
       "status": "passed",
-      "evidence": "qa/release-1.10.2.md"
+      "evidence": "qa/release-1.11.0.md"
     },
-    "free-provider-failover": {
+    "runtime-integrity": {
       "status": "passed",
-      "evidence": "qa/release-1.10.2.md"
-    },
-    "public-provider-security": {
-      "status": "passed",
-      "evidence": "qa/release-1.10.2.md"
+      "evidence": "qa/release-1.11.0.md"
     },
     "automated-regressions": {
       "status": "passed",
-      "evidence": "qa/release-1.10.2.md"
+      "evidence": "qa/release-1.11.0.md"
     },
-    "upgrade-compatibility": {
+    "ui-workflows": {
       "status": "passed",
-      "evidence": "qa/release-1.10.2.md"
+      "evidence": "qa/release-1.11.0.md"
     },
-    "tiktok-ordinary-control-online": {
-      "status": "blocked_http_429",
-      "evidence": "qa/release-1.10.2.md"
+    "supported-platform-downloads": {
+      "status": "blocked_login_and_network",
+      "evidence": "qa/release-1.11.0.md"
     },
-    "tikwm-online": {
-      "status": "blocked_http_403",
-      "evidence": "qa/release-1.10.2.md"
+    "asr-and-translation": {
+      "status": "passed",
+      "evidence": "qa/release-1.11.0.md"
     },
-    "native-in-place-install": {
-      "status": "not_tested"
+    "personal-feishu-live": {
+      "status": "awaiting_user_test_message",
+      "evidence": "qa/release-1.11.0.md"
     },
-    "four-platform-live-network": {
-      "status": "not_tested"
+    "library-cancel-retry": {
+      "status": "passed",
+      "evidence": "qa/release-1.11.0.md"
     },
-    "cloud-api-translation": {
-      "status": "not_tested"
+    "subscriptions": {
+      "status": "passed",
+      "evidence": "qa/release-1.11.0.md"
+    },
+    "live-recording-replay": {
+      "status": "awaiting_active_live_room",
+      "evidence": "qa/release-1.11.0.md"
+    },
+    "native-installer-migration": {
+      "status": "pending_candidate_and_isolated_install_validation",
+      "evidence": "qa/release-1.11.0.md"
     }
   }
 }
