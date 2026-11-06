@@ -47,4 +47,7 @@
 .automation-record-detail p { margin-top: 0; white-space: pre-wrap; }
 .automation-record-actions { margin-top: auto; padding-top: 12px; }
 .automation-record-actions button { font-size: var(--text-small); }
+.automation-remove-confirm { flex-basis: 100%; padding: 12px; border: 1px solid #f3c5b4; border-radius: 8px; background: #fff5ef; }
+.automation-remove-confirm p { margin: 0 0 10px; }
+.automation-remove-confirm button + button { margin-left: 8px; }
 @media (max-width: 760px) { .automation-fields { grid-template-columns: 1fr; } .automation-path { flex-wrap: wrap; gap: 8px; } .automation-path .path-control { flex-basis: 100%; } }

@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { Radio } from 'lucide-react'
 import { recordingActive, type AutomationSnapshot } from './automation'
+import { ConfirmRemove } from './ConfirmRemove'
 
 const time = (seconds: number) => seconds ? new Date(seconds * 1000).toLocaleString() : '尚未检查'
 
@@ -25,9 +26,7 @@ export function LiveMonitors({ snapshot, busy, command }: {
           <div className="automation-record-actions">
             <button disabled={busy || !m.enabled || m.checking || recording} onClick={() => void command(m.id, () => invoke('live_monitor_action', { id: m.id, action: 'check' }), '已安排立即检查')}>立即检查</button>
             <button disabled={busy} onClick={() => void command(m.id, () => invoke('live_monitor_action', { id: m.id, action: 'toggle' }), m.enabled ? '监控已暂停，本次录制会停止并保留文件' : '已恢复监控')}>{m.enabled ? '暂停监控' : '恢复监控'}</button>
-            <button disabled={busy} onClick={() => {
-              if (window.confirm(`移除“${m.request.name}”开播监控？正在录制的任务会停止，已有文件和记录会保留。`)) void command(m.id, () => invoke('live_monitor_action', { id: m.id, action: 'remove' }), '监控已移除，已有文件保留')
-            }}>移除监控</button>
+            <ConfirmRemove disabled={busy} label="移除监控" message={`移除“${m.request.name}”开播监控？正在录制的任务会停止，已有文件和记录会保留。`} onConfirm={() => { void command(m.id, () => invoke('live_monitor_action', { id: m.id, action: 'remove' }), '监控已移除，已有文件保留') }} />
           </div>
         </article>
       })}
