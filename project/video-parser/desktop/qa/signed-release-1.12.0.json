@@ -1,0 +1,60 @@
+{
+  "version": "1.12.0",
+  "sourceCommit": "1435b4b783edb40de5faa6b335067950f1411b5b",
+  "release": {
+    "databaseId": 436537109,
+    "isDraft": false,
+    "isPrerelease": false,
+    "publishedAt": "2026-11-06T13:48:09Z",
+    "tagName": "video-parser-desktop-v1.12.0",
+    "url": "https://github.com/359073395/yt/releases/tag/video-parser-desktop-v1.12.0"
+  },
+  "installer": "Paoliang-YingLian_1.12.0_x64-setup.exe",
+  "signature": {
+    "verified": true,
+    "bytes": 114236127,
+    "sha256": "a395d3bb5c07a0a3f8be4685cd253041bd291591fc949dd16ab92e8ff9e31dce",
+    "alteredContentRejected": true
+  },
+  "package": {
+    "installer": "F:\\资料库\\03_项目与素材\\yinglian-personal-qa\\release-1.12.0\\release-complete\\Paoliang-YingLian_1.12.0_x64-setup.exe",
+    "bytes": 114236127,
+    "sha256": "a395d3bb5c07a0a3f8be4685cd253041bd291591fc949dd16ab92e8ff9e31dce",
+    "runtimeFilesVerified": 24,
+    "pluginsVerified": [
+      "yinglian_douyin.py",
+      "yinglian_tiktok_live.py"
+    ],
+    "personalStateIncluded": false,
+    "userModelsIncluded": false,
+    "matchesTestedRuntimeFiles": true,
+    "passed": true
+  },
+  "installerUpgrade": {
+    "run": 42226164373,
+    "receipt": {
+      "sourceCommit": "1435b4b783edb40de5faa6b335067950f1411b5b",
+      "candidateSha256": "a395d3bb5c07a0a3f8be4685cd253041bd291591fc949dd16ab92e8ff9e31dce",
+      "environment": "disposable GitHub-hosted Windows runner",
+      "previousVersion": "1.11.0",
+      "installedVersion": "1.12.0",
+      "preservedFiles": [
+        "library.0.json",
+        "library.1.json",
+        "network.1.json",
+        "model-location.txt",
+        "automation.0.json",
+        "model-preservation-fixture.txt",
+        "media-preservation-fixture.txt"
+      ],
+      "passed": true,
+      "installedRuntimeFilesVerified": 24,
+      "modelLocationPreserved": true
+    }
+  },
+  "signedBuildRun": 42224661192,
+  "legacyChannelUnchanged": true,
+  "publicChannelVersion": "1.12.0",
+  "nativeUpdaterDownload": "in progress; actual native component has discovered public version 1.12.0",
+  "localInstalledVersion": "1.11.0; no local installation performed"
+}

@@ -1,7 +1,7 @@
 {
   "version": "1.12.0",
   "sourceCommit": "6b7372aac93ecdbca0172c43dbcd90a5ed98ea99",
-  "status": "ready-for-signing",
+  "status": "released",
   "automated": {
     "frontend": 75,
     "native": 107,
@@ -200,7 +200,14 @@
     ],
     "testApp": "isolated org.yinglian.network-qa-33320, paused then closed"
   },
-  "publication": "not-published",
+  "publication": {
+    "databaseId": 436537109,
+    "isDraft": false,
+    "isPrerelease": false,
+    "publishedAt": "2026-11-06T13:48:09Z",
+    "tagName": "video-parser-desktop-v1.12.0",
+    "url": "https://github.com/359073395/yt/releases/tag/video-parser-desktop-v1.12.0"
+  },
   "installerMigration": {
     "run": 42224097025,
     "receipt": {
@@ -244,6 +251,22 @@
     "artifact": 13503544449,
     "archiveSha256": "b49426a7cbba9dffadbd56b806ad4eb50ef6048e6a089669c7574ef6bb1aa42d",
     "installerSha256": "de4cf5814ba1361a634a884727ec984fe731da6f54f28726272a36b8cbfcbf6c",
-    "conclusion": "success"
-  }
+    "conclusion": "success",
+    "localArchiveDigestVerified": true,
+    "localPackage": {
+      "installer": "F:\\资料库\\03_项目与素材\\yinglian-personal-qa\\release-1.12.0\\ci-candidate\\installer\\跑量影链工坊_1.12.0_x64-setup.exe",
+      "bytes": 114272845,
+      "sha256": "de4cf5814ba1361a634a884727ec984fe731da6f54f28726272a36b8cbfcbf6c",
+      "runtimeFilesVerified": 24,
+      "pluginsVerified": [
+        "yinglian_douyin.py",
+        "yinglian_tiktok_live.py"
+      ],
+      "personalStateIncluded": false,
+      "userModelsIncluded": false,
+      "matchesTestedRuntimeFiles": true,
+      "passed": true
+    }
+  },
+  "signedReleaseEvidence": "qa/signed-release-1.12.0.json"
 }
