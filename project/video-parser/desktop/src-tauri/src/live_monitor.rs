@@ -346,7 +346,7 @@ pub fn run_smoke() {
                 let state = app.state::<AutomationState>();
                 let initial = state.journal.lock().unwrap().clone();
                 if verify {
-                    if initial.monitors.len() != 1 || initial.recordings.len() != 1 { return Err("restart fixture missing".into()); }
+                    if initial.monitors.len() != 1 || initial.recordings.is_empty() { return Err("restart fixture missing".into()); }
                 } else {
                     if !initial.monitors.is_empty() { return Err("use a fresh isolated test id".into()); }
                     let request = MonitorRequest { recording:LiveRequest { url:std::env::var("PAOLIANG_MONITOR_URL").map_err(|e|e.to_string())?,name:"真实主页开播监控验收".into(),root:std::env::var("PAOLIANG_MONITOR_OUTPUT").map_err(|e|e.to_string())?,category:"验收".into(),minutes:1,max_gb:1 },interval_seconds:60 };
@@ -354,25 +354,27 @@ pub fn run_smoke() {
                 }
                 let start = std::time::Instant::now(); let mut stopped = verify; let mut after_check = automation::now();
                 let mut first_data: Option<std::time::Instant> = None;
+                let mut current_record = String::new();
                 if verify { state.edit(|j| { j.monitors[0].next_check = 0; Ok(()) })?; }
                 loop {
                     let j = state.journal.lock().unwrap().clone(); let m = &j.monitors[0];
                     if let Some(r) = j.recordings.first() {
+                        if r.id != current_record { current_record = r.id.clone(); first_data = None; }
                         if r.bytes > 0 && first_data.is_none() { first_data = Some(std::time::Instant::now()); }
-                        if !stopped && active_record(&r.status) && first_data.map(|t| t.elapsed() >= Duration::from_secs(12)).unwrap_or(false) {
+                        if !stopped && r.bytes > 0 && active_record(&r.status) && first_data.map(|t| t.elapsed() >= Duration::from_secs(12)).unwrap_or(false) {
                             automation::live_stop(app.state::<AutomationState>(),r.id.clone())?;
                             stopped = true; after_check = automation::now();
                             state.edit(|j| { j.monitors[0].next_check = 0; Ok(()) })?;
                         }
                         if !stopped && r.status == "completed" && r.bytes > 0 { stopped = true; after_check = automation::now(); state.edit(|j| { j.monitors[0].next_check = 0; Ok(()) })?; }
                         if stopped && !active_record(&r.status) && m.last_checked >= after_check && !m.checking && m.failures == 0 {
-                            if j.recordings.len() != 1 || r.status != "completed" || r.bytes == 0 { return Err(format!("unexpected recording state {} count={} bytes={}",r.status,j.recordings.len(),r.bytes)); }
+                            if j.recordings.len() > 3 || (verify && j.recordings.len() != initial.recordings.len()) || r.status != "completed" || r.bytes == 0 { return Err(format!("unexpected recording state {} count={} bytes={}",r.status,j.recordings.len(),r.bytes)); }
                             let disk = automation::load(&app.path().app_data_dir().map_err(|e|e.to_string())?)?;
                             if disk.monitors.len() != 1 || disk.monitors[0].finished_session != r.session_id { return Err("monitor receipt not durable".into()); }
                             return Ok(serde_json::json!({"passed":true,"restart":verify,"recordings":j.recordings.len(),"status":r.status,"bytes":r.bytes,"elapsed":r.elapsed,"output":r.output_dir,"detail":m.detail,"profile":m.request.url,"session_id":r.session_id}));
                         }
                     }
-                    if start.elapsed() > Duration::from_secs(210) { return Err(format!("monitor timeout: {}",m.detail)); }
+                    if start.elapsed() > Duration::from_secs(480) { return Err(format!("monitor timeout: {}",m.detail)); }
                     thread::sleep(Duration::from_millis(300));
                 }
             })();

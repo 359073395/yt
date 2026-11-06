@@ -113,7 +113,11 @@ fn resolve(app: &tauri::AppHandle, source: &str, stop: &AtomicBool, proxy: Optio
     Ok((stream.into(),referer))
 }
 pub fn folder_bytes(directory: &Path) -> u64 {
-    fs::read_dir(directory).into_iter().flatten().filter_map(Result::ok).filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum()
+    // Windows directory entries can report the old length until FFmpeg closes
+    // its handle. Query an opened file, or active writes look like a stalled stream.
+    fs::read_dir(directory).into_iter().flatten().filter_map(Result::ok)
+        .filter_map(|e| File::open(e.path()).ok()?.metadata().ok())
+        .filter(|m| m.is_file()).map(|m| m.len()).sum()
 }
 fn enough_space(directory: &Path) -> Result<bool,String> {
     #[cfg(target_os="windows")]
@@ -216,6 +220,15 @@ fn run_recorder(mut command: Command, output: &Path, stop: &AtomicBool, duration
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn counts_bytes_while_the_writer_handle_is_still_open() {
+        let root = std::env::temp_dir().join(format!("live-size-{}",uuid::Uuid::new_v4())); fs::create_dir(&root).unwrap();
+        let path = root.join("live.mkv"); let mut writer = File::create(&path).unwrap();
+        writer.write_all(&vec![0u8;128*1024]).unwrap(); writer.flush().unwrap();
+        assert_eq!(folder_bytes(&root),128*1024);
+        writer.write_all(&vec![0u8;128*1024]).unwrap(); writer.flush().unwrap();
+        assert_eq!(folder_bytes(&root),256*1024);
+        drop(writer); fs::remove_file(path).unwrap(); fs::remove_dir(root).unwrap();
+    }
     #[test] fn failure_preserves_cause_without_leaking_signed_urls() {
         let detail = failed_detail("[tls] Failed to read handshake response\nError -10054 https://cdn.example/live?token=secret\nCookie: secret", 0);
         assert!(detail.contains("TLS")); assert!(detail.contains("0 字节"));
