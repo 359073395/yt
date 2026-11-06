@@ -1,0 +1,73 @@
+{
+  "version": "1.12.0",
+  "verifiedAt": "2026-11-06T23:44:11+08:00",
+  "releaseSourceCommit": "1435b4b783edb40de5faa6b335067950f1411b5b",
+  "testedSourceMatchesReleasedSource": true,
+  "network": "User confirmed switching the local proxy node before this retest; proxy address remains http://127.0.0.1:10808",
+  "userProvidedProfile": {
+    "url": "https://www.tiktok.com/@user2285669540469",
+    "status": "offline",
+    "officialStatusCode": 0,
+    "officialLiveStatus": 4
+  },
+  "automaticRecording": {
+    "bytes": 4032336,
+    "detail": "本场已录制或手动停止，等待下一场",
+    "elapsed": 18,
+    "output": "F:\\820\\yinglian-personal-qa\\release-1.12.0\\network-retest-20261106-2340\\tiktok\\验收\\直播\\录制_1793979669_[55851df4]",
+    "passed": true,
+    "profile": "https://www.tiktok.com/@fadedeerfn/live",
+    "recordings": 1,
+    "restart": false,
+    "session_id": "7704947615745493791",
+    "status": "completed"
+  },
+  "restartDeduplication": {
+    "bytes": 4032336,
+    "detail": "本场已录制或手动停止，等待下一场",
+    "elapsed": 18,
+    "output": "F:\\820\\yinglian-personal-qa\\release-1.12.0\\network-retest-20261106-2340\\tiktok\\验收\\直播\\录制_1793979669_[55851df4]",
+    "passed": true,
+    "profile": "https://www.tiktok.com/@fadedeerfn/live",
+    "recordings": 1,
+    "restart": true,
+    "session_id": "7704947615745493791",
+    "status": "completed"
+  },
+  "media": {
+    "file": "F:\\资料库\\03_项目与素材\\yinglian-personal-qa\\release-1.12.0\\network-retest-20261106-2340\\tiktok\\验收\\直播\\录制_1793979669_[55851df4]\\直播_0000.mkv",
+    "bytes": 4032336,
+    "probe": {
+      "streams": [
+        {
+          "codec_name": "h264",
+          "codec_type": "video",
+          "width": 720,
+          "height": 1280
+        },
+        {
+          "codec_name": "aac",
+          "codec_type": "audio"
+        }
+      ],
+      "format": {
+        "duration": "17.167000"
+      }
+    },
+    "probeExit": 0,
+    "decodeExit": 0,
+    "decodeError": ""
+  },
+  "nativeUpdater": {
+    "status": "passed",
+    "discoveredVersion": "1.12.0",
+    "bytes": 114236127,
+    "seconds": 16.76,
+    "signatureVerified": true,
+    "byteIdenticalToIndependentlyVerifiedInstaller": true,
+    "progressAccounted": true,
+    "sha256": "a395d3bb5c07a0a3f8be4685cd253041bd291591fc949dd16ab92e8ff9e31dce",
+    "installationAttempted": false
+  },
+  "republishedInstaller": false
+}

@@ -56,14 +56,29 @@
   "legacyChannelUnchanged": true,
   "publicChannelVersion": "1.12.0",
   "nativeUpdaterDownload": {
-    "status": "body-download-timeout",
+    "status": "passed",
     "discoveredVersion": "1.12.0",
-    "timeoutSeconds": 900,
-    "proxy": "http://127.0.0.1:10808",
-    "error": "Reqwest Decode / Body / TimedOut",
-    "fullDownloadVerified": false,
+    "bytes": 114236127,
+    "seconds": 16.76,
+    "signatureVerified": true,
+    "byteIdenticalToIndependentlyVerifiedInstaller": true,
+    "progressAccounted": true,
+    "sha256": "a395d3bb5c07a0a3f8be4685cd253041bd291591fc949dd16ab92e8ff9e31dce",
     "installationAttempted": false,
-    "alternative": "Use the locally downloaded, independently signed and upgrade-tested release installer."
+    "verifiedAt": "2026-11-06T23:44:11+08:00",
+    "evidence": "qa/network-retest-1.12.0.json"
   },
-  "localInstalledVersion": "1.11.0; no local installation performed"
+  "localInstalledVersion": "1.11.0; no local installation performed",
+  "previousNativeUpdaterChecks": [
+    {
+      "status": "body-download-timeout",
+      "discoveredVersion": "1.12.0",
+      "timeoutSeconds": 900,
+      "proxy": "http://127.0.0.1:10808",
+      "error": "Reqwest Decode / Body / TimedOut",
+      "fullDownloadVerified": false,
+      "installationAttempted": false,
+      "alternative": "Use the locally downloaded, independently signed and upgrade-tested release installer."
+    }
+  ]
 }

@@ -268,5 +268,10 @@
       "passed": true
     }
   },
-  "signedReleaseEvidence": "qa/signed-release-1.12.0.json"
+  "signedReleaseEvidence": "qa/signed-release-1.12.0.json",
+  "networkRetest": {
+    "status": "passed",
+    "verifiedAt": "2026-11-06T23:44:11+08:00",
+    "evidence": "qa/network-retest-1.12.0.json"
+  }
 }
