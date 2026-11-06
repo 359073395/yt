@@ -1,0 +1,12 @@
+{
+  "messageCount": 1,
+  "jobCount": 1,
+  "stage": "completed",
+  "category": "升级验收",
+  "note": "1.11.0真实收件测试",
+  "videoBytes": 9135704,
+  "coverBytes": 22629,
+  "sentReceipts": 2,
+  "fullDecodeExit": 0,
+  "nativeRestartVerified": true
+}

@@ -1,10 +1,10 @@
 {
-  "sourceCommit": "03b5ee02b51f1309bc1f0f300711a02150339820",
-  "ciRun": "https://github.com/359073395/yt/actions/runs/42165217085",
-  "artifactSha256": "37ea336f855951468aa96868d275da7442cd5435fac9a7dd18c3bc1960f0b2ca",
+  "sourceCommit": "3e0ace7882cf02ebebb58b9b7a3fde3cd461f303",
+  "ciRun": "https://github.com/359073395/yt/actions/runs/42175116792",
+  "artifactSha256": "90e201cb699fe403037d2a5d2177ddef1c965e56ee9453d3c248263e6d2555d1",
   "installer": "Paoliang-YingLian_1.11.0_x64-candidate-setup.exe",
-  "installerBytes": 114216672,
-  "installerSha256": "38a6bde79fca2464d5184fab1a99bf121d11bc0ce1fff63337d1214870879adb",
+  "installerBytes": 114240861,
+  "installerSha256": "b476ee8546bc7ac09a9e4454a424c55ad21b807fc4621248f76fe26f366c04f3",
   "runtimeFilesChecked": [
     "avcodec-63.dll",
     "avdevice-63.dll",
@@ -42,5 +42,5 @@
   "denoMitLicense": true,
   "privateStateOrModelsBundled": false,
   "updaterSignature": "not generated; acceptance gate blocked",
-  "nativeInstallation": "not performed"
+  "nativeInstallation": "1.10.2 to 1.11.0 upgrade passed on disposable Windows runner; no production installation"
 }

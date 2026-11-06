@@ -1,0 +1,18 @@
+{
+  "sourceCommit": "3e0ace7882cf02ebebb58b9b7a3fde3cd461f303",
+  "candidateSha256": "b476ee8546bc7ac09a9e4454a424c55ad21b807fc4621248f76fe26f366c04f3",
+  "environment": "disposable GitHub-hosted Windows runner",
+  "previousVersion": "1.10.2",
+  "installedVersion": "1.11.0",
+  "preservedFiles": [
+    "library.0.json",
+    "library.1.json",
+    "network.1.json",
+    "model-location.txt",
+    "model-preservation-fixture.txt",
+    "media-preservation-fixture.txt"
+  ],
+  "passed": true,
+  "installedRuntimeFilesVerified": 24,
+  "modelLocationPreserved": true
+}
