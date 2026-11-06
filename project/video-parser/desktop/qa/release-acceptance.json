@@ -58,7 +58,7 @@
       "evidence": "qa/release-1.11.0.md"
     },
     "native-installer-migration": {
-      "status": "pending_candidate_and_isolated_install_validation",
+      "status": "candidate_contents_verified_installation_pending",
       "evidence": "qa/release-1.11.0.md"
     }
   }

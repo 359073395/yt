@@ -47,6 +47,10 @@ TikTokLive、Douyin downloader 是协议参考，不是随包安装的依赖。�
 
 两轮 Windows CI 均成功（42163648764、42165217085）；最终候选绑定源码 03b5ee02b51f1309bc1f0f300711a02150339820，包含更新器直连修复。最终构建见 https://github.com/359073395/yt/actions/runs/42165217085 。正式 Release 未创建，更新通道未切换，新包签名验收与安装迁移未完成。本机没有可用 Windows Sandbox，未用候选安装器覆盖正在使用的 1.10.2。源码保留原 identifier、主程序名、currentUser 模式、更新公钥、数据结构和更新地址。
 
+最终 CI 候选安装包已实际下载、解包核对。文件名 `Paoliang-YingLian_1.11.0_x64-candidate-setup.exe`，114,216,672 字节，SHA-256 `38a6bde79fca2464d5184fab1a99bf121d11bc0ce1fff63337d1214870879adb`。下载归档 SHA-256 与 GitHub artifact digest 一致。包内主程序 ProductVersion=1.11.0；24 个运行二进制逐项大小/哈希与本机实测清单完全一致；TikTok 插件源码一致，Deno MIT 许可存在；包内 yt-dlp、FFmpeg、Deno 实际启动探测版本通过。未发现用户状态、Cookie、API 配置或用户模型文件。详细公开回执见 `candidate-1.11.0.json`。
+
+这份文件是 CI 候选验收包：没有生成更新器 `.sig`，尚未安装迁移，不能投入正式自动更新。当前正式安装主程序仍为 1.10.2（12,302,336 字节）。
+
 每周依赖检查配置已写入维护分支；GitHub 定时工作流需合并到默认分支才会自动执行，目前不能声称周期巡检已经启用。
 
 私有原始日志、视频和翻译测试结果只在本机 `F:\资料库\03_项目与素材\yinglian-personal-qa\release-1.11.0`。用户配置、Cookie、凭据和模型不提交仓库、不随包发布。

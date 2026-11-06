@@ -1,0 +1,46 @@
+{
+  "sourceCommit": "03b5ee02b51f1309bc1f0f300711a02150339820",
+  "ciRun": "https://github.com/359073395/yt/actions/runs/42165217085",
+  "artifactSha256": "37ea336f855951468aa96868d275da7442cd5435fac9a7dd18c3bc1960f0b2ca",
+  "installer": "Paoliang-YingLian_1.11.0_x64-candidate-setup.exe",
+  "installerBytes": 114216672,
+  "installerSha256": "38a6bde79fca2464d5184fab1a99bf121d11bc0ce1fff63337d1214870879adb",
+  "runtimeFilesChecked": [
+    "avcodec-63.dll",
+    "avdevice-63.dll",
+    "avfilter-12.dll",
+    "avformat-63.dll",
+    "avutil-61.dll",
+    "deno.exe",
+    "ffmpeg.exe",
+    "ffprobe.exe",
+    "ggml-base.dll",
+    "ggml-cpu-alderlake.dll",
+    "ggml-cpu-cannonlake.dll",
+    "ggml-cpu-cascadelake.dll",
+    "ggml-cpu-haswell.dll",
+    "ggml-cpu-icelake.dll",
+    "ggml-cpu-sandybridge.dll",
+    "ggml-cpu-skylakex.dll",
+    "ggml-cpu-sse42.dll",
+    "ggml-cpu-x64.dll",
+    "ggml.dll",
+    "swresample-7.dll",
+    "swscale-10.dll",
+    "whisper-cli.exe",
+    "whisper.dll",
+    "yt-dlp.exe"
+  ],
+  "pluginsChecked": [
+    "yt-dlp-plugins/yinglian/yt_dlp_plugins/extractor/yinglian_tiktok_live.py"
+  ],
+  "runtimeVersionProbes": {
+    "yt-dlp.exe": "2026.10.26",
+    "ffmpeg.exe": "ffmpeg version N-128433-gdb8537d8cc-20261105 Copyright (c) 2000-2026 the FFmpeg developers",
+    "deno.exe": "deno 2.9.8 (stable, release, x86_64-pc-windows-msvc)"
+  },
+  "denoMitLicense": true,
+  "privateStateOrModelsBundled": false,
+  "updaterSignature": "not generated; acceptance gate blocked",
+  "nativeInstallation": "not performed"
+}
