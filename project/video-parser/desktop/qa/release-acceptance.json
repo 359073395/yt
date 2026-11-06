@@ -1,65 +1,45 @@
 {
-  "version": "1.11.0",
-  "scope": "all-implemented-features-20261106",
-  "approval": "用户要求全部更新、验证所有功能后发布升级包。本轮无缩小验收范围批准；未通过项目保持阻断。",
+  "version": "1.12.0",
+  "scope": "live-monitoring-20261106",
+  "approval": "用户在本次升级会话中要求增加主页开播监控；此前已授权验证后发布升级包。验收未完成前不发布正式升级包。",
   "sourceTrees": {
-    "src": "e7a57fd7ca0ac7bd7087b9d9dc965ed9c672874d",
-    "src-tauri/src": "cc29b9e45b1a290226576b2c7ed8acd81f5615ef",
-    "src-tauri/tauri.conf.json": "6f280f320f07fe6001b56672d8afa9bc052055cf",
-    "package-lock.json": "b2480c92dd069d0e33f0e4684bcd9eaaae487eb4",
+    "src": "9a359ba3b0dced0c95c239d083dbf3b649c76b2a",
+    "src-tauri/src": "46e3ab4593637efcba5f753aac859825830ee4f4",
+    "src-tauri/tauri.conf.json": "f0676efab9d216705117bdb1c803e428ba271c7b",
+    "package-lock.json": "bd774142197ca98f6563c9d8f957edb5971470a9",
     "src-tauri/resources/bin/yt-dlp-plugins": "2f9b98c8a564ed70144c409f2b406a879e453ad4",
-    "package.json": "1e7d2f53ccb322738016eb2127ff34ee35db5a9b",
-    "src-tauri/Cargo.toml": "9f379044887442bbb2c355d540e0f286a3d54e9b",
-    "src-tauri/Cargo.lock": "c4bfe951cd9d6fb4a7886b3856e570690f10314e",
-    "scripts": "3e3605940876bee35c785ee344c7b463591e38b1",
-    "src-tauri/examples": "ba0eb4b30ce45102149f95324ad503525b98ad9e",
+    "package.json": "5a758347fb38a1d5cd5648df676ea1b6ce7bbba4",
+    "src-tauri/Cargo.toml": "c6362e0db60c37b9619dbb528a1e876514775c68",
+    "src-tauri/Cargo.lock": "490575e22b633849f4bc714a19db8a8aae7a9f32",
+    "scripts": "ba788fac17a645be7920956e37dca0d51c218be1",
+    "src-tauri/examples": "a761522d288afc5ec691b230721d36aa0c853c5a",
     "src-tauri/build.rs": "27275a96e84c62a27934a1004249fa0dd52ce240",
     "vite.config.ts": "22fb66e5f5fa94095b2ca177493094cf4ad69a3c"
   },
   "checks": {
-    "dependency-audit": {
-      "status": "passed",
-      "evidence": "qa/release-1.11.0.md"
-    },
-    "runtime-integrity": {
-      "status": "passed",
-      "evidence": "qa/release-1.11.0.md"
-    },
     "automated-regressions": {
       "status": "passed",
-      "evidence": "qa/release-1.11.0.md"
+      "evidence": "qa/release-1.12.0.md"
+    },
+    "live-monitor-native": {
+      "status": "passed",
+      "evidence": "qa/release-1.12.0.md"
+    },
+    "live-monitor-state-recovery": {
+      "status": "passed",
+      "evidence": "qa/release-1.12.0.md"
     },
     "ui-workflows": {
       "status": "passed",
-      "evidence": "qa/release-1.11.0.md"
+      "evidence": "qa/release-1.12.0.md"
     },
-    "supported-platform-downloads": {
+    "live-manual-regression": {
       "status": "passed",
-      "evidence": "qa/release-1.11.0.md"
-    },
-    "asr-and-translation": {
-      "status": "passed",
-      "evidence": "qa/release-1.11.0.md"
-    },
-    "personal-feishu-live": {
-      "status": "passed",
-      "evidence": "qa/release-1.11.0.md"
-    },
-    "library-cancel-retry": {
-      "status": "passed",
-      "evidence": "qa/release-1.11.0.md"
-    },
-    "subscriptions": {
-      "status": "passed",
-      "evidence": "qa/release-1.11.0.md"
-    },
-    "live-recording-replay": {
-      "status": "passed",
-      "evidence": "qa/release-1.11.0.md"
+      "evidence": "qa/release-1.12.0.md"
     },
     "native-installer-migration": {
       "status": "passed",
-      "evidence": "qa/release-1.11.0.md"
+      "evidence": "qa/release-1.12.0.md"
     }
   }
 }

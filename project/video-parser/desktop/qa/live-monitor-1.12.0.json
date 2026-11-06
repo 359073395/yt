@@ -1,0 +1,249 @@
+{
+  "version": "1.12.0",
+  "sourceCommit": "6b7372aac93ecdbca0172c43dbcd90a5ed98ea99",
+  "status": "ready-for-signing",
+  "automated": {
+    "frontend": 75,
+    "native": 107,
+    "runtime": 4,
+    "tiktokPlugin": 13,
+    "douyinPlugin": 8,
+    "total": 207,
+    "ignored": "live Feishu registration is unchanged and not rerun"
+  },
+  "nativeChecks": {
+    "douyin-monitor-final": {
+      "bytes": 12199065,
+      "detail": "本场已录制或手动停止，等待下一场",
+      "elapsed": 14,
+      "output": "F:\\820\\yinglian-personal-qa\\release-1.12.0\\douyin-final\\验收\\直播\\录制_1793967744_[b0fb8017]",
+      "passed": true,
+      "profile": "https://www.douyin.com/user/MS4wLjABAAAAcud_llwUN1kpfpzeb3Xqbq8nsRwU7lxVzg3OSv31hNMPz95UspEw1L53dX-UDrE4",
+      "recordings": 1,
+      "restart": false,
+      "session_id": "7704814341794630435",
+      "status": "completed"
+    },
+    "douyin-restart-final": {
+      "bytes": 12199065,
+      "detail": "本场已录制或手动停止，等待下一场",
+      "elapsed": 14,
+      "output": "F:\\820\\yinglian-personal-qa\\release-1.12.0\\douyin-final\\验收\\直播\\录制_1793967744_[b0fb8017]",
+      "passed": true,
+      "profile": "https://www.douyin.com/user/MS4wLjABAAAAcud_llwUN1kpfpzeb3Xqbq8nsRwU7lxVzg3OSv31hNMPz95UspEw1L53dX-UDrE4",
+      "recordings": 1,
+      "restart": true,
+      "session_id": "7704814341794630435",
+      "status": "completed"
+    },
+    "tiktok-monitor-final": {
+      "bytes": 5151619,
+      "detail": "本场已录制或手动停止，等待下一场",
+      "elapsed": 24,
+      "output": "F:\\820\\yinglian-personal-qa\\release-1.12.0\\tiktok-final-g\\验收\\直播\\录制_1793970267_[9f310b94]",
+      "passed": true,
+      "profile": "https://www.tiktok.com/@fadedeerfn/live",
+      "recordings": 1,
+      "restart": false,
+      "session_id": "7704947615745493791",
+      "status": "completed"
+    },
+    "tiktok-restart-final": {
+      "bytes": 5151619,
+      "detail": "本场已录制或手动停止，等待下一场",
+      "elapsed": 24,
+      "output": "F:\\820\\yinglian-personal-qa\\release-1.12.0\\tiktok-final-g\\验收\\直播\\录制_1793970267_[9f310b94]",
+      "passed": true,
+      "profile": "https://www.tiktok.com/@fadedeerfn/live",
+      "recordings": 1,
+      "restart": true,
+      "session_id": "7704947615745493791",
+      "status": "completed"
+    }
+  },
+  "media": [
+    {
+      "case": "douyin-final",
+      "file": "F:\\资料库\\03_项目与素材\\yinglian-personal-qa\\release-1.12.0\\douyin-final\\验收\\直播\\录制_1793967744_[b0fb8017]\\直播_0000.mkv",
+      "size": 12199065,
+      "probe": {
+        "streams": [
+          {
+            "codec_name": "h264",
+            "codec_type": "video",
+            "width": 1080,
+            "height": 1920
+          },
+          {
+            "codec_name": "aac",
+            "codec_type": "audio"
+          }
+        ],
+        "format": {
+          "duration": "16.010000"
+        }
+      },
+      "probeExit": 0,
+      "decodeExit": 0,
+      "decodeError": ""
+    },
+    {
+      "case": "manual-live",
+      "file": "F:\\资料库\\03_项目与素材\\yinglian-personal-qa\\release-1.12.0\\manual-live\\验收\\直播\\录制_1793967124_[3c1218f6]\\直播_0000.mkv",
+      "size": 11124401,
+      "probe": {
+        "streams": [
+          {
+            "codec_name": "h264",
+            "codec_type": "video",
+            "width": 1080,
+            "height": 1920
+          },
+          {
+            "codec_name": "aac",
+            "codec_type": "audio"
+          }
+        ],
+        "format": {
+          "duration": "14.206000"
+        }
+      },
+      "probeExit": 0,
+      "decodeExit": 0,
+      "decodeError": "[null @ 000001c3fe2653c0] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 2 >= 2\n[null @ 000001c3fe2653c0] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 5 >= 5\n[null @ 000001c3fe2653c0] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 8 >= 8\n[null @ 000001c3fe2653c0] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 11 >= 11\n[null @ 000001c3fe2653c0] "
+    },
+    {
+      "case": "tiktok-final-g",
+      "file": "F:\\资料库\\03_项目与素材\\yinglian-personal-qa\\release-1.12.0\\tiktok-final-g\\验收\\直播\\录制_1793970267_[9f310b94]\\直播_0000.mkv",
+      "size": 5151619,
+      "probe": {
+        "streams": [
+          {
+            "codec_name": "h264",
+            "codec_type": "video",
+            "width": 720,
+            "height": 1280
+          },
+          {
+            "codec_name": "aac",
+            "codec_type": "audio"
+          }
+        ],
+        "format": {
+          "duration": "22.900000"
+        }
+      },
+      "probeExit": 0,
+      "decodeExit": 0,
+      "decodeError": ""
+    }
+  ],
+  "openWriterSize": {
+    "ffmpegExit": 0,
+    "errors": "",
+    "samples": [
+      {
+        "elapsed": 0,
+        "directoryBytes": 0,
+        "openHandleBytes": 0
+      },
+      {
+        "elapsed": 1,
+        "directoryBytes": 0,
+        "openHandleBytes": 0
+      },
+      {
+        "elapsed": 2,
+        "directoryBytes": 0,
+        "openHandleBytes": 0
+      },
+      {
+        "elapsed": 3,
+        "directoryBytes": 0,
+        "openHandleBytes": 0
+      },
+      {
+        "elapsed": 4,
+        "directoryBytes": 0,
+        "openHandleBytes": 262144
+      },
+      {
+        "elapsed": 5,
+        "directoryBytes": 262144,
+        "openHandleBytes": 262144
+      },
+      {
+        "elapsed": 6,
+        "directoryBytes": 262144,
+        "openHandleBytes": 262144
+      }
+    ],
+    "progressWhileOpen": true,
+    "staleDirectoryObserved": true
+  },
+  "tiktokFinal": {
+    "status": "passed",
+    "profile": "https://www.tiktok.com/@fadedeerfn/live",
+    "detail": "One native auto recording and restart check passed. The user supplied profile is currently offline and correctly stays waiting. Native source is unchanged from ec2afc3; final frontend confirmation fix is 6b7372a."
+  },
+  "ui": {
+    "nativeAdd": "passed",
+    "nativePause": "passed",
+    "nativeResume": "passed",
+    "nativeCheck": "passed",
+    "nativeRemoveConfirmation": "passed, monitor still present until confirmation",
+    "nativeCancelRemoval": "passed, same monitor remains disabled in durable journal",
+    "nativeRemovalBackend": "unit tests passed; final confirm button not exercised against real native data",
+    "screenshots": [
+      "monitor-native-confirm.jpg",
+      "monitor-native-ui.jpg"
+    ],
+    "testApp": "isolated org.yinglian.network-qa-33320, paused then closed"
+  },
+  "publication": "not-published",
+  "installerMigration": {
+    "run": 42224097025,
+    "receipt": {
+      "sourceCommit": "6b7372aac93ecdbca0172c43dbcd90a5ed98ea99",
+      "candidateSha256": "de4cf5814ba1361a634a884727ec984fe731da6f54f28726272a36b8cbfcbf6c",
+      "environment": "disposable GitHub-hosted Windows runner",
+      "previousVersion": "1.11.0",
+      "installedVersion": "1.12.0",
+      "preservedFiles": [
+        "library.0.json",
+        "library.1.json",
+        "network.1.json",
+        "model-location.txt",
+        "automation.0.json",
+        "model-preservation-fixture.txt",
+        "media-preservation-fixture.txt"
+      ],
+      "passed": true,
+      "installedRuntimeFilesVerified": 24,
+      "modelLocationPreserved": true
+    }
+  },
+  "candidate": {
+    "version": "1.12.0",
+    "sourceCommit": "6b7372aac93ecdbca0172c43dbcd90a5ed98ea99",
+    "installer": "F:\\资料库\\03_项目与素材\\yinglian-personal-qa\\release-1.12.0\\candidate-final\\Paoliang-YingLian_1.12.0_x64-candidate.exe",
+    "bytes": 114273337,
+    "sha256": "cb38059f2bc102813f7b9a0cb135ef9eea1cc469cb879f2579332f9373f5ee7c",
+    "runtimeFilesVerified": 24,
+    "pluginsVerified": [
+      "yinglian_douyin.py",
+      "yinglian_tiktok_live.py"
+    ],
+    "productVersion": "1.12.0",
+    "signedUpdater": false,
+    "installerMigration": "pending"
+  },
+  "candidateCiRun": 42222114962,
+  "candidateCi": {
+    "run": 42222114962,
+    "artifact": 13503544449,
+    "archiveSha256": "b49426a7cbba9dffadbd56b806ad4eb50ef6048e6a089669c7574ef6bb1aa42d",
+    "installerSha256": "de4cf5814ba1361a634a884727ec984fe731da6f54f28726272a36b8cbfcbf6c",
+    "conclusion": "success"
+  }
+}
