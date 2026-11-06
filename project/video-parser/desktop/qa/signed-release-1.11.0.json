@@ -1,0 +1,64 @@
+{
+  "sourceCommit": "8d4ce73109067bdb146e4744aaec1c2732ffbf30",
+  "ciRun": "https://github.com/359073395/yt/actions/runs/42183361465",
+  "signatureCheck": {
+    "verified": true,
+    "bytes": 114217645,
+    "sha256": "9c0521a7cb0e05f3132a95fb0b6495b8aa645503ff7ebcf071174379c5ab1d0e",
+    "alteredContentRejected": true
+  },
+  "installer": "Paoliang-YingLian_1.11.0_x64-setup.exe",
+  "installerBytes": 114217645,
+  "installerSha256": "9c0521a7cb0e05f3132a95fb0b6495b8aa645503ff7ebcf071174379c5ab1d0e",
+  "runtimeFilesChecked": [
+    "avcodec-63.dll",
+    "avdevice-63.dll",
+    "avfilter-12.dll",
+    "avformat-63.dll",
+    "avutil-61.dll",
+    "deno.exe",
+    "ffmpeg.exe",
+    "ffprobe.exe",
+    "ggml-base.dll",
+    "ggml-cpu-alderlake.dll",
+    "ggml-cpu-cannonlake.dll",
+    "ggml-cpu-cascadelake.dll",
+    "ggml-cpu-haswell.dll",
+    "ggml-cpu-icelake.dll",
+    "ggml-cpu-sandybridge.dll",
+    "ggml-cpu-skylakex.dll",
+    "ggml-cpu-sse42.dll",
+    "ggml-cpu-x64.dll",
+    "ggml.dll",
+    "swresample-7.dll",
+    "swscale-10.dll",
+    "whisper-cli.exe",
+    "whisper.dll",
+    "yt-dlp.exe"
+  ],
+  "pluginsChecked": [
+    "yt-dlp-plugins/yinglian/yt_dlp_plugins/extractor/yinglian_douyin.py",
+    "yt-dlp-plugins/yinglian/yt_dlp_plugins/extractor/yinglian_tiktok_live.py"
+  ],
+  "runtimeVersionProbes": {
+    "yt-dlp.exe": "2026.10.26",
+    "ffmpeg.exe": "ffmpeg version N-128433-gdb8537d8cc-20261105 Copyright (c) 2000-2026 the FFmpeg developers",
+    "deno.exe": "deno 2.9.8 (stable, release, x86_64-pc-windows-msvc)"
+  },
+  "denoMitLicense": true,
+  "privateStateOrModelsBundled": false,
+  "updaterSignature": "verified independently; altered content rejected",
+  "nativeInstallation": "Final signed 1.10.2 to 1.11.0 upgrade passed on disposable Windows; six files preserved and 24 installed runtimes verified.",
+  "installerUpgradeRun": "https://github.com/359073395/yt/actions/runs/42184897875",
+  "publishedAt": "2026-11-06T08:08:03Z",
+  "releaseUrl": "https://github.com/359073395/yt/releases/tag/video-parser-desktop-v1.11.0",
+  "publicUpdater": {
+    "version": "1.11.0",
+    "bytes": 114217645,
+    "seconds": 125.57,
+    "signatureVerified": true,
+    "byteEqualToVerifiedInstaller": true,
+    "progressAccounted": true,
+    "productionInstallationPerformed": false
+  }
+}
