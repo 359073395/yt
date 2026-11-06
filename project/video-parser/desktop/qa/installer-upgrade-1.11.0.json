@@ -1,6 +1,6 @@
 {
-  "sourceCommit": "3e0ace7882cf02ebebb58b9b7a3fde3cd461f303",
-  "candidateSha256": "b476ee8546bc7ac09a9e4454a424c55ad21b807fc4621248f76fe26f366c04f3",
+  "sourceCommit": "aa4b38988b155481edf6a70c734588f687cc0a0c",
+  "candidateSha256": "4e470df46d652955dbd865017f454f0f220af4a4cd478aff9deaef7348064fe9",
   "environment": "disposable GitHub-hosted Windows runner",
   "previousVersion": "1.10.2",
   "installedVersion": "1.11.0",

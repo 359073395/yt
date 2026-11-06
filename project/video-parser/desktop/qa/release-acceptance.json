@@ -7,7 +7,7 @@
     "src-tauri/src": "cc29b9e45b1a290226576b2c7ed8acd81f5615ef",
     "src-tauri/tauri.conf.json": "6f280f320f07fe6001b56672d8afa9bc052055cf",
     "package-lock.json": "b2480c92dd069d0e33f0e4684bcd9eaaae487eb4",
-    "src-tauri/resources/bin/yt-dlp-plugins": "e5204868eab3f67c7eb67f84eb15c91f7084ba11",
+    "src-tauri/resources/bin/yt-dlp-plugins": "2f9b98c8a564ed70144c409f2b406a879e453ad4",
     "package.json": "1e7d2f53ccb322738016eb2127ff34ee35db5a9b",
     "src-tauri/Cargo.toml": "9f379044887442bbb2c355d540e0f286a3d54e9b",
     "src-tauri/Cargo.lock": "c4bfe951cd9d6fb4a7886b3856e570690f10314e",
@@ -34,7 +34,7 @@
       "evidence": "qa/release-1.11.0.md"
     },
     "supported-platform-downloads": {
-      "status": "blocked_login_and_network",
+      "status": "passed",
       "evidence": "qa/release-1.11.0.md"
     },
     "asr-and-translation": {
@@ -54,7 +54,7 @@
       "evidence": "qa/release-1.11.0.md"
     },
     "live-recording-replay": {
-      "status": "parser_fixed_network_timeout",
+      "status": "passed",
       "evidence": "qa/release-1.11.0.md"
     },
     "native-installer-migration": {

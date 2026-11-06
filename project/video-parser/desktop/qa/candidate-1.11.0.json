@@ -1,10 +1,10 @@
 {
-  "sourceCommit": "3e0ace7882cf02ebebb58b9b7a3fde3cd461f303",
-  "ciRun": "https://github.com/359073395/yt/actions/runs/42175116792",
-  "artifactSha256": "90e201cb699fe403037d2a5d2177ddef1c965e56ee9453d3c248263e6d2555d1",
+  "sourceCommit": "aa4b38988b155481edf6a70c734588f687cc0a0c",
+  "ciRun": "https://github.com/359073395/yt/actions/runs/42181479965",
+  "artifactSha256": "e24245c1613f359974888793421203efe01b123abdbb1edd4c92c7c3d3fa0b93",
   "installer": "Paoliang-YingLian_1.11.0_x64-candidate-setup.exe",
-  "installerBytes": 114240861,
-  "installerSha256": "b476ee8546bc7ac09a9e4454a424c55ad21b807fc4621248f76fe26f366c04f3",
+  "installerBytes": 114229827,
+  "installerSha256": "4e470df46d652955dbd865017f454f0f220af4a4cd478aff9deaef7348064fe9",
   "runtimeFilesChecked": [
     "avcodec-63.dll",
     "avdevice-63.dll",
@@ -32,6 +32,7 @@
     "yt-dlp.exe"
   ],
   "pluginsChecked": [
+    "yt-dlp-plugins/yinglian/yt_dlp_plugins/extractor/yinglian_douyin.py",
     "yt-dlp-plugins/yinglian/yt_dlp_plugins/extractor/yinglian_tiktok_live.py"
   ],
   "runtimeVersionProbes": {
@@ -41,6 +42,6 @@
   },
   "denoMitLicense": true,
   "privateStateOrModelsBundled": false,
-  "updaterSignature": "not generated; acceptance gate blocked",
+  "updaterSignature": "not generated; candidate acceptance passed, signed build pending",
   "nativeInstallation": "1.10.2 to 1.11.0 upgrade passed on disposable Windows runner; no production installation"
 }

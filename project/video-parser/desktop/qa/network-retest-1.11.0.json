@@ -1,0 +1,18 @@
+{
+  "date": "2026-11-06",
+  "sourceCommit": "aa4b38988b155481edf6a70c734588f687cc0a0c",
+  "sessions": {"douyin": "detected", "youtube": "detected"},
+  "downloads": [
+    {"platform": "douyin", "videoId": "7683349871746983394", "bytes": 401292, "duration": 8.08, "cover": true, "fullDecodeExit": 0},
+    {"platform": "douyin", "videoId": "7620115787861618255", "bytes": 1388396, "duration": 9.009002, "cover": true, "fullDecodeExit": 0},
+    {"platform": "youtube", "videoId": "jNQXAC9IVRw", "bytes": 475990, "duration": 19.014, "cover": true, "fullDecodeExit": 0},
+    {"platform": "facebook", "videoId": "10155529876156509", "bytes": 7725292, "duration": 44.477417, "cover": true, "fullDecodeExit": 0},
+    {"platform": "twitter", "videoId": "717462543795523584", "bytes": 539284, "duration": 3.178667, "cover": true, "fullDecodeExit": 0}
+  ],
+  "liveRecordings": [
+    {"platform": "tiktok", "url": "https://www.tiktok.com/@user2285669540469/live", "status": "completed", "bytes": 2346062, "duration": 10.367, "video": "h264 1280x720", "audio": "aac", "fullDecodeExit": 0},
+    {"platform": "douyin", "url": "https://live.douyin.com/80017709309", "status": "completed", "bytes": 10550945, "duration": 13.717, "video": "h264 1080x1920", "audio": "aac", "fullDecodeExit": 0}
+  ],
+  "douyinRegression": {"originalExtractor": "fails on both logged-in samples", "compatibilityPlugin": "both samples downloaded and fully decoded", "offlineTestsPassed": 8},
+  "credentialsLoggedOrUploaded": false
+}
