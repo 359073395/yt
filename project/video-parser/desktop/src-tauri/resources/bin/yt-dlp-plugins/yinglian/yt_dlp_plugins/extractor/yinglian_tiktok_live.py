@@ -15,6 +15,14 @@ __all__ = []
 class _YingLianTikTokLiveIE(TikTokLiveIE, plugin_name='yinglian_flv_1'):
     _flv_room = None
 
+    def _get_sigi_state(self, webpage, display_id):
+        # Once the room ID is confirmed, upstream fetches the mobile HTML with
+        # fatal=False. A network failure returns False, not HTML; passing that
+        # sentinel into the upstream regex prevents the room API fallback.
+        if webpage is False or webpage is None:
+            return {}
+        return super()._get_sigi_state(webpage, display_id)
+
     def _real_extract(self, url):
         self._flv_room = None
         self._room_checked = False

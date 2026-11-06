@@ -98,6 +98,22 @@ class LivePluginTests(unittest.TestCase):
         upstream.assert_called_once_with(f'https://m.tiktok.com/share/live/{ROOM}/')
         self.assertIsNone(self.ie._flv_room)
 
+    def test_optional_mobile_page_failure_keeps_confirmed_room(self):
+        self.ie._download_json.side_effect = [
+            {'data': {'user': {'roomId': ROOM, 'uniqueId': 'rirismayani94'}}},
+            {'data': {'status': 2, 'title': 'Public live regression',
+                      'owner': {'display_id': 'rirismayani94'},
+                      'stream_url': {'flv_pull_url': {'HD1': 'https://cdn.example/live.flv'}}}},
+        ]
+        self.ie._download_webpage = Mock(return_value=False)
+        result = self.ie._real_extract(URL)
+        self.assertTrue(result['is_live'])
+        self.assertEqual(result['id'], ROOM)
+        self.assertEqual(result['uploader'], 'rirismayani94')
+        self.assertEqual(result['formats'][0]['url'], 'https://cdn.example/live.flv')
+        self.ie._download_webpage.assert_called_once_with(
+            f'https://m.tiktok.com/share/live/{ROOM}/', ROOM, fatal=False)
+
     def test_wrong_owner_never_redirects_to_a_different_room(self):
         self.ie._download_json.return_value = {'data': {'user': {'roomId': ROOM, 'uniqueId': 'someone_else'}}}
         with patch.object(TikTokLiveIE, '_real_extract', return_value={}) as upstream:
